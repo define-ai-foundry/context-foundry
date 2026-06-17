@@ -1,0 +1,16 @@
+{
+  "ignore": {
+    "customPatterns": [
+      "data/generated_input/**",
+      ".venv/**",
+      ".git/**",
+      "__pycache__/**",
+      "*.pyc",
+      "*.log",
+      "*.tif",
+      "*.tiff",
+      "*.asc",
+      "LICENSE"
+    ]
+  }
+}

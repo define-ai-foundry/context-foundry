@@ -1,0 +1,27 @@
+[
+  {
+    "timestamp": "2026-11-15T03:15:36.041197Z",
+    "nodeId": "FI-MIL-RAD-ONTTOLA-01",
+    "detectionReport": {
+      "objectId": "01GGYFBAXH4VYRQYEX7S3XGK3H",
+      "state": "Active",
+      "classification": [
+        {
+          "type": "UAV_Propeller_Kamikaze",
+          "confidence": 0.71
+        }
+      ],
+      "location": {
+        "x": 62.72006,
+        "y": 29.9297,
+        "z": 155.0
+      },
+      "object_info": [
+        {
+          "type": "estimatedSwarmCount",
+          "value": "10"
+        }
+      ]
+    }
+  }
+]

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "context-foundry"
+version = "0.1.0"
+description = "Tactical Edge Sensor Fusion and Contextual Augmentation Gateway"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "stonesoup",
+    "numpy",
+    "pydantic>=2.0.0",
+    "PyYAML>=6.0.1",
+    "grpcio-tools"
+]
+
+[project.scripts]
+# This exposes the command 'context-foundry-fusion' globally
+context-foundry-fusion = "context_foundry.cli:fusion_main"
+# Future companion system CLI:
+# context-foundry-sim = "context_foundry.cli:sim_main"

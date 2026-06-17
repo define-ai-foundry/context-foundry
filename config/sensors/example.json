@@ -1,0 +1,53 @@
+{
+  "version": "1.0",
+  "name": "Joensuu Blue Team Sensor Network",
+  "description": "Primary sensor deployment for the Joensuu test area",
+  "primary_anchor_node": "FI-MIL-RAD-KOLI-01",
+  "coordinate_system": "WGS84",
+  "sensors": [
+    {
+      "id": "FI-MIL-RAD-KOLI-01",
+      "type": "radar",
+      "subtype": "long_range_surveillance",
+      "lat": 62.95,
+      "lon": 29.8,
+      "alt": 250.0,
+      "range_m": 15000,
+      "update_rate_sec": 2.0,
+      "capabilities": ["position_3d", "velocity", "classification"],
+      "status": "operational",
+      "notes": "Primary anchor node - establishes ENU origin"
+    },
+    {
+      "id": "acoustic_array_01",
+      "type": "acoustic",
+      "subtype": "passive_ring_array",
+      "lat": 62.593,
+      "lon": 29.836,
+      "alt": 180.0,
+      "range_m": 8000,
+      "update_rate_sec": 5.0,
+      "capabilities": ["bearing_only"],
+      "status": "operational",
+      "notes": "Passive acoustic array - provides azimuth measurements"
+    },
+    {
+      "id": "eo_sensor_01",
+      "type": "electro_optical",
+      "subtype": "thermal_visible",
+      "lat": 62.601,
+      "lon": 29.763,
+      "alt": 195.0,
+      "range_m": 6000,
+      "update_rate_sec": 1.0,
+      "capabilities": ["position_3d", "classification"],
+      "status": "operational"
+    }
+  ],
+  "metadata": {
+    "deployment_date": "2026-06-01",
+    "operator": "FIN NIR LCI-X Crucible 2-26",
+    "theater": "Joensuu Test Range",
+    "default_max_coastal_seconds": 45.0
+  }
+}

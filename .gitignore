@@ -1,0 +1,82 @@
+# IDE / Editor settings
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# Python cache / build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+*.egg-info/
+dist/
+build/
+
+.python-version
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Environment variables / secrets
+.env
+*.key
+*.pem
+
+# Local configuration overrides
+config/local/
+
+# Generated data / outputs
+
+# Terrain downloaded from external sources
+data/terrain/*
+
+# Generated scenarios
+data/generated_output/*
+
+# Enhanced/generated tactical scenarios
+data/tactical_scenarios/*
+
+# Exported CSV outputs
+data/export_output/*
+
+!data/**/.gitkeep
+
+# Keep the sample scenario
+!config/scenarios/joensuu.json
+
+# Temporary files
+*.tmp
+*.bak
+*.log
+
+# Large binary/geospatial files
+*.asc
+*.kml
+*.tif
+*.tiff
+
+# OS generated files
+.DS_Store
+Thumbs.db
+.archive/
+
+# Jupyter / notebooks
+.ipynb_checkpoints/
+
+# Coverage reports
+.coverage
+htmlcov/
+
+# Repomix output
+repomix-output.*
