@@ -106,24 +106,95 @@ context-foundry-fusion --mode live --tak-ip 192.168.1.255 --tak-port 4242
 ## Repository Structure
 
 ```text
-fusion-engine/
-├── compile_protos.sh           # Utility script to re-compile SAPIENT schemas
-├── pyproject.toml              # Modern Python packaging configuration
-├── protos/                     # Vendored BSI Flex 335 source files
-├── data/
-│   └── examples/               # Generated test scenarios
-└── src/
-    └── context_foundry/
-        ├── cli.py              # Main execution interface
-        └── fusion/
-            ├── augmentor.py    # Converts 9D math to WGS84 Tactical State
-            ├── schemas.py      # BSI Flex 335 Pydantic validation rules
-            ├── serializers.py  # CoT and SAPIENT egress formatters
-            ├── tracker.py      # Stone Soup UKF/JPDA core logic
-            └── sources/        # Ingress Adapters
-                ├── json_file.py
-                ├── stream.py
-                └── sapient_msg/# Pre-compiled _pb2 Protobuf Python bindings
+context-foundry/
+├─ config/
+│  ├─ sensors/
+│  │  └─ example.json
+│  ├─ tracker_config.yaml
+│  └─ validator.py
+├─ data/
+│  ├─ examples/
+│  │  └─ sapient_messages.json
+│  └─ generated_input/
+│     └─ joensuu_messages.json
+├─ docs/
+│  └─ images/
+│     └─ winter_swarm_header.jpg
+├─ protos/
+│  ├─ cot/
+│  │  ├─ CoT Base-Event Schema  (PUBLIC RELEASE).xsd
+│  │  ├─ CoT Contact Schema (PUBLIC RELEASE).xsd
+│  │  ├─ CoT Flow-Tags Schema  (PUBLIC RELEASE).xsd
+│  │  ├─ CoT Image Schema  (PUBLIC RELEASE).xsd
+│  │  ├─ CoT Link Schema  (PUBLIC RELEASE).xsd
+│  │  ├─ CoT Remarks Schema  (PUBLIC RELEASE).xsd
+│  │  ├─ CoT Request Schema  (PUBLIC RELEASE).xsd
+│  │  ├─ CoT Sensor Schema  (PUBLIC RELEASE).xsd
+│  │  ├─ CoT Shape Schema  (PUBLIC RELEASE).xsd
+│  │  ├─ CoT Spatial Schema  (PUBLIC RELEASE).xsd
+│  │  ├─ CoT Track Schema  (PUBLIC RELEASE).xsd
+│  │  └─ CoT Uid Schema  (PUBLIC RELEASE).xsd
+│  └─ sapient_msg/
+│     ├─ bsi_flex_335_v2_0/
+│     │  ├─ alert_ack.proto
+│     │  ├─ alert.proto
+│     │  ├─ associated_detection.proto
+│     │  ├─ associated_file.proto
+│     │  ├─ detection_report.proto
+│     │  ├─ error.proto
+│     │  ├─ follow.proto
+│     │  ├─ location.proto
+│     │  ├─ range_bearing.proto
+│     │  ├─ registration_ack.proto
+│     │  ├─ registration.proto
+│     │  ├─ sapient_message.proto
+│     │  ├─ status_report.proto
+│     │  ├─ task_ack.proto
+│     │  ├─ task.proto
+│     │  └─ velocity.proto
+│     └─ proto_options.proto
+├─ src/
+│  ├─ context_foundry/
+│  │  ├─ fusion/
+│  │  │  ├─ sources/
+│  │  │  │  ├─ base.py
+│  │  │  │  ├─ cot_stream.py
+│  │  │  │  ├─ json_file.py
+│  │  │  │  └─ stream.py
+│  │  │  ├─ validators/
+│  │  │  │  ├─ base.py
+│  │  │  │  ├─ cot.py
+│  │  │  │  └─ sapient.py
+│  │  │  ├─ augmentor.py
+│  │  │  ├─ config.py
+│  │  │  ├─ models.py
+│  │  │  ├─ schemas.py
+│  │  │  ├─ serializers.py
+│  │  │  └─ tracker.py
+│  │  └─ cli.py
+│  ├─ context_foundry.egg-info/
+│  └─ sapient_msg/
+│     └─ bsi_flex_335_v2_0/
+│        ├─ alert_ack_pb2.py
+│        ├─ alert_pb2.py
+│        ├─ associated_detection_pb2.py
+│        ├─ associated_file_pb2.py
+│        ├─ detection_report_pb2.py
+│        ├─ error_pb2.py
+│        ├─ follow_pb2.py
+│        ├─ location_pb2.py
+│        ├─ range_bearing_pb2.py
+│        ├─ registration_ack_pb2.py
+│        ├─ registration_pb2.py
+│        ├─ sapient_message_pb2.py
+│        ├─ status_report_pb2.py
+│        ├─ task_ack_pb2.py
+│        ├─ task_pb2.py
+│        └─ velocity_pb2.py
+├─ compile_protos.sh
+├─ LICENSE
+├─ pyproject.toml
+└─ README.md
 ```
 
 ## Extending the Gateway

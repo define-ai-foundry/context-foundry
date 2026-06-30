@@ -5,17 +5,17 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from abc import ABC, abstractmethod
 
-from .schemas import TacticalState
+from .schemas import TacticalTrack
 
 class BaseSerializer(ABC):
     @abstractmethod
-    def serialize(self, state: TacticalState, node_id: str) -> str:
+    def serialize(self, state: TacticalTrack, node_id: str) -> str:
         pass
 
 class CotSerializer(BaseSerializer):
     """Formats tactical state for ATAK/WinTAK networks."""
     
-    def serialize(self, state: TacticalState, node_id: str = "FUSION-NODE") -> str:
+    def serialize(self, state: TacticalTrack, node_id: str = "FUSION-NODE") -> str:
         now = state.timestamp.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
         stale = datetime.fromtimestamp(state.timestamp.timestamp() + 15.0, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
         
@@ -44,7 +44,7 @@ class CotSerializer(BaseSerializer):
 class SapientSerializer(BaseSerializer):
     """Formats tactical state back into a SAPIENT BSI Flex 335 message."""
     
-    def serialize(self, state: TacticalState, node_id: str) -> str:
+    def serialize(self, state: TacticalTrack, node_id: str) -> str:
         # Construct the valid Pydantic model and output JSON
         from .schemas import SapientMessage, DetectionReport, SapientLocation, SapientClassification, TrackObjectInfo
         

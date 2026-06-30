@@ -1,71 +1,62 @@
 # Copyright 2026 Lempea Edge Oy / DEFINE AI Foundry
 # SPDX-License-Identifier: Apache-2.0
 
-from pydantic import BaseModel, Field, model_validator, RootModel
-from typing import Optional, List
+from pydantic import BaseModel, Field
 from datetime import datetime
+from typing import Optional, Dict, Any
 
-# --- SAPIENT Sub-Components ---
-class SapientLocation(BaseModel):
-    # Per BSI Flex 335: x is typically Latitude, y is Longitude
-    x: float
-    y: float
-    z: Optional[float] = 0.0
-
-class SapientClassification(BaseModel):
-    type: str
-    confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
-
-class TrackObjectInfo(BaseModel):
-    type: str
-    value: str
-
-# --- Payload Definitions ---
-class DetectionReport(BaseModel):
-    objectId: str = Field(default="UNKNOWN_OBJ")
-    state: Optional[str] = None
-    location: SapientLocation
-    classification: Optional[List[SapientClassification]] = []
-    object_info: Optional[List[TrackObjectInfo]] = []
-
-class StatusReport(BaseModel):
-    system: str
-    info: str
-
-# --- Top-Level Message Envelope ---
-class SapientMessage(BaseModel):
-    timestamp: datetime
-    nodeId: str
+class InternalDetection(BaseModel):
+    """
+    The universal, flattened detection format used internally by the Fusion Engine.
+    All Protocol Gateways MUST convert their specific formats to this model.
+    """
+    # Origin & Timing
+    sensor_id: str = Field(..., description="Unique identifier of the reporting sensor or node")
+    timestamp: datetime = Field(..., description="UTC Time of the detection")
     
-    # Payloads
-    detectionReport: Optional[DetectionReport] = None
-    statusReport: Optional[StatusReport] = None
+    # Kinematics / Spatial (Required for basic Stone Soup tracking)
+    latitude: float = Field(..., description="WGS84 Latitude in decimal degrees")
+    longitude: float = Field(..., description="WGS84 Longitude in decimal degrees")
+    altitude: Optional[float] = Field(None, description="Altitude in meters")
     
-    @model_validator(mode='after')
-    def verify_single_payload(self) -> 'SapientMessage':
-        payloads = [self.detectionReport, self.statusReport]
-        active = sum(1 for p in payloads if p is not None)
-        
-        if active == 0:
-            raise ValueError("Invalid Message: Missing a valid payload block.")
-        if active > 1:
-            raise ValueError("Invalid Message: Multiple payload blocks detected.")
-        return self
+    # Optional velocity vector (if provided by smart sensors)
+    speed_mps: Optional[float] = Field(None, description="Speed in meters per second")
+    heading_deg: Optional[float] = Field(None, description="Heading in degrees from True North")
+    
+    # Metadata & Uncertainty
+    classification: Optional[str] = Field(None, description="Object classification (e.g., 'UAS', 'Vehicle')")
+    confidence: Optional[float] = Field(None, ge=0.0, le=1.0, description="Detection confidence (0.0 to 1.0)")
+    
+    # Escape Hatch for protocol-specific data that serializers might need later
+    raw_metadata: Dict[str, Any] = Field(
+        default_factory=dict, 
+        description="Preserved protocol-specific data (e.g., original SAPIENT task ID)"
+    )
 
-# --- Stream Validator (For JSON Arrays) ---
-class SapientMessageStream(RootModel):
-    root: List[SapientMessage]
+    class Config:
+        # Ensures that any extra fields accidentally passed in are dropped, 
+        # keeping the internal state pristine.
+        extra = "ignore"
 
-# --- Internal Fused State Representation ---
-class TacticalState(BaseModel):
-    """The format-independent internal state of a fused track."""
-    track_id: str
-    timestamp: datetime
-    lat: float
-    lon: float
-    alt: float
-    speed_m_s: float
-    heading_deg: float
-    classification: str
-    swarm_count: int
-    threat_level: str
+class TacticalTrack(BaseModel):
+    """
+    Contextualized fused track representation.
+    Consumed by TAK/SAPIENT serializers.
+    """
+
+    track_id: str = Field(...)
+
+    timestamp: datetime = Field(...)
+
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    altitude: Optional[float] = None
+
+    velocity: Optional[list[float]] = None
+
+    threat_level: str = "unknown"
+
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    class Config:
+        extra = "ignore"

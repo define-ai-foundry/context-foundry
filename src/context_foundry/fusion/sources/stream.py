@@ -1,6 +1,8 @@
 # Copyright 2026 Lempea Edge Oy / DEFINE AI Foundry
 # SPDX-License-Identifier: Apache-2.0
 
+# src/context_foundry/fusion/sources/stream.py
+
 import socket
 import logging
 from datetime import datetime, timezone
@@ -9,18 +11,22 @@ import numpy as np
 from stonesoup.types.detection import Detection
 from stonesoup.models.measurement.linear import LinearGaussian
 
+from google.protobuf.json_format import MessageToDict
+from google.protobuf.message import DecodeError
+
 from .. import config
 from .base import SapientSource
 
-# Import the compiled Protobuf classes (from Step 1 of the Protobuf integration)
-from sapient_msg.bsi_flex_335_v2_0 import detection_report_pb2
+# Import the root SapientMessage wrapper and our Gatekeeper
+from sapient_msg.bsi_flex_335_v2_0.sapient_message_pb2 import SapientMessage
+from ..validators.sapient import SapientValidator
 
 logger = logging.getLogger(__name__)
 
 class NetworkSapientStream(SapientSource):
     """
     Live ingress adapter. Binds to a UDP network socket, listens for binary 
-    SAPIENT Protobuf packets, and streams them into the fusion engine in real-time.
+    SAPIENT Protobuf packets, and streams them into the fusion engine.
     """
 
     def __init__(self, ip: str = "0.0.0.0", port: int = 5000):
@@ -33,68 +39,58 @@ class NetworkSapientStream(SapientSource):
             noise_covar=np.diag([25.0, 25.0, 100.0])
         )
         
-        # Initialize the live UDP listener
+        self.validator = SapientValidator()
+        
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind((self.ip, self.port))
-        logger.info(f"Live SAPIENT Stream listening for ASMs on {self.ip}:{self.port}")
+        logger.info(f"Live SAPIENT Stream listening on UDP {self.ip}:{self.port}")
 
     def iter_events(self):
-        """
-        A blocking generator. Pauses the fusion loop until a packet arrives, 
-        then instantly yields it to the tracker.
-        """
         while True:
             try:
                 # 1. Block and wait for a network packet
                 payload_bytes, address = self.sock.recvfrom(4096)
                 
-                # 2. Fast Binary Deserialization
-                report = detection_report_pb2.DetectionReport()
-                report.ParseFromString(payload_bytes)
+                # 2. Parse binary bytes into the full Protobuf Envelope
+                msg = SapientMessage()
+                msg.ParseFromString(payload_bytes)
                 
-                # We only process messages that contain spatial data
-                if not report.HasField("location"):
-                    continue
-                    
-                # Extract strict types
-                lat = report.location.x
-                lon = report.location.y
-                alt = report.location.z if report.location.HasField("z") else 0.0
+                # 3. Convert to Dictionary to pass to our unified Gatekeeper
+                # preserving_proto_field_name ensures keys like 'node_id' map correctly
+                msg_dict = MessageToDict(msg, preserving_proto_field_name=False)
                 
-                # Project to local metric tracking frame
-                e, n, u = config.wgs84_to_enu(lat, lon, alt)
+                # Re-wrap in the root key to match JSON spec
+                raw_payload = {"sapientMessage": msg_dict}
                 
-                # Extract custom object info attributes safely
+                # 4. Pass through the Gatekeeper
+                clean_det = self.validator.process_message(raw_payload)
+                
+                if clean_det is None:
+                    continue  # Invalid message, Heartbeat, or Status update. Ignore it.
+
+                # 5. Build Stone Soup Object
+                alt = clean_det.altitude if clean_det.altitude is not None else 0.0
+                e, n, u = config.wgs84_to_enu(clean_det.latitude, clean_det.longitude, alt)
+                
+                # Same swarm extraction logic using raw_metadata
+                original_report = clean_det.raw_metadata.get("original_report", {})
                 swarm_count = 1
-                for info in report.object_info:
-                    if info.type == "estimatedSwarmCount":
-                        swarm_count = int(info.value)
-                        
-                primary_class = report.classification[0].type if report.classification else "Unknown"
+                for info in original_report.get("objectInfo", []):
+                    if info.get("type") == "estimatedSwarmCount":
+                        swarm_count = int(info.get("value", 1))
                 
-                # The Protobuf Timestamp -> Python Datetime
-                # If no timestamp is provided, stamp it with time-of-arrival
-                if report.HasField("timestamp"):
-                    timestamp = report.timestamp.ToDatetime().replace(tzinfo=timezone.utc)
-                else:
-                    timestamp = datetime.now(timezone.utc)
+                sensor_meta = config.get_sensor(clean_det.sensor_id)
                 
-                # Assuming node_id is part of the derived payload or envelope
-                node_id = getattr(report, "node_id", "UNKNOWN_NODE")
-                sensor_meta = config.get_sensor(node_id)
-                
-                # 3. Build the Stone Soup Object
                 detection = Detection(
-                    state_vector=np.array([[e], [n], [u]]),
+                    state_vector=np.array([[e], [n], u]),
                     measurement_model=self.cartesian_meas_model,
-                    timestamp=timestamp
+                    timestamp=clean_det.timestamp
                 )
                 
-                # Inject Metadata
                 detection.metadata = {
-                    "nodeId": node_id,
-                    "objectId": report.object_id,
-                    "classification": primary_class,
+                    "nodeId": clean_det.sensor_id,
+                    "objectId": original_report.get("objectId"),
+                    "classification": clean_det.classification or "Unknown",
                     "swarm_count": swarm_count,
                     "sensor_geodetic": {
                         "latitude": sensor_meta["lat"],
@@ -103,8 +99,10 @@ class NetworkSapientStream(SapientSource):
                     } if sensor_meta else None
                 }
                 
-                # Yield as a list to match the identical signature of JsonSapientSource
-                yield timestamp, [detection]
+                # Yield identical structure to JsonSapientSource
+                yield clean_det.timestamp, [detection]
                 
+            except DecodeError:
+                logger.warning("Received malformed binary Protobuf packet over UDP. Dropping.")
             except Exception as e:
-                logger.warning(f"Failed to parse incoming SAPIENT packet: {e}")
+                logger.error(f"Unexpected error in live stream ingestion: {e}")

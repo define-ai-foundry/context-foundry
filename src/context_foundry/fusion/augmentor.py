@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
-from .schemas import TacticalState
+from .schemas import TacticalTrack
 from . import config
 
 # WGS84 Ellipsoid Constants
@@ -57,10 +57,10 @@ class TacticalContextAugmentor:
         # 2. ECEF to WGS84
         return self.ecef_to_wgs84(x0 + dx, y0 + dy, z0 + dz)
 
-    def extract_tactical_state(self, track) -> TacticalState:
+    def extract_tactical_track(self, track) -> TacticalTrack:
         """
         Extracts position, absolute speed, and true heading from the 9D state 
-        vector and returns a standardized TacticalState data model.
+        vector and returns a standardized TacticalTrack data model.
         """
         state = track.latest_state
         vec = state.state_vector
@@ -87,7 +87,7 @@ class TacticalContextAugmentor:
         threat_level = "hostile" if (is_fast or is_swarm) else "suspect"
         
         # Return the universal state object for the serializers to consume
-        return TacticalState(
+        return TacticalTrack(
             track_id=track.id,
             timestamp=state.timestamp,
             lat=lat,

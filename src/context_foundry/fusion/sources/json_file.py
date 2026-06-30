@@ -9,84 +9,60 @@ from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
-
 from stonesoup.types.detection import Detection
 from stonesoup.models.measurement.linear import LinearGaussian
-from pydantic import ValidationError
 
 from .. import config
-from ..schemas import SapientMessageStream
 from .base import SapientSource
 
-logger = logging.getLogger(__name__)
+# Import the new Gatekeeper
+from ..validators.sapient import SapientValidator
 
+logger = logging.getLogger(__name__)
 
 class JsonSapientSource(SapientSource):
 
     def __init__(self, json_path: Path):
-
         self.json_path = Path(json_path)
-
         self.cartesian_meas_model = LinearGaussian(
             ndim_state=9,
             mapping=(0, 3, 6),
-            noise_covar=np.diag([
-                25.0,
-                25.0,
-                100.0
-            ])
+            noise_covar=np.diag([25.0, 25.0, 100.0])
         )
+        # Instantiate the Gatekeeper once
+        self.validator = SapientValidator()
 
     def iter_events(self):
-
         if not self.json_path.exists():
             raise FileNotFoundError(self.json_path)
 
-        # 1. Load the raw JSON file
+        # 1. Load the raw JSON array
         with open(self.json_path, "r", encoding="utf-8") as f:
             messages = json.load(f)
 
-        # 2. STRICT VALIDATION LAYER
-        # Validates against the BSI Flex 335 schema defined in schemas.py
-        try:
-            validated_stream = SapientMessageStream.model_validate(messages)
-        except ValidationError as e:
-            logger.error(f"CRITICAL: Generated JSON failed SAPIENT schema validation!\n{e}")
-            raise
+        valid_detections = []
 
-        sensor_frames = defaultdict(list)
+        # 2. STRICT VALIDATION LAYER (The Gatekeeper)
+        for raw_dict in messages:
+            clean_det = self.validator.process_message(raw_dict)
+            if clean_det is not None:
+                valid_detections.append(clean_det)
 
         # 3. GROUP ASYNCHRONOUS FRAMES
-        for packet in validated_stream.root:
-            # We only forward detection reports to the tracking engine
-            if not packet.detectionReport:
-                continue
+        # We group valid InternalDetection objects by timestamp and sensor
+        sensor_frames = defaultdict(list)
+        for det in valid_detections:
+            sensor_frames[(det.timestamp, det.sensor_id)].append(det)
 
-            # Group simultaneous observations from the same sensor node
-            # Note: Pydantic automatically converts packet.timestamp to a datetime object
-            sensor_frames[(packet.timestamp, packet.nodeId)].append(packet)
-
-        # 4. YIELD STONE SOUP DETECTIONS
+        # 4. TRANSLATE TO STONE SOUP DETECTIONS
         for (timestamp, node_id), reports in sensor_frames.items():
-
             detections = []
-            
-            # Look up sensor baseline coordinates to inject into non-linear measurement models
             sensor_meta = config.get_sensor(node_id)
 
-            for packet in reports:
-                
-                # Utilize dot-notation access thanks to Pydantic
-                report = packet.detectionReport
-                loc = report.location
-                
-                # BSI Flex 335 spatial mappings
-                lat = loc.x
-                lon = loc.y
-                alt = loc.z if loc.z is not None else 0.0
-
-                # Project to local metric Cartesian tracking frame
-                e, n, u = config.wgs84_to_enu(lat, lon, alt)
+            for det in reports:
+                # Project WGS84 Geodetic to local metric Cartesian tracking frame
+                alt = det.altitude if det.altitude is not None else 0.0
+                e, n, u = config.wgs84_to_enu(det.latitude, det.longitude, alt)
 
                 detection = Detection(
                     state_vector=np.array([[e], [n], [u]]),
@@ -94,23 +70,22 @@ class JsonSapientSource(SapientSource):
                     timestamp=timestamp
                 )
 
-                # Safe classification extraction
-                primary_class = "Unknown"
-                if report.classification:
-                    primary_class = report.classification[0].type
-
-                # Dynamic extraction of swarm attributes from object_info
+                # Extract protocol-specific metadata saved by the validator
+                # This allows us to access obscure fields without cluttering the universal schema
+                original_report = det.raw_metadata.get("original_report", {})
+                
+                # Dynamic extraction of swarm attributes (from the preserved original report)
                 swarm_count = 1
-                if report.object_info:
-                    for info in report.object_info:
-                        if info.type == "estimatedSwarmCount":
-                            swarm_count = int(info.value)
+                object_info_list = original_report.get("objectInfo", [])
+                for info in object_info_list:
+                    if info.get("type") == "estimatedSwarmCount":
+                        swarm_count = int(info.get("value", 1))
 
                 # Bind complete contextual payload to Stone Soup observation
                 detection.metadata = {
                     "nodeId": node_id,
-                    "objectId": report.objectId,
-                    "classification": primary_class,
+                    "objectId": original_report.get("objectId"),
+                    "classification": det.classification or "Unknown",
                     "swarm_count": swarm_count,
                     "sensor_geodetic": {
                         "latitude": sensor_meta["lat"],
