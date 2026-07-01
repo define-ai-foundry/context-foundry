@@ -3,7 +3,8 @@
 
 from typing import Dict, Any, Tuple
 import logging
-from datetime import datetime
+from datetime import timezone
+import math
 
 from google.protobuf.json_format import ParseDict, ParseError
 
@@ -11,29 +12,25 @@ from google.protobuf.json_format import ParseDict, ParseError
 from sapient_msg.bsi_flex_335_v2_0.sapient_message_pb2 import SapientMessage
 from context_foundry.fusion.schemas import InternalDetection
 from context_foundry.fusion.validators.base import ProtocolValidator
+from context_foundry.fusion import config
 
 logger = logging.getLogger(__name__)
 
 class SapientValidator(ProtocolValidator):
     def validate(self, raw_payload: Dict[str, Any]) -> Tuple[bool, str]:
-        # 1. Catch the outer JSON wrapper expected from your stream
         if "sapientMessage" not in raw_payload:
             return False, "Missing 'sapientMessage' root dictionary key."
 
         try:
-            # 2. Parse the ENTIRE message at once. 
-            # If a timestamp is malformed, a field is missing, or a type is wrong,
-            # ParseDict will instantly throw a ParseError here.
             msg = SapientMessage()
             ParseDict(raw_payload["sapientMessage"], msg, ignore_unknown_fields=False)
             
-            # 3. We only want to track Detections, ignore registrations/status reports
-            if not msg.HasField("detectionReport"):
-                return False, "Valid SAPIENT message, but not a DetectionReport."
+            # Check the 'oneof' field instead of checking for the message type directly
+            if msg.WhichOneof("content") != "detection_report":
+                return False, f"Valid SAPIENT message, but content is {msg.WhichOneof('content')} (expected detection_report)."
 
-            # 4. Ensure spatial data exists for Stone Soup
-            if not msg.detectionReport.HasField("location"):
-                 return False, "DetectionReport missing required location block."
+            if not msg.detection_report.HasField("location_oneof"):
+                return False, "DetectionReport missing required location_oneof block."
 
             return True, ""
             
@@ -41,28 +38,47 @@ class SapientValidator(ProtocolValidator):
             return False, f"Protobuf schema violation: {e}"
 
     def normalize(self, raw_payload: Dict[str, Any]) -> InternalDetection:
-        # Re-parse (this is lightning fast in memory)
-        msg = SapientMessage()
-        ParseDict(raw_payload["sapientMessage"], msg)
+            msg = SapientMessage()
+            ParseDict(raw_payload["sapientMessage"], msg)
+            report = msg.detection_report
+            dt = msg.timestamp.ToDatetime().replace(tzinfo=timezone.utc)
 
-        # Look how clean this is! Full dot-notation, zero dictionary `.get()` lookups.
-        report = msg.detectionReport
-        
-        # Parse UTC Timestamp
-        ts_str = msg.header.timestamp.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(ts_str)
+            lat, lon, alt = None, None, None
+            
+            # 1. Prioritize Cartesian 'location'
+            if report.HasField("location"):
+                lat = report.location.y
+                lon = report.location.x
+                alt = report.location.z if report.location.HasField("z") else None
 
-        return InternalDetection(
-            sensor_id=str(msg.header.sourceNode.nodeId),
-            timestamp=dt,
-            latitude=report.location.latitude,
-            longitude=report.location.longitude,
-            
-            altitude=report.location.altitude if report.location.HasField("altitude") else None,
-            speed_mps=report.kinematics.speed if report.HasField("kinematics") and report.kinematics.HasField("speed") else None,
-            heading_deg=report.kinematics.heading if report.HasField("kinematics") and report.kinematics.HasField("heading") else None,
-            classification=str(report.objectClass.classType) if report.HasField("objectClass") else None,
-            confidence=report.confidence if report.HasField("confidence") else None,
-            
-            raw_metadata={"original_envelope": raw_payload} 
-        )
+            # 2. Use 'azimuth' for polar coordinates
+            elif report.HasField("range_bearing"):
+                rng = report.range_bearing.range
+                # Corrected: Accessing 'azimuth' instead of 'bearing'
+                az = math.radians(report.range_bearing.azimuth)
+                
+                # Calculate offsets in meters (East, North)
+                e_offset = rng * math.sin(az)
+                n_offset = rng * math.cos(az)
+                
+                # Use the global stateful origin
+                lat, lon, alt = config.enu_to_wgs84(e_offset, n_offset, 0.0)
+                
+            else:
+                raise ValueError("Detection missing both 'location' and 'range_bearing' fields.")
+
+            # --- Classification and Return ---
+            primary_class = report.classification[0].type if len(report.classification) > 0 else "Unknown"
+
+            return InternalDetection(
+                sensor_id=msg.node_id, 
+                timestamp=dt,
+                latitude=lat,
+                longitude=lon,
+                altitude=alt,
+                speed_mps=None,
+                heading_deg=None,
+                classification=primary_class,
+                confidence=report.detection_confidence if report.HasField("detection_confidence") else None,
+                raw_metadata={"original_envelope": raw_payload} 
+            )

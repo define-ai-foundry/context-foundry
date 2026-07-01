@@ -6,6 +6,7 @@
 import numpy as np
 from stonesoup.types.state import GaussianState
 from stonesoup.types.track import Track
+from stonesoup.types.array import StateVector
 from stonesoup.predictor.kalman import UnscentedKalmanPredictor
 from stonesoup.updater.kalman import UnscentedKalmanUpdater
 from stonesoup.hypothesiser.probability import PDAHypothesiser
@@ -59,7 +60,7 @@ class SapientAsynchronousTracker:
             
             if not joint_hypothesis:
                 # Track fell outside validation gates; coast forward using kinematics prediction
-                prediction = self.predictor.predict(track.latest_state, timestamp=timestamp)
+                prediction = self.predictor.predict(track.state, timestamp=timestamp)
                 track.append(prediction)
             else:
                 # High-Fidelity Step: Extract the measurement model embedded inside the SAPIENT detection
@@ -96,7 +97,7 @@ class SapientAsynchronousTracker:
         e, n, u = detection.state_vector[0, 0], detection.state_vector[1, 0], detection.state_vector[2, 0]
         
         # Position states initialized with measurement data; speed/acceleration set to zero
-        state_vector = [e, 0.0, 0.0, n, 0.0, 0.0, u, 0.0, 0.0]
+        state_vector = StateVector([e, 0.0, 0.0, n, 0.0, 0.0, u, 0.0, 0.0])
         
         # Build initial diagonal covariance block matrix
         covar = np.diag([
@@ -107,7 +108,7 @@ class SapientAsynchronousTracker:
         
         prior = GaussianState(
             state_vector=state_vector,
-            covariance=covar,
+            covar=covar,
             timestamp=detection.timestamp
         )
         self.tracks.add(Track([prior]))
@@ -116,7 +117,7 @@ class SapientAsynchronousTracker:
         """Purges tracks that haven't received physical sensor updates within the timeout window."""
         active_set = set()
         for track in self.tracks:
-            elapsed = (current_time - track.latest_state.timestamp).total_seconds()
+            elapsed = (current_time - track.state.timestamp).total_seconds()
             if elapsed <= max_coastal_seconds:
                 active_set.add(track)
         self.tracks = active_set

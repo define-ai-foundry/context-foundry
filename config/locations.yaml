@@ -1,0 +1,9 @@
+locations:
+  joensuu:
+    lat: 62.6010
+    lon: 29.7630
+    alt: 80.0
+  nurmijarvi:
+    lat: 60.4633
+    lon: 24.8100
+    alt: 50.0

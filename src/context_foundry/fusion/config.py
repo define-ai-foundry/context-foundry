@@ -20,6 +20,9 @@ import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
+import pymap3d as pm
+import yaml
+import os
 
 # Global sensor registry: node_id -> sensor metadata
 SENSOR_REGISTRY: Dict[str, Dict[str, Any]] = {}
@@ -182,3 +185,52 @@ def load_blue_sensor_network(
         sensor_network_list=sensor_network_list,
         primary_anchor_node=primary_anchor_node
     )
+
+# Internal state variables for the dynamic origin
+_origin_lat = None
+_origin_lon = None
+_origin_alt = None
+
+def set_reference_origin(lat: float, lon: float, alt: float) -> None:
+    """
+    Explicitly set the reference origin.
+    Call this if your data contains a sensor Registration message with its exact location.
+    """
+    global _origin_lat, _origin_lon, _origin_alt
+    _origin_lat = lat
+    _origin_lon = lon
+    _origin_alt = alt
+
+def wgs84_to_enu(lat: float, lon: float, alt: float) -> tuple[float, float, float]:
+    """
+    Converts WGS84 coordinates to local East, North, Up vectors.
+    Auto-initializes the origin to the first received coordinate if not explicitly set.
+    """
+    global _origin_lat, _origin_lon, _origin_alt
+    
+    # Auto-initialize origin from the very first data point if it is currently empty
+    if _origin_lat is None:
+        _origin_lat = lat
+        _origin_lon = lon
+        _origin_alt = alt
+        
+    e, n, u = pm.geodetic2enu(lat, lon, alt, _origin_lat, _origin_lon, _origin_alt)
+    return e, n, u
+
+def enu_to_wgs84(e: float, n: float, u: float) -> tuple[float, float, float]:
+    """
+    Converts local East, North, Up vectors back to WGS84 global coordinates.
+    """
+    global _origin_lat, _origin_lon, _origin_alt
+    
+    # --- ADD THIS SYNC LOGIC ---
+    # If the dynamic origin isn't set, try to grab it from the initialized Registry
+    if _origin_lat is None and ENU_ORIGIN_LAT is not None:
+        set_reference_origin(ENU_ORIGIN_LAT, ENU_ORIGIN_LON, ENU_ORIGIN_ALT)
+    # ---------------------------
+    
+    if _origin_lat is None:
+        raise ValueError("Reference origin was never set. Cannot convert ENU back to WGS84.")
+        
+    lat, lon, alt = pm.enu2geodetic(e, n, u, _origin_lat, _origin_lon, _origin_alt)
+    return lat, lon, alt

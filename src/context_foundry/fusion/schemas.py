@@ -45,17 +45,20 @@ class TacticalTrack(BaseModel):
     """
 
     track_id: str = Field(...)
-
     timestamp: datetime = Field(...)
 
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     altitude: Optional[float] = None
 
-    velocity: Optional[list[float]] = None
-
+    # Added fields to resolve the AttributeError
+    speed_mps: Optional[float] = None
+    heading_deg: Optional[float] = None
+    classification: Optional[str] = None
+    swarm_count: int = 1
     threat_level: str = "unknown"
 
+    velocity: Optional[list[float]] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
     class Config:

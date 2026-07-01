@@ -31,12 +31,12 @@ class CotSerializer(BaseSerializer):
         })
         
         ET.SubElement(event, "point", {
-            "lat": f"{state.lat:.6f}", "lon": f"{state.lon:.6f}",
-            "hae": f"{state.alt:.1f}", "ce": "10.0", "le": "10.0"
+            "lat": f"{state.latitude:.6f}", "lon": f"{state.longitude:.6f}",
+            "hae": f"{state.altitude:.1f}", "ce": "10.0", "le": "10.0"
         })
         
         detail = ET.SubElement(event, "detail")
-        ET.SubElement(detail, "track", {"speed": f"{state.speed_m_s:.2f}", "course": f"{state.heading_deg:.1f}"})
+        ET.SubElement(detail, "track", {"speed": f"{state.speed_mps:.2f}", "course": f"{state.heading_deg:.1f}"})
         ET.SubElement(detail, "contact", {"callsign": f"SWM({state.swarm_count}) {state.classification}"})
         
         return ET.tostring(event, encoding="utf-8").decode("utf-8")
@@ -51,12 +51,12 @@ class SapientSerializer(BaseSerializer):
         report = DetectionReport(
             objectId=f"TRK-{state.track_id}",
             state="Active",
-            location=SapientLocation(x=state.lat, y=state.lon, z=state.alt),
+            location=SapientLocation(x=state.latitude, y=state.longitude, z=state.altitude),
             classification=[SapientClassification(type=state.classification, confidence=0.95)],
             object_info=[
                 TrackObjectInfo(type="estimatedSwarmCount", value=str(state.swarm_count)),
                 TrackObjectInfo(type="threatLevel", value=state.threat_level),
-                TrackObjectInfo(type="speed", value=f"{state.speed_m_s:.2f}"),
+                TrackObjectInfo(type="speed", value=f"{state.speed_mps:.2f}"),
                 TrackObjectInfo(type="heading", value=f"{state.heading_deg:.2f}")
             ]
         )

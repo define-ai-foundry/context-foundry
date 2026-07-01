@@ -81,3 +81,6 @@ htmlcov/
 # Repomix files
 repomix-output.*
 repomix.config.json
+
+# Fusion log file
+fused_tracks_debug.xml

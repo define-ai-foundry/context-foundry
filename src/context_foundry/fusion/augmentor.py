@@ -37,39 +37,20 @@ class TacticalContextAugmentor:
         
         return math.degrees(lat), math.degrees(lon), alt
 
-    def enu_to_wgs84(self, east, north, up):
-        """Projects local ENU metric tracking coordinates back to global WGS84."""
-        # 1. ENU to ECEF (using the configured theater reference center)
-        lat0 = config.ENU_ORIGIN_LAT
-        lon0 = config.ENU_ORIGIN_LON
-        alt0 = config.ENU_ORIGIN_ALT
-        
-        x0, y0, z0 = config.wgs84_to_ecef(lat0, lon0, alt0)
-        
-        rad_lat0, rad_lon0 = math.radians(lat0), math.radians(lon0)
-        s_lat, c_lat = math.sin(rad_lat0), math.cos(rad_lat0)
-        s_lon, c_lon = math.sin(rad_lon0), math.cos(rad_lon0)
-        
-        dx = -s_lon * east - s_lat * c_lon * north + c_lat * c_lon * up
-        dy =  c_lon * east - s_lat * s_lon * north + c_lat * s_lon * up
-        dz =  c_lat * north + s_lat * up
-        
-        # 2. ECEF to WGS84
-        return self.ecef_to_wgs84(x0 + dx, y0 + dy, z0 + dz)
 
     def extract_tactical_track(self, track) -> TacticalTrack:
         """
         Extracts position, absolute speed, and true heading from the 9D state 
         vector and returns a standardized TacticalTrack data model.
         """
-        state = track.latest_state
+        state = track.state
         vec = state.state_vector
         
         # Extract 9D elements: [East, vEast, aEast, North, vNorth, aNorth, Up, vUp, aUp]
         e, ve, n, vn, u, vu = vec[0,0], vec[1,0], vec[3,0], vec[4,0], vec[6,0], vec[7,0]
         
         # Calculate WGS84 Position
-        lat, lon, alt = self.enu_to_wgs84(e, n, u)
+        lat, lon, alt = config.enu_to_wgs84(e, n, u)
         
         # Calculate Kinematics
         speed_m_s = math.sqrt(ve**2 + vn**2 + vu**2)
@@ -90,10 +71,10 @@ class TacticalContextAugmentor:
         return TacticalTrack(
             track_id=track.id,
             timestamp=state.timestamp,
-            lat=lat,
-            lon=lon,
-            alt=alt,
-            speed_m_s=speed_m_s,
+            latitude=lat,
+            longitude=lon,
+            altitude=alt,
+            speed_mps=speed_m_s,
             heading_deg=heading_deg,
             classification=classification,
             swarm_count=swarm_count,
