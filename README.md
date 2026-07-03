@@ -1,6 +1,6 @@
 # DEFINE Edge Fusion Engine (Context Foundry)
 <p align="center">
-  <img src="docs/images/winter_swarm_header.jpg" align="right" width="350" alt="Drone swarm over Finnish forest">
+  <img src="winter_swarm_header.jpg" align="right" width="350" alt="Drone swarm over Finnish forest">
 </p>
 
 High-performance, format-agnostic Tactical Edge Sensor Fusion Gateway
