@@ -17,8 +17,8 @@ Format-agnostic architecture with decoupled ingestion, fusion, and dissemination
 
 Supports both:
 
-- Scenario Replay (```--mode replay```) — analysis of recorded JSON-based sensor scenarios.
-- Live Edge (```--mode live```) — real-time processing of tactical telemetry over UDP networks.
+- Scenario Replay (```--replay-file```) — analysis of recorded JSON-based sensor scenarios.
+- Live Edge (```--enable-sapient``` / ```--enable-cot```) — real-time processing of tactical telemetry over UDP networks.
 
 ### Advanced Multi-Sensor Track Fusion
 
@@ -82,25 +82,25 @@ pip install -e .
 Test the math engine and tracking logic by replaying a validated scenario file. Ensure your local ATAK device is open on the same network to see the fused tracks appear dynamically.
 
 ```bash
-context-foundry-fusion --mode replay --file data/examples/sapient_messages.json
+context-foundry-fusion --replay-file data/examples/sapient_messages.json
 ```
 
 ## CLI Reference
 
-The installation exposes the context-foundry-fusion command globally.
+The installation exposes the context-foundry-fusion command globally. At least one source (`--replay-file`, `--enable-sapient`, or `--enable-cot`) must be provided.
 
 | Flag / Argument | Type | Description | Default / Required |
 | :--- | :--- | :--- | :--- |
-| `-m`, `--mode` | `Choice` | Execution mode. Valid options are `replay` or `live`. | `replay` |
-| `-f`, `--file` | `String` | Path to the JSON scenario file. | *Required if mode is replay* |
+| `--replay-file` | `String` | Path to a JSON scenario file to replay. | *One source required* |
+| `--enable-sapient` | `Flag` | Enable the live SAPIENT UDP stream (port 5000). | `False` |
+| `--enable-cot` | `Flag` | Enable the live CoT UDP stream (port 6969). | `False` |
 | `--tak-ip` | `String` | The multicast IP address for Cursor on Target broadcasts. | `239.2.3.1` |
 | `--tak-port` | `Integer` | The UDP multicast port for Cursor on Target broadcasts. | `6969` |
-| `-v`, `--verbose` | `Flag` | Enables debug-level logging output. | `False` |
 
 Example:
 
 ```bash
-context-foundry-fusion --mode live --tak-ip 192.168.1.255 --tak-port 4242
+context-foundry-fusion --enable-sapient --tak-ip 192.168.1.255 --tak-port 4242
 ```
 
 ## Repository Structure
