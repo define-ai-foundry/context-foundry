@@ -82,25 +82,27 @@ pip install -e .
 Test the math engine and tracking logic by replaying a validated scenario file. Ensure your local ATAK device is open on the same network to see the fused tracks appear dynamically.
 
 ```bash
-context-foundry-fusion --replay-file data/examples/sapient_messages.json
+context-foundry-fusion --replay-file data/examples/sapient_messages.json --config config/sensors/joensuu.json
 ```
 
 ## CLI Reference
 
-The installation exposes the context-foundry-fusion command globally. At least one source (`--replay-file`, `--enable-sapient`, or `--enable-cot`) must be provided.
+The installation exposes the context-foundry-fusion command globally. `--config` is always required, and at least one source (`--replay-file`, `--enable-sapient`, or `--enable-cot`) must be provided.
 
 | Flag / Argument | Type | Description | Default / Required |
 | :--- | :--- | :--- | :--- |
+| `--config` | `String` | Path to the sensor network config JSON. | *Required* |
 | `--replay-file` | `String` | Path to a JSON scenario file to replay. | *One source required* |
 | `--enable-sapient` | `Flag` | Enable the live SAPIENT UDP stream (port 5000). | `False` |
 | `--enable-cot` | `Flag` | Enable the live CoT UDP stream (port 6969). | `False` |
+| `--log-to-file` | `Flag` | Write fused CoT to `fused_tracks_debug.xml` instead of UDP broadcast. | `False` |
 | `--tak-ip` | `String` | The multicast IP address for Cursor on Target broadcasts. | `239.2.3.1` |
 | `--tak-port` | `Integer` | The UDP multicast port for Cursor on Target broadcasts. | `6969` |
 
 Example:
 
 ```bash
-context-foundry-fusion --enable-sapient --tak-ip 192.168.1.255 --tak-port 4242
+context-foundry-fusion --enable-sapient --tak-ip 192.168.1.255 --tak-port 4242 --config config/sensors/joensuu.json
 ```
 
 ## Repository Structure

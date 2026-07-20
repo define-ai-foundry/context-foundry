@@ -19,10 +19,7 @@ dependencies = [
 ]
 
 [project.scripts]
-# This exposes the command 'context-foundry-fusion' globally
-sensor-fusion = "context_foundry.cli:fusion_main"
-# Future companion system CLI:
-# context-foundry-sim = "context_foundry.cli:sim_main"
+context-foundry-fusion = "context_foundry.cli:fusion_main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
