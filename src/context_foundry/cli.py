@@ -17,13 +17,20 @@ from context_foundry.fusion.tracker import SapientAsynchronousTracker
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("FusionEngine")
 
+
 def fusion_main():
     # 1. Parse Command-Line Arguments
     parser = argparse.ArgumentParser(description="DEFINE Edge Fusion Engine")
-    parser.add_argument("--enable-sapient", action="store_true", help="Enable live SAPIENT UDP stream")
+    parser.add_argument(
+        "--enable-sapient", action="store_true", help="Enable live SAPIENT UDP stream"
+    )
     parser.add_argument("--enable-cot", action="store_true", help="Enable live CoT UDP stream")
     parser.add_argument("--replay-file", type=str, help="Path to JSON scenario file")
-    parser.add_argument("--log-to-file", action="store_true", help="Log CoT payloads to 'fused_tracks_debug.xml' instead of network broadcast")
+    parser.add_argument(
+        "--log-to-file",
+        action="store_true",
+        help="Log CoT payloads to 'fused_tracks_debug.xml' instead of network broadcast",
+    )
     parser.add_argument("--tak-ip", default="239.2.3.1")
     parser.add_argument("--tak-port", type=int, default=6969)
     parser.add_argument("--config", type=str, required=True, help="Path to sensor config JSON")
@@ -67,41 +74,45 @@ def fusion_main():
 
     # 4. The Main Loop
     while True:
-            processed_any_events = False
-            for source in sources:
-                for timestamp, detections in source.iter_events():
-                    processed_any_events = True
-                    active_tracks = tracker.process_async_event(timestamp, set(detections))
+        processed_any_events = False
+        for source in sources:
+            for timestamp, detections in source.iter_events():
+                processed_any_events = True
+                active_tracks = tracker.process_async_event(timestamp, set(detections))
 
-                    # Serialization / Output
-                    for track in active_tracks:
-                        # ONLY broadcast if this track was updated during this specific event timestamp
-                        # This prevents re-broadcasting tracks that haven't changed
-                        if track.state.timestamp == timestamp:
-                            tactical_track = augmentor.extract_tactical_track(track)
-                            cot_payload = serializers["TAK"].serialize(tactical_track)
+                # Serialization / Output
+                for track in active_tracks:
+                    # ONLY broadcast if this track was updated during this specific event timestamp
+                    # This prevents re-broadcasting tracks that haven't changed
+                    if track.state.timestamp == timestamp:
+                        tactical_track = augmentor.extract_tactical_track(track)
+                        cot_payload = serializers["TAK"].serialize(tactical_track)
 
-                            if args.log_to_file:
-                                with open("fused_tracks_debug.xml", "a") as f:
-                                    f.write(cot_payload + "\n")
-                            else:
-                                try:
-                                    if udp_sock:
-                                        udp_sock.sendto(cot_payload.encode('utf-8'), (args.tak_ip, args.tak_port))
-                                except OSError as e:
-                                    logger.error(f"Network error: {e}")
+                        if args.log_to_file:
+                            with open("fused_tracks_debug.xml", "a") as f:
+                                f.write(cot_payload + "\n")
+                        else:
+                            try:
+                                if udp_sock:
+                                    udp_sock.sendto(
+                                        cot_payload.encode("utf-8"), (args.tak_ip, args.tak_port)
+                                    )
+                            except OSError as e:
+                                logger.error(f"Network error: {e}")
 
-                            logger.info(f"Broadcast Update for Track {tactical_track.track_id[-4:]} | Threat: {tactical_track.threat_level.upper()}")
+                        logger.info(
+                            f"Broadcast Update for Track {tactical_track.track_id[-4:]} | Threat: {tactical_track.threat_level.upper()}"
+                        )
 
-            # Exit logic for replay files
-            if (
-                args.replay_file
-                and not args.enable_sapient
-                and not args.enable_cot
-                and not processed_any_events
-            ):
-                logger.info("Replay file processing complete. Exiting.")
-                break
+        # Exit logic for replay files
+        if (
+            args.replay_file
+            and not args.enable_sapient
+            and not args.enable_cot
+            and not processed_any_events
+        ):
+            logger.info("Replay file processing complete. Exiting.")
+            break
 
 
 if __name__ == "__main__":

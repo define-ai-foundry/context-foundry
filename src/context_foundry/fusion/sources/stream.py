@@ -21,6 +21,7 @@ from .base import SapientSource
 
 logger = logging.getLogger(__name__)
 
+
 class NetworkSapientStream(SapientSource):
     """
     Live ingress adapter. Binds to a UDP network socket, listens for binary
@@ -32,9 +33,7 @@ class NetworkSapientStream(SapientSource):
         self.port = port
 
         self.cartesian_meas_model = LinearGaussian(
-            ndim_state=9,
-            mapping=(0, 3, 6),
-            noise_covar=np.diag([25.0, 25.0, 100.0])
+            ndim_state=9, mapping=(0, 3, 6), noise_covar=np.diag([25.0, 25.0, 100.0])
         )
 
         self.validator = SapientValidator()
@@ -82,7 +81,7 @@ class NetworkSapientStream(SapientSource):
                 detection = Detection(
                     state_vector=np.array([[e], [n], u]),
                     measurement_model=self.cartesian_meas_model,
-                    timestamp=clean_det.timestamp
+                    timestamp=clean_det.timestamp,
                 )
 
                 detection.metadata = {
@@ -93,8 +92,10 @@ class NetworkSapientStream(SapientSource):
                     "sensor_geodetic": {
                         "latitude": sensor_meta["lat"],
                         "longitude": sensor_meta["lon"],
-                        "altitude": sensor_meta["alt"]
-                    } if sensor_meta else None
+                        "altitude": sensor_meta["alt"],
+                    }
+                    if sensor_meta
+                    else None,
                 }
 
                 # Yield identical structure to JsonSapientSource

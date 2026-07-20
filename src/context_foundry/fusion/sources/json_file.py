@@ -20,14 +20,12 @@ from .base import SapientSource
 
 logger = logging.getLogger(__name__)
 
-class JsonSapientSource(SapientSource):
 
+class JsonSapientSource(SapientSource):
     def __init__(self, json_path: Path):
         self.json_path = Path(json_path)
         self.cartesian_meas_model = LinearGaussian(
-            ndim_state=9,
-            mapping=(0, 3, 6),
-            noise_covar=np.diag([25.0, 25.0, 100.0])
+            ndim_state=9, mapping=(0, 3, 6), noise_covar=np.diag([25.0, 25.0, 100.0])
         )
         # Instantiate the Gatekeeper once
         self.validator = SapientValidator()
@@ -67,7 +65,7 @@ class JsonSapientSource(SapientSource):
                 detection = Detection(
                     state_vector=np.array([[e], [n], [u]]),
                     measurement_model=self.cartesian_meas_model,
-                    timestamp=timestamp
+                    timestamp=timestamp,
                 )
 
                 # Extract protocol-specific metadata saved by the validator
@@ -90,8 +88,10 @@ class JsonSapientSource(SapientSource):
                     "sensor_geodetic": {
                         "latitude": sensor_meta["lat"],
                         "longitude": sensor_meta["lon"],
-                        "altitude": sensor_meta["alt"]
-                    } if sensor_meta else None
+                        "altitude": sensor_meta["alt"],
+                    }
+                    if sensor_meta
+                    else None,
                 }
 
                 detections.append(detection)

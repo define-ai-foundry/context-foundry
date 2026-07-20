@@ -12,6 +12,7 @@ class InternalDetection(BaseModel):
     The universal, flattened detection format used internally by the Fusion Engine.
     All Protocol Gateways MUST convert their specific formats to this model.
     """
+
     # Origin & Timing
     sensor_id: str = Field(..., description="Unique identifier of the reporting sensor or node")
     timestamp: datetime = Field(..., description="UTC Time of the detection")
@@ -26,19 +27,24 @@ class InternalDetection(BaseModel):
     heading_deg: float | None = Field(None, description="Heading in degrees from True North")
 
     # Metadata & Uncertainty
-    classification: str | None = Field(None, description="Object classification (e.g., 'UAS', 'Vehicle')")
-    confidence: float | None = Field(None, ge=0.0, le=1.0, description="Detection confidence (0.0 to 1.0)")
+    classification: str | None = Field(
+        None, description="Object classification (e.g., 'UAS', 'Vehicle')"
+    )
+    confidence: float | None = Field(
+        None, ge=0.0, le=1.0, description="Detection confidence (0.0 to 1.0)"
+    )
 
     # Escape Hatch for protocol-specific data that serializers might need later
     raw_metadata: dict[str, Any] = Field(
         default_factory=dict,
-        description="Preserved protocol-specific data (e.g., original SAPIENT task ID)"
+        description="Preserved protocol-specific data (e.g., original SAPIENT task ID)",
     )
 
     class Config:
         # Ensures that any extra fields accidentally passed in are dropped,
         # keeping the internal state pristine.
         extra = "ignore"
+
 
 class TacticalTrack(BaseModel):
     """

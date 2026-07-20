@@ -22,7 +22,9 @@ class SapientAsynchronousTracker:
 
         # 2. Setup Unscented Kalman Components to manage non-linear kinematics safely
         self.predictor = UnscentedKalmanPredictor(self.transition_model)
-        self.updater = UnscentedKalmanUpdater(measurement_model=None) # Assigned dynamically via Detections
+        self.updater = UnscentedKalmanUpdater(
+            measurement_model=None
+        )  # Assigned dynamically via Detections
 
         # 3. Setup joint probabilistic data association architectures for swarm management
         # missed_detection_probability accommodates visual camera drops under poor lighting
@@ -30,7 +32,7 @@ class SapientAsynchronousTracker:
             predictor=self.predictor,
             updater=self.updater,
             clutter_spatial_density=1e-6,
-            prob_detect=0.9
+            prob_detect=0.9,
         )
         self.data_associator = JPDA(self.hypothesiser)
 
@@ -75,7 +77,7 @@ class SapientAsynchronousTracker:
                 # Special contextual kwargs handle dynamic acoustic location coordinate injection
                 update_context = {}
                 if "sensor_geodetic" in det.metadata:
-                    update_context['sensor_geodetic'] = det.metadata["sensor_geodetic"]
+                    update_context["sensor_geodetic"] = det.metadata["sensor_geodetic"]
 
                 updated_state = self.updater.update(joint_hypothesis, **update_context)
                 track.append(updated_state)
@@ -95,23 +97,31 @@ class SapientAsynchronousTracker:
 
     def _initialize_new_track(self, detection):
         """Seeds a brand new 9D Constant Acceleration Gaussian state around a 3D Cartesian hit."""
-        e, n, u = detection.state_vector[0, 0], detection.state_vector[1, 0], detection.state_vector[2, 0]
+        e, n, u = (
+            detection.state_vector[0, 0],
+            detection.state_vector[1, 0],
+            detection.state_vector[2, 0],
+        )
 
         # Position states initialized with measurement data; speed/acceleration set to zero
         state_vector = StateVector([e, 0.0, 0.0, n, 0.0, 0.0, u, 0.0, 0.0])
 
         # Build initial diagonal covariance block matrix
-        covar = np.diag([
-            10.0, self.p_init_val, self.p_init_val / 2.0,  # East states [pos, vel, acc]
-            10.0, self.p_init_val, self.p_init_val / 2.0,  # North states
-            5.0,  self.p_init_val / 2.0, self.p_init_val / 4.0   # Up states
-        ])
-
-        prior = GaussianState(
-            state_vector=state_vector,
-            covar=covar,
-            timestamp=detection.timestamp
+        covar = np.diag(
+            [
+                10.0,
+                self.p_init_val,
+                self.p_init_val / 2.0,  # East states [pos, vel, acc]
+                10.0,
+                self.p_init_val,
+                self.p_init_val / 2.0,  # North states
+                5.0,
+                self.p_init_val / 2.0,
+                self.p_init_val / 4.0,  # Up states
+            ]
         )
+
+        prior = GaussianState(state_vector=state_vector, covar=covar, timestamp=detection.timestamp)
         self.tracks.add(Track([prior]))
 
     def _prune_stale_tracks(self, current_time, max_coastal_seconds):

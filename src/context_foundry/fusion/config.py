@@ -66,7 +66,7 @@ def load_sensor_network(
         if not path.exists():
             raise FileNotFoundError(f"Sensor configuration file not found: {path}")
 
-        with open(path, encoding='utf-8') as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
 
         # New dedicated sensor manifest format
@@ -107,17 +107,30 @@ def load_sensor_network(
             "capabilities": sensor.get("capabilities", []),
             "status": sensor.get("status", "operational"),
             # Preserve any additional fields
-            **{k: v for k, v in sensor.items()
-               if k not in {"id", "type", "subtype", "lat", "lon", "alt",
-                           "range_m", "update_rate_sec", "capabilities", "status"}}
+            **{
+                k: v
+                for k, v in sensor.items()
+                if k
+                not in {
+                    "id",
+                    "type",
+                    "subtype",
+                    "lat",
+                    "lon",
+                    "alt",
+                    "range_m",
+                    "update_rate_sec",
+                    "capabilities",
+                    "status",
+                }
+            },
         }
 
     # Determine primary anchor node
     if not primary_anchor_node:
         # Look for explicitly marked primary anchor
         primary_anchor_node = next(
-            (sid for sid, s in SENSOR_REGISTRY.items() if s.get("primary_anchor")),
-            None
+            (sid for sid, s in SENSOR_REGISTRY.items() if s.get("primary_anchor")), None
         )
 
     if primary_anchor_node and primary_anchor_node in SENSOR_REGISTRY:
@@ -142,7 +155,9 @@ def load_sensor_network(
     logger.info("=" * 70)
     logger.info("✅ BLUE TEAM SENSOR FUSION REGISTRY INITIALIZED")
     logger.info(f"   Anchor Node          : {ENU_ORIGIN_NODE_ID}")
-    logger.info(f"   Origin (lat, lon, alt): ({ENU_ORIGIN_LAT:.6f}, {ENU_ORIGIN_LON:.6f}, {ENU_ORIGIN_ALT:.1f}m)")
+    logger.info(
+        f"   Origin (lat, lon, alt): ({ENU_ORIGIN_LAT:.6f}, {ENU_ORIGIN_LON:.6f}, {ENU_ORIGIN_ALT:.1f}m)"
+    )
     logger.info(f"   Registered Sensors   : {len(SENSOR_REGISTRY)}")
     logger.info("=" * 70)
 
@@ -172,8 +187,7 @@ def reset_registry() -> None:
 
 # Legacy compatibility
 def load_blue_sensor_network(
-    sensor_network_list: list[dict[str, Any]],
-    primary_anchor_node: str = "FI-MIL-RAD-KOLI-01"
+    sensor_network_list: list[dict[str, Any]], primary_anchor_node: str = "FI-MIL-RAD-KOLI-01"
 ) -> None:
     """Deprecated. Use load_sensor_network() instead."""
     logger.warning(
@@ -181,14 +195,15 @@ def load_blue_sensor_network(
         "Use load_sensor_network() for better flexibility."
     )
     load_sensor_network(
-        sensor_network_list=sensor_network_list,
-        primary_anchor_node=primary_anchor_node
+        sensor_network_list=sensor_network_list, primary_anchor_node=primary_anchor_node
     )
+
 
 # Internal state variables for the dynamic origin
 _origin_lat = None
 _origin_lon = None
 _origin_alt = None
+
 
 def set_reference_origin(lat: float, lon: float, alt: float) -> None:
     """
@@ -199,6 +214,7 @@ def set_reference_origin(lat: float, lon: float, alt: float) -> None:
     _origin_lat = lat
     _origin_lon = lon
     _origin_alt = alt
+
 
 def wgs84_to_enu(lat: float, lon: float, alt: float) -> tuple[float, float, float]:
     """
@@ -215,6 +231,7 @@ def wgs84_to_enu(lat: float, lon: float, alt: float) -> tuple[float, float, floa
 
     e, n, u = pm.geodetic2enu(lat, lon, alt, _origin_lat, _origin_lon, _origin_alt)
     return e, n, u
+
 
 def enu_to_wgs84(e: float, n: float, u: float) -> tuple[float, float, float]:
     """

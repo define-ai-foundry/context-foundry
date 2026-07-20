@@ -9,6 +9,7 @@ from context_foundry.fusion.schemas import InternalDetection
 
 logger = logging.getLogger(__name__)
 
+
 class ProtocolValidator(ABC):
     """
     Abstract Base Class for all protocol-specific gatekeepers.

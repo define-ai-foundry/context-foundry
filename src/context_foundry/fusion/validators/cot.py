@@ -11,14 +11,14 @@ from context_foundry.fusion.validators.base import ProtocolValidator
 class CotValidator(ProtocolValidator):
     def __init__(self, xsd_path: str = "protos/cot/CoT Base-Event Schema  (PUBLIC RELEASE).xsd"):
         # Load the official MITRE schema once on startup
-        with open(xsd_path, 'rb') as f:
+        with open(xsd_path, "rb") as f:
             schema_root = etree.XML(f.read())
             self.schema = etree.XMLSchema(schema_root)
 
     def validate(self, raw_xml_string: str) -> tuple[bool, str]:
         try:
             # Parse the incoming XML string
-            doc = etree.fromstring(raw_xml_string.encode('utf-8'))
+            doc = etree.fromstring(raw_xml_string.encode("utf-8"))
 
             # The Magic Line: Validate against the MITRE XSD
             self.schema.assertValid(doc)
@@ -31,7 +31,7 @@ class CotValidator(ProtocolValidator):
 
     def normalize(self, raw_xml_string: str) -> InternalDetection:
         # Since we know it's valid, we can safely extract the data
-        root = etree.fromstring(raw_xml_string.encode('utf-8'))
+        root = etree.fromstring(raw_xml_string.encode("utf-8"))
         point = root.find("point")
 
         return InternalDetection(
@@ -39,7 +39,7 @@ class CotValidator(ProtocolValidator):
             timestamp=root.get("time"),
             latitude=float(point.get("lat")),
             longitude=float(point.get("lon")),
-            altitude=float(point.get("hae")), # Height Above Ellipsoid
+            altitude=float(point.get("hae")),  # Height Above Ellipsoid
             classification=root.get("type"),
-            raw_metadata={"original_xml": raw_xml_string}
+            raw_metadata={"original_xml": raw_xml_string},
         )
