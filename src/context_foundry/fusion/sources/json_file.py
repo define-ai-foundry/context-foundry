@@ -9,25 +9,23 @@ from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
-from stonesoup.types.detection import Detection
 from stonesoup.models.measurement.linear import LinearGaussian
+from stonesoup.types.detection import Detection
 
 from .. import config
-from .base import SapientSource
 
 # Import the new Gatekeeper
 from ..validators.sapient import SapientValidator
+from .base import SapientSource
 
 logger = logging.getLogger(__name__)
 
-class JsonSapientSource(SapientSource):
 
+class JsonSapientSource(SapientSource):
     def __init__(self, json_path: Path):
         self.json_path = Path(json_path)
         self.cartesian_meas_model = LinearGaussian(
-            ndim_state=9,
-            mapping=(0, 3, 6),
-            noise_covar=np.diag([25.0, 25.0, 100.0])
+            ndim_state=9, mapping=(0, 3, 6), noise_covar=np.diag([25.0, 25.0, 100.0])
         )
         # Instantiate the Gatekeeper once
         self.validator = SapientValidator()
@@ -37,7 +35,7 @@ class JsonSapientSource(SapientSource):
             raise FileNotFoundError(self.json_path)
 
         # 1. Load the raw JSON array
-        with open(self.json_path, "r", encoding="utf-8") as f:
+        with open(self.json_path, encoding="utf-8") as f:
             messages = json.load(f)
 
         valid_detections = []
@@ -67,13 +65,13 @@ class JsonSapientSource(SapientSource):
                 detection = Detection(
                     state_vector=np.array([[e], [n], [u]]),
                     measurement_model=self.cartesian_meas_model,
-                    timestamp=timestamp
+                    timestamp=timestamp,
                 )
 
                 # Extract protocol-specific metadata saved by the validator
                 # This allows us to access obscure fields without cluttering the universal schema
                 original_report = det.raw_metadata.get("original_report", {})
-                
+
                 # Dynamic extraction of swarm attributes (from the preserved original report)
                 swarm_count = 1
                 object_info_list = original_report.get("objectInfo", [])
@@ -90,8 +88,10 @@ class JsonSapientSource(SapientSource):
                     "sensor_geodetic": {
                         "latitude": sensor_meta["lat"],
                         "longitude": sensor_meta["lon"],
-                        "altitude": sensor_meta["alt"]
-                    } if sensor_meta else None
+                        "altitude": sensor_meta["alt"],
+                    }
+                    if sensor_meta
+                    else None,
                 }
 
                 detections.append(detection)

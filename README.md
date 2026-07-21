@@ -82,25 +82,27 @@ pip install -e .
 Test the math engine and tracking logic by replaying a validated scenario file. Ensure your local ATAK device is open on the same network to see the fused tracks appear dynamically.
 
 ```bash
-context-foundry-fusion --replay-file data/examples/sapient_messages.json
+context-foundry-fusion --replay-file data/examples/sapient_messages.json --config config/sensors/joensuu.json
 ```
 
 ## CLI Reference
 
-The installation exposes the context-foundry-fusion command globally. At least one source (`--replay-file`, `--enable-sapient`, or `--enable-cot`) must be provided.
+The installation exposes the context-foundry-fusion command globally. `--config` is always required, and at least one source (`--replay-file`, `--enable-sapient`, or `--enable-cot`) must be provided.
 
 | Flag / Argument | Type | Description | Default / Required |
 | :--- | :--- | :--- | :--- |
+| `--config` | `String` | Path to the sensor network config JSON. | *Required* |
 | `--replay-file` | `String` | Path to a JSON scenario file to replay. | *One source required* |
 | `--enable-sapient` | `Flag` | Enable the live SAPIENT UDP stream (port 5000). | `False` |
 | `--enable-cot` | `Flag` | Enable the live CoT UDP stream (port 6969). | `False` |
+| `--log-to-file` | `Flag` | Write fused CoT to `fused_tracks_debug.xml` instead of UDP broadcast. | `False` |
 | `--tak-ip` | `String` | The multicast IP address for Cursor on Target broadcasts. | `239.2.3.1` |
 | `--tak-port` | `Integer` | The UDP multicast port for Cursor on Target broadcasts. | `6969` |
 
 Example:
 
 ```bash
-context-foundry-fusion --enable-sapient --tak-ip 192.168.1.255 --tak-port 4242
+context-foundry-fusion --enable-sapient --tak-ip 192.168.1.255 --tak-port 4242 --config config/sensors/joensuu.json
 ```
 
 ## Repository Structure
@@ -109,17 +111,16 @@ context-foundry-fusion --enable-sapient --tak-ip 192.168.1.255 --tak-port 4242
 context-foundry/
 ├─ config/
 │  ├─ sensors/
-│  │  └─ example.json
-│  ├─ tracker_config.yaml
-│  └─ validator.py
+│  │  └─ joensuu.json
+│  └─ locations.yaml
 ├─ data/
 │  ├─ examples/
 │  │  └─ sapient_messages.json
 │  └─ generated_input/
 │     └─ joensuu_messages.json
 ├─ docs/
-│  └─ images/
-│     └─ winter_swarm_header.jpg
+│  ├─ 01-concepts/
+│  └─ 02-architecture/
 ├─ protos/
 │  ├─ cot/
 │  │  ├─ CoT Base-Event Schema  (PUBLIC RELEASE).xsd
@@ -172,7 +173,6 @@ context-foundry/
 │  │  │  ├─ serializers.py
 │  │  │  └─ tracker.py
 │  │  └─ cli.py
-│  ├─ context_foundry.egg-info/
 │  └─ sapient_msg/
 │     └─ bsi_flex_335_v2_0/
 │        ├─ alert_ack_pb2.py
@@ -191,7 +191,12 @@ context-foundry/
 │        ├─ task_ack_pb2.py
 │        ├─ task_pb2.py
 │        └─ velocity_pb2.py
+├─ tests/
+├─ .github/
+│  └─ workflows/
+│     └─ ci.yml
 ├─ compile_protos.sh
+├─ winter_swarm_header.jpg
 ├─ LICENSE
 ├─ pyproject.toml
 └─ README.md
@@ -206,6 +211,40 @@ Due to the format-agnostic core, adding support for new networks (e.g., Link 16,
 - Map the universal ```TacticalState``` parameters (e.g., ```state.lat, state.speed_m_s```) to your target format.
 
 - Register your new serializer in the ```cli.py``` routing dictionary. The tracker logic remains completely untouched!
+
+## Development
+
+Install the project together with the development tooling (Ruff, pytest, pytest-cov):
+
+```bash
+pip install -e ".[dev]"
+```
+
+### Linting
+
+Linting and formatting use [Ruff](https://docs.astral.sh/ruff/). Its configuration lives in `pyproject.toml`:
+
+```bash
+ruff check .           # report lint issues
+ruff format --check .  # report formatting issues
+
+ruff check --fix .     # auto-fix lint issues
+ruff format .          # apply formatting
+```
+
+### Testing
+
+Tests use `pytest` with branch coverage via `pytest-cov`. The coverage settings and the 95% minimum gate are configured in `pyproject.toml`, so a plain invocation runs the full suite and prints a coverage report:
+
+```bash
+pytest
+```
+
+The run fails if coverage drops below the configured threshold. Tests never touch the network or `data/**` — all fixtures are synthesized.
+
+### Continuous Integration
+
+All of the above run automatically on GitHub Actions (`.github/workflows/ci.yml`) for every push to `main`/`master` and every pull request: Ruff lint, Ruff format check, and the test suite with the coverage gate.
 
 
 

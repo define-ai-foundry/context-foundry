@@ -5,6 +5,6 @@ from .base import SapientSource
 from .json_file import JsonSapientSource
 
 __all__ = [
-    "SapientSource",
     "JsonSapientSource",
+    "SapientSource",
 ]
