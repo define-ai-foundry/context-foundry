@@ -4,12 +4,13 @@
 # src/fusion/tracker.py
 
 import numpy as np
-from stonesoup.dataassociator.probability import JPDA
+from stonesoup.dataassociator.probability import JPDAwithEHM2
 from stonesoup.hypothesiser.probability import PDAHypothesiser
 from stonesoup.predictor.kalman import UnscentedKalmanPredictor
 from stonesoup.types.array import StateVector
 from stonesoup.types.state import GaussianState
 from stonesoup.types.track import Track
+from stonesoup.types.update import Update
 from stonesoup.updater.kalman import UnscentedKalmanUpdater
 
 from .models import create_9d_constant_acceleration_model
@@ -27,14 +28,17 @@ class SapientAsynchronousTracker:
         )  # Assigned dynamically via Detections
 
         # 3. Setup joint probabilistic data association architectures for swarm management
-        # missed_detection_probability accommodates visual camera drops under poor lighting
+        # clutter_spatial_density=None lets the hypothesiser derive it from each track's
+        # validation-region volume; a fixed metre-scale value makes real hits lose to clutter.
         self.hypothesiser = PDAHypothesiser(
             predictor=self.predictor,
             updater=self.updater,
-            clutter_spatial_density=1e-6,
+            clutter_spatial_density=None,
             prob_detect=0.9,
         )
-        self.data_associator = JPDA(self.hypothesiser)
+        # EHM2 computes exact JPDA marginals without enumerating every joint hypothesis,
+        # which is intractable (exponential in track count) for a multi-target swarm.
+        self.data_associator = JPDAwithEHM2(self.hypothesiser)
 
         # Track storage manifest
         self.tracks = set()
@@ -58,8 +62,11 @@ class SapientAsynchronousTracker:
         associated_detections = set()
 
         for track, hypotheses in associations.items():
-            # Extract primary combined probabilistic hypothesis state
-            joint_hypothesis = hypotheses[0]
+            # Pick the most probable association. JPDA.associate inserts the
+            # missed-detection hypothesis first, so hypotheses[0] is never the
+            # likeliest; using it left every detection unassociated, spawning a
+            # new track per hit until JPDA's joint enumeration blew up.
+            joint_hypothesis = max(hypotheses, key=lambda hypothesis: hypothesis.probability)
 
             if not joint_hypothesis:
                 # Track fell outside validation gates; coast forward using kinematics prediction
@@ -128,7 +135,15 @@ class SapientAsynchronousTracker:
         """Purges tracks that haven't received physical sensor updates within the timeout window."""
         active_set = set()
         for track in self.tracks:
-            elapsed = (current_time - track.state.timestamp).total_seconds()
+            # Measure staleness from the last real detection, not track.state.timestamp:
+            # coasting appends a prediction each event, so the latter always reads ~now
+            # and no track would ever expire.
+            last_detection = track.states[0].timestamp
+            for state in reversed(track.states):
+                if isinstance(state, Update):
+                    last_detection = state.timestamp
+                    break
+            elapsed = (current_time - last_detection).total_seconds()
             if elapsed <= max_coastal_seconds:
                 active_set.add(track)
         self.tracks = active_set

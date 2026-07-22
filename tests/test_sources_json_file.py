@@ -56,6 +56,25 @@ def test_iter_events_groups_by_timestamp_and_sensor(tmp_path):
     assert sizes == [1, 2]
 
 
+def test_iter_events_is_one_shot(tmp_path):
+    """Regression: a replay file is finite and must be consumed exactly once.
+
+    The CLI main loop re-polls every source on each pass and exits a replay-only
+    run when a full pass yields nothing. A source that re-reads and re-emits its
+    whole file on every call keeps processed_any_events True forever, so the exit
+    branch is unreachable and repeated reprocessing spawns unbounded tracks until
+    the JPDA associator's cost explodes -- the observed hang. Draining once fixes it.
+    """
+    ts = "2026-01-01T00:00:00.000000Z"
+    messages = [_msg("node-A", ts, "obj-1")]
+    path = tmp_path / "scenario.json"
+    path.write_text(json.dumps(messages), encoding="utf-8")
+
+    source = JsonSapientSource(path)
+    assert len(list(source.iter_events())) == 1
+    assert list(source.iter_events()) == []
+
+
 def test_iter_events_drops_invalid_messages(tmp_path):
     ts = "2026-01-01T00:00:00.000000Z"
     invalid = {"sapientMessage": {"timestamp": ts, "nodeId": "node-A"}}  # no detectionReport

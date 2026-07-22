@@ -1,25 +1,18 @@
 """Tests for context_foundry.fusion.tracker.SapientAsynchronousTracker.
 
-IMPORTANT (see task brief / final report): JPDA.associate() enumerates joint
-hypotheses over ALL current tracks and blows up combinatorially past ~15
-concurrent tracks -- every scenario here stays to at most 1-2 tracks/detections.
+process_async_event selects the most probable JPDA hypothesis per track (not
+the missed-detection hypothesis that stonesoup's associate() always lists
+first), so a detection that gates to an existing track updates it instead of
+spawning a new one. The association-update branch is exercised with a
+monkeypatched fake data_associator for the two sensor_geodetic sub-branches;
+bootstrap/coasting/unassociated-hit paths use genuine tiny JPDA runs.
 
-KNOWN SOURCE BUG (see final report): `joint_hypothesis = hypotheses[0]` in
-process_async_event always retrieves the *missed-detection* hypothesis (it is
-always inserted first by stonesoup's JPDA.associate(), never sorted by
-probability -- see stonesoup.dataassociator.probability.JPDA.associate). That
-makes `if not joint_hypothesis` always True, so the real "association update"
-branch (the `else:` block that actually updates a track from a detection) is
-unreachable dead code under real JPDA -- confirmed empirically: a detection
-1m from an existing track still spawns a new track instead of updating it.
-We exercise the real bootstrap/coasting/unassociated-hit paths with genuine
-tiny JPDA runs, and use a monkeypatched fake data_associator (as explicitly
-sanctioned by the task brief) to reach the otherwise-dead association-update
-branch and its two sensor_geodetic sub-branches.
+Stale-track pruning is measured from each track's last real detection, not from
+track.state.timestamp -- coasting appends a prediction that advances the latter
+every event, so a purely coasting track would otherwise never expire.
 """
 
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -27,7 +20,10 @@ import pytest
 from stonesoup.models.measurement.linear import LinearGaussian
 from stonesoup.types.array import StateVector
 from stonesoup.types.detection import Detection
+from stonesoup.types.numeric import Probability
 from stonesoup.types.state import GaussianState
+from stonesoup.types.track import Track
+from stonesoup.types.update import GaussianStateUpdate
 
 from context_foundry.fusion.tracker import SapientAsynchronousTracker
 
@@ -110,11 +106,31 @@ def test_process_async_event_unassociated_detection_spawns_new_track(tracker):
     assert lengths == [1, 2]
 
 
+# --- nearby detection associates instead of spawning (real JPDA) ----------------
+
+
+def test_process_async_event_associates_nearby_detection(tracker):
+    """Regression: a detection close to an existing track updates it rather than
+    spawning a second track. Fails on the old code, where hypotheses[0] always
+    returned the missed-detection hypothesis and clutter_spatial_density=1e-6
+    made real hits lose to clutter, so every detection started a new track."""
+    tracker.process_async_event(T0, {_det(0.0, 0.0, 0.0, T0)})
+
+    t1 = T0 + timedelta(seconds=2)
+    tracker.process_async_event(t1, {_det(1.0, 1.0, 0.0, t1)})
+
+    assert len(tracker.tracks) == 1
+    (track,) = tuple(tracker.tracks)
+    assert track.state.timestamp == t1
+
+
 # --- association-update branch (fake data_associator, per task brief) -----------
 
 
 def _fake_truthy_associator(track, measurement):
     class FakeHypothesis:
+        probability = Probability(0.99)
+
         def __bool__(self):
             return True
 
@@ -186,6 +202,8 @@ def test_process_async_event_skips_bearing_only_ndim1_detection(tracker, monkeyp
     t1 = T0 + timedelta(seconds=2)
 
     class AllMissedHypothesis:
+        probability = Probability(1.0)
+
         def __bool__(self):
             return False
 
@@ -209,16 +227,22 @@ def test_process_async_event_skips_bearing_only_ndim1_detection(tracker, monkeyp
 # --- _prune_stale_tracks (direct, white-box) -------------------------------------
 
 
-class _FakeTimestampedTrack:
-    """Minimal hashable stand-in exposing only `.state.timestamp`."""
+def _gaussian_state(timestamp):
+    return GaussianState(
+        state_vector=StateVector(np.zeros(9)), covar=np.eye(9), timestamp=timestamp
+    )
 
-    def __init__(self, timestamp):
-        self.state = SimpleNamespace(timestamp=timestamp)
+
+def _update_state(timestamp):
+    """A real detection update (subclass of stonesoup Update)."""
+    return GaussianStateUpdate(
+        state_vector=StateVector(np.zeros(9)), covar=np.eye(9), hypothesis=None, timestamp=timestamp
+    )
 
 
 def test_prune_stale_tracks_drops_tracks_beyond_timeout(tracker):
-    fresh = _FakeTimestampedTrack(T0)
-    stale = _FakeTimestampedTrack(T0 - timedelta(seconds=100))
+    fresh = Track([_gaussian_state(T0)])
+    stale = Track([_gaussian_state(T0 - timedelta(seconds=100))])
     tracker.tracks = {fresh, stale}
 
     tracker._prune_stale_tracks(T0, max_coastal_seconds=45.0)
@@ -227,13 +251,46 @@ def test_prune_stale_tracks_drops_tracks_beyond_timeout(tracker):
 
 
 def test_prune_stale_tracks_keeps_tracks_within_timeout(tracker):
-    fresh = _FakeTimestampedTrack(T0)
-    almost_stale = _FakeTimestampedTrack(T0 - timedelta(seconds=30))
+    fresh = Track([_gaussian_state(T0)])
+    almost_stale = Track([_gaussian_state(T0 - timedelta(seconds=30))])
     tracker.tracks = {fresh, almost_stale}
 
     tracker._prune_stale_tracks(T0, max_coastal_seconds=45.0)
 
     assert tracker.tracks == {fresh, almost_stale}
+
+
+def test_prune_stale_tracks_uses_last_detection_not_last_coast(tracker):
+    """Regression: a track detected 100s ago but coasted (predictions appended)
+    right up to now must still be pruned. The old logic read track.state.timestamp
+    -- advanced to 'now' by coasting -- so such a track would never expire."""
+    track = Track(
+        [
+            _update_state(T0 - timedelta(seconds=100)),  # last real detection, stale
+            _gaussian_state(T0 - timedelta(seconds=50)),  # coast prediction
+            _gaussian_state(T0),  # coast prediction, now
+        ]
+    )
+    tracker.tracks = {track}
+
+    tracker._prune_stale_tracks(T0, max_coastal_seconds=45.0)
+
+    assert tracker.tracks == set()
+
+
+def test_prune_stale_tracks_keeps_recently_detected_track(tracker):
+    track = Track(
+        [
+            _update_state(T0 - timedelta(seconds=100)),  # old detection
+            _update_state(T0 - timedelta(seconds=10)),  # recent detection
+            _gaussian_state(T0),  # coast prediction
+        ]
+    )
+    tracker.tracks = {track}
+
+    tracker._prune_stale_tracks(T0, max_coastal_seconds=45.0)
+
+    assert tracker.tracks == {track}
 
 
 # --- _initialize_new_track (direct, white-box) -----------------------------------
