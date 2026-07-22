@@ -1,0 +1,37 @@
+# Compose Spec — works with `docker compose` and `podman compose`.
+# Drive it via the Makefile, which auto-detects the container engine.
+
+name: context-foundry
+
+services:
+  # Replay demo: fuse the example scenario and log fused CoT tracks. No network.
+  fusion:
+    build:
+      context: .
+      target: runtime
+    image: context-foundry:dev
+    command:
+      - --replay-file
+      - data/examples/sapient_messages.json
+      - --config
+      - config/sensors/joensuu.json
+      - --log-to-file
+
+  # In-container test + lint (CI parity). Worktree bind-mounted; venv lives at /opt/venv.
+  test:
+    build:
+      context: .
+      target: dev
+    image: context-foundry:dev-test
+    volumes:
+      - .:/app
+    command: ["pytest"]
+
+  lint:
+    build:
+      context: .
+      target: dev
+    image: context-foundry:dev-test
+    volumes:
+      - .:/app
+    command: ["sh", "-c", "ruff check . && ruff format --check ."]
