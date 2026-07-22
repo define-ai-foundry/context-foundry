@@ -29,10 +29,19 @@ class JsonSapientSource(SapientSource):
         )
         # Instantiate the Gatekeeper once
         self.validator = SapientValidator()
+        # A replay file is finite: it is drained on the first pass and empty after
+        self._exhausted = False
 
     def iter_events(self):
+        # The main loop re-polls every source each pass; a finite file must be
+        # consumed exactly once, otherwise the replay-exit condition is never met
+        if self._exhausted:
+            return
+
         if not self.json_path.exists():
             raise FileNotFoundError(self.json_path)
+
+        self._exhausted = True
 
         # 1. Load the raw JSON array
         with open(self.json_path, encoding="utf-8") as f:
