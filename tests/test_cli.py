@@ -160,51 +160,29 @@ def test_replay_file_log_to_file_broadcasts_only_matching_timestamp(monkeypatch,
     assert "TRK-stale-track-0002" not in output
 
 
-def test_replay_file_udp_broadcast_success_then_network_error(monkeypatch, caplog, tmp_path):
+def test_no_sink_configured_errors_with_guidance(monkeypatch, caplog, tmp_path):
     replay_path = tmp_path / "scenario.json"
     replay_path.write_text("[]", encoding="utf-8")
 
-    track1 = _fake_track("track-aaaa", T0)
-    track2 = _fake_track("track-bbbb", T0)
-
-    monkeypatch.setattr(
-        cli, "JsonSapientSource", lambda path: _EventsOnceSource([(T0, [object(), object()])])
-    )
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[track1, track2]]))
+    monkeypatch.setattr(cli, "JsonSapientSource", lambda path: _EventsOnceSource([]))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
-
-    call_state = {"n": 0}
-
-    def sendto(payload, addr):
-        call_state["n"] += 1
-        if call_state["n"] == 2:
-            raise OSError("network unreachable")
-
-    fake_socket = SimpleNamespace(setsockopt=lambda *a, **kw: None, sendto=sendto)
-    monkeypatch.setattr(cli.socket, "socket", lambda *a, **kw: fake_socket)
 
     monkeypatch.setattr(
         "sys.argv",
-        [
-            "fusion",
-            "--config",
-            "sensors.json",
-            "--replay-file",
-            str(replay_path),
-            "--tak-ip",
-            "239.9.9.9",
-            "--tak-port",
-            "7000",
-        ],
+        ["fusion", "--config", "sensors.json", "--replay-file", str(replay_path)],
     )
 
-    with caplog.at_level("INFO"):
-        cli.fusion_main()
+    with caplog.at_level("ERROR"):
+        result = cli.fusion_main()
 
-    assert call_state["n"] == 2
-    assert any("Network error" in r.message for r in caplog.records)
+    assert result is None
+    # The error names both sinks so the operator knows how to proceed.
     assert any(
-        "TAK Multicast Broadcast active on 239.9.9.9:7000" in r.message for r in caplog.records
+        "No output sink configured" in r.message
+        and "--tak-tls-host" in r.message
+        and "--log-to-file" in r.message
+        for r in caplog.records
     )
 
 
@@ -223,15 +201,125 @@ def test_enable_sapient_and_cot_sources_are_constructed_with_expected_ports(monk
     monkeypatch.setattr(cli, "CotNetworkStream", fake_cot_stream)
     monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
-    monkeypatch.setattr(
-        cli.socket, "socket", lambda *a, **kw: SimpleNamespace(setsockopt=lambda *a, **kw: None)
-    )
 
     monkeypatch.setattr(
-        "sys.argv", ["fusion", "--config", "sensors.json", "--enable-sapient", "--enable-cot"]
+        "sys.argv",
+        ["fusion", "--config", "sensors.json", "--enable-sapient", "--enable-cot", "--log-to-file"],
     )
 
     with pytest.raises(_Stop):
         cli.fusion_main()
 
     assert created == {"sapient_port": 5000, "cot_port": 6969}
+
+
+def test_tak_tls_host_constructs_sink_streams_payload_and_closes(monkeypatch, caplog, tmp_path):
+    replay_path = tmp_path / "scenario.json"
+    replay_path.write_text("[]", encoding="utf-8")
+
+    track = _fake_track("track-tls0", T0)
+    monkeypatch.setattr(
+        cli, "JsonSapientSource", lambda path: _EventsOnceSource([(T0, [object()])])
+    )
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[track]]))
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+
+    created = {}
+
+    class _FakeTakTlsSink:
+        def __init__(self, host, port, cert=None, key=None, ca=None):
+            created.update(host=host, port=port, cert=cert, key=key, ca=ca, obj=self)
+            self.sent = []
+            self.closed = False
+
+        def send(self, payload):
+            self.sent.append(payload)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(cli, "TakTlsSink", _FakeTakTlsSink)
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "fusion",
+            "--config",
+            "sensors.json",
+            "--replay-file",
+            str(replay_path),
+            "--tak-tls-host",
+            "takhost",
+            "--tak-tls-cert",
+            "client.pem",
+            "--tak-tls-key",
+            "client.key",
+            "--tak-tls-ca",
+            "ca.pem",
+        ],
+    )
+
+    with caplog.at_level("INFO"):
+        cli.fusion_main()
+
+    assert created["host"] == "takhost"
+    assert created["port"] == 8089
+    assert (created["cert"], created["key"], created["ca"]) == (
+        "client.pem",
+        "client.key",
+        "ca.pem",
+    )
+    sink = created["obj"]
+    assert any("TRK-track-tls0" in payload for payload in sink.sent)
+    assert sink.closed is True
+    assert any(
+        "Streaming CoT to TAK Server takhost:8089 over TLS" in r.message for r in caplog.records
+    )
+
+
+def test_file_and_tak_tls_sinks_are_both_active(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    replay_path = tmp_path / "scenario.json"
+    replay_path.write_text("[]", encoding="utf-8")
+
+    track = _fake_track("track-both0", T0)
+    monkeypatch.setattr(
+        cli, "JsonSapientSource", lambda path: _EventsOnceSource([(T0, [object()])])
+    )
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[track]]))
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+
+    tls_sent = []
+
+    class _FakeTakTlsSink:
+        def __init__(self, host, port, cert=None, key=None, ca=None):
+            pass
+
+        def send(self, payload):
+            tls_sent.append(payload)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cli, "TakTlsSink", _FakeTakTlsSink)
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "fusion",
+            "--config",
+            "sensors.json",
+            "--replay-file",
+            str(replay_path),
+            "--log-to-file",
+            "--tak-tls-host",
+            "takhost",
+        ],
+    )
+
+    cli.fusion_main()
+
+    # One run, both sinks: the file has the event AND the TLS sink received it.
+    file_out = (tmp_path / "fused_tracks_debug.xml").read_text(encoding="utf-8")
+    assert "TRK-track-both0" in file_out
+    assert any("TRK-track-both0" in payload for payload in tls_sent)
