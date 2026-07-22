@@ -40,7 +40,7 @@ Supports validated tactical data flows including:
 Transforms sensor data into operational tracks by:
 - Converting kinematic vectors into WGS84 geospatial coordinates.
 - Adding contextual metadata.
-- Broadcasting standardized Cursor-on-Target (CoT) XML to tactical clients such as ATAK and WinTAK.
+- Streaming standardized Cursor-on-Target (CoT) XML to a TAK Server over TCP+TLS, which disseminates it to connected ATAK/WinTAK clients — or writing it to file for offline validation.
 
 ### Edge-Native Integration
 
@@ -53,7 +53,7 @@ The system operates on a "Rosetta Stone" methodology. Incoming data is immediate
 ```text
 [ ASMs / Sensors ]         [ The Core Engine ]          [ C2 Consumers ]
                                                                  
-SAPIENT (JSON)   ──┐   ┌──> Pydantic Validation ──┐   ┌──> Cursor on Target (ATAK)
+SAPIENT (JSON)   ──┐   ┌──> Pydantic Validation ──┐   ┌──> Cursor on Target (TAK/TLS)
                    ├───┤                          ├───┤
 SAPIENT (Binary) ──┘   └──> Stone Soup Tracker  ──┘   └──> SAPIENT (HLDMM)
                             (UKF + JPDA)
@@ -79,15 +79,15 @@ pip install -e .
 ```
 
 ### 2. Verify with Replay Mode
-Test the math engine and tracking logic by replaying a validated scenario file. Ensure your local ATAK device is open on the same network to see the fused tracks appear dynamically.
+Test the math engine and tracking logic by replaying a validated scenario file. `--log-to-file` writes the fused CoT to `fused_tracks_debug.xml` for offline inspection — no network required.
 
 ```bash
-context-foundry-fusion --replay-file data/examples/sapient_messages.json --config config/sensors/joensuu.json
+context-foundry-fusion --replay-file data/examples/sapient_messages.json --config config/sensors/joensuu.json --log-to-file
 ```
 
 ## CLI Reference
 
-The installation exposes the context-foundry-fusion command globally. `--config` is always required, and at least one source (`--replay-file`, `--enable-sapient`, or `--enable-cot`) must be provided.
+The installation exposes the context-foundry-fusion command globally. `--config` is always required, and at least one source (`--replay-file`, `--enable-sapient`, or `--enable-cot`) must be provided. At least one output sink is also required — `--log-to-file`, `--tak-tls-host`, or both.
 
 | Flag / Argument | Type | Description | Default / Required |
 | :--- | :--- | :--- | :--- |
@@ -95,14 +95,20 @@ The installation exposes the context-foundry-fusion command globally. `--config`
 | `--replay-file` | `String` | Path to a JSON scenario file to replay. | *One source required* |
 | `--enable-sapient` | `Flag` | Enable the live SAPIENT UDP stream (port 5000). | `False` |
 | `--enable-cot` | `Flag` | Enable the live CoT UDP stream (port 6969). | `False` |
-| `--log-to-file` | `Flag` | Write fused CoT to `fused_tracks_debug.xml` instead of UDP broadcast. | `False` |
-| `--tak-ip` | `String` | The multicast IP address for Cursor on Target broadcasts. | `239.2.3.1` |
-| `--tak-port` | `Integer` | The UDP multicast port for Cursor on Target broadcasts. | `6969` |
+| `--log-to-file` | `Flag` | Write fused CoT to `fused_tracks_debug.xml` for offline validation. | *One sink required* |
+| `--tak-tls-host` | `String` | TAK Server host to stream CoT to over TCP+TLS; providing it enables the TLS sink. | *One sink required* |
+| `--tak-tls-port` | `Integer` | TAK Server TLS port. | `8089` |
+| `--tak-tls-cert` | `String` | Client certificate (PEM) for mutual TLS. | *Optional* |
+| `--tak-tls-key` | `String` | Client private key (PEM). | *Optional* |
+| `--tak-tls-ca` | `String` | CA bundle (PEM) used to verify the TAK Server. | *Optional* |
+
+The TAK Server `stdssl` CoT input (port 8089) is a mutual-TLS stream: supply a client certificate signed by the TAK CA (`--tak-tls-cert`/`--tak-tls-key`) and the CA bundle (`--tak-tls-ca`). Omitting `--tak-tls-ca` skips server verification (useful only for local/self-signed testing).
 
 Example:
 
 ```bash
-context-foundry-fusion --enable-sapient --tak-ip 192.168.1.255 --tak-port 4242 --config config/sensors/joensuu.json
+context-foundry-fusion --enable-sapient --config config/sensors/joensuu.json \
+  --tak-tls-host tak.example.mil --tak-tls-cert client.pem --tak-tls-key client.key --tak-tls-ca ca.pem
 ```
 
 ## Repository Structure

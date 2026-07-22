@@ -3,12 +3,13 @@
 
 import argparse
 import logging
-import socket
 from pathlib import Path
 
 from context_foundry.fusion import config
 from context_foundry.fusion.augmentor import TacticalContextAugmentor
 from context_foundry.fusion.serializers import CotSerializer, SapientSerializer
+from context_foundry.fusion.sinks.file import FileCotSink
+from context_foundry.fusion.sinks.tak_tls import TakTlsSink
 from context_foundry.fusion.sources.cot_stream import CotNetworkStream
 from context_foundry.fusion.sources.json_file import JsonSapientSource
 from context_foundry.fusion.sources.stream import NetworkSapientStream
@@ -29,10 +30,17 @@ def fusion_main():
     parser.add_argument(
         "--log-to-file",
         action="store_true",
-        help="Log CoT payloads to 'fused_tracks_debug.xml' instead of network broadcast",
+        help="Write fused CoT to 'fused_tracks_debug.xml' for offline validation",
     )
-    parser.add_argument("--tak-ip", default="239.2.3.1")
-    parser.add_argument("--tak-port", type=int, default=6969)
+    parser.add_argument(
+        "--tak-tls-host", help="TAK Server host to stream CoT to over TCP+TLS (enables the sink)"
+    )
+    parser.add_argument(
+        "--tak-tls-port", type=int, default=8089, help="TAK Server TLS port (default 8089)"
+    )
+    parser.add_argument("--tak-tls-cert", help="Client certificate (PEM) for mutual TLS")
+    parser.add_argument("--tak-tls-key", help="Client private key (PEM)")
+    parser.add_argument("--tak-tls-ca", help="CA bundle (PEM) to verify the TAK Server")
     parser.add_argument("--config", type=str, required=True, help="Path to sensor config JSON")
     args = parser.parse_args()
 
@@ -61,58 +69,68 @@ def fusion_main():
     augmentor = TacticalContextAugmentor()
     serializers = {"TAK": CotSerializer(), "SAPIENT": SapientSerializer()}
 
-    # Setup UDP Socket only if not logging to file
-    udp_sock = None
-    if not args.log_to_file:
-        udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        udp_sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
-        logger.info(f"TAK Multicast Broadcast active on {args.tak_ip}:{args.tak_port}")
-    else:
-        logger.info("Validation Mode: Logging fused tracks to 'fused_tracks_debug.xml'")
+    # Setup output sinks. At least one is required; file and TLS can be combined.
+    sinks = []
+    if args.log_to_file:
+        sinks.append(FileCotSink("fused_tracks_debug.xml"))
+        logger.info("Logging fused CoT to 'fused_tracks_debug.xml' for offline validation")
+    if args.tak_tls_host:
+        sinks.append(
+            TakTlsSink(
+                args.tak_tls_host,
+                args.tak_tls_port,
+                cert=args.tak_tls_cert,
+                key=args.tak_tls_key,
+                ca=args.tak_tls_ca,
+            )
+        )
+        logger.info(f"Streaming CoT to TAK Server {args.tak_tls_host}:{args.tak_tls_port} over TLS")
+
+    if not sinks:
+        logger.error(
+            "No output sink configured. Add --tak-tls-host <host> to stream CoT to a TAK Server "
+            "over TLS, or --log-to-file to write CoT to a file for offline validation."
+        )
+        return
 
     logger.info("Fusion loop started. Listening for targets...")
 
     # 4. The Main Loop
-    while True:
-        processed_any_events = False
-        for source in sources:
-            for timestamp, detections in source.iter_events():
-                processed_any_events = True
-                active_tracks = tracker.process_async_event(timestamp, set(detections))
+    try:
+        while True:
+            processed_any_events = False
+            for source in sources:
+                for timestamp, detections in source.iter_events():
+                    processed_any_events = True
+                    active_tracks = tracker.process_async_event(timestamp, set(detections))
 
-                # Serialization / Output
-                for track in active_tracks:
-                    # ONLY broadcast if this track was updated during this specific event timestamp
-                    # This prevents re-broadcasting tracks that haven't changed
-                    if track.state.timestamp == timestamp:
-                        tactical_track = augmentor.extract_tactical_track(track)
-                        cot_payload = serializers["TAK"].serialize(tactical_track)
+                    # Serialization / Output
+                    for track in active_tracks:
+                        # ONLY broadcast if this track was updated during this specific event
+                        # timestamp; this prevents re-broadcasting tracks that haven't changed
+                        if track.state.timestamp == timestamp:
+                            tactical_track = augmentor.extract_tactical_track(track)
+                            cot_payload = serializers["TAK"].serialize(tactical_track)
 
-                        if args.log_to_file:
-                            with open("fused_tracks_debug.xml", "a") as f:
-                                f.write(cot_payload + "\n")
-                        else:
-                            try:
-                                if udp_sock:
-                                    udp_sock.sendto(
-                                        cot_payload.encode("utf-8"), (args.tak_ip, args.tak_port)
-                                    )
-                            except OSError as e:
-                                logger.error(f"Network error: {e}")
+                            for sink in sinks:
+                                sink.send(cot_payload)
 
-                        logger.info(
-                            f"Broadcast Update for Track {tactical_track.track_id[-4:]} | Threat: {tactical_track.threat_level.upper()}"
-                        )
+                            logger.info(
+                                f"Broadcast Update for Track {tactical_track.track_id[-4:]} | Threat: {tactical_track.threat_level.upper()}"
+                            )
 
-        # Exit logic for replay files
-        if (
-            args.replay_file
-            and not args.enable_sapient
-            and not args.enable_cot
-            and not processed_any_events
-        ):
-            logger.info("Replay file processing complete. Exiting.")
-            break
+            # Exit logic for replay files
+            if (
+                args.replay_file
+                and not args.enable_sapient
+                and not args.enable_cot
+                and not processed_any_events
+            ):
+                logger.info("Replay file processing complete. Exiting.")
+                break
+    finally:
+        for sink in sinks:
+            sink.close()
 
 
 if __name__ == "__main__":
