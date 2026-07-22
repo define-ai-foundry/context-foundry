@@ -1,0 +1,41 @@
+# Keep the build context small and deterministic.
+.git
+.venv
+venv
+ENV
+env
+
+# Python caches / build artifacts
+__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+dist
+build
+
+# Generated / large runtime data not needed to build the image
+data/generated_output
+data/tactical_scenarios
+data/export_output
+data/terrain
+fused_tracks_debug.xml
+*.log
+*.tmp
+*.bak
+
+# Local env / editor / docs not needed at build time
+.envrc
+.env
+.vscode
+.idea
+docs
+protos
+winter_swarm_header.jpg
+
+# The container/dev artifacts themselves
+compose.yaml
+Makefile
