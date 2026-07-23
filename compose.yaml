@@ -35,3 +35,40 @@ services:
     volumes:
       - .:/app
     command: ["sh", "-c", "ruff check . && ruff format --check ."]
+
+  # A mutual-TLS listener stands in for a TAK Server so the runtime image can stream CoT over a real socket.
+  # Run: make tls-demo
+  tls-listener:
+    profiles: ["tls"]
+    build:
+      context: .
+      target: dev
+    image: context-foundry:dev-test
+    volumes:
+      - .:/app
+      - ./dev/certs:/certs:ro
+    command: ["python", "dev/tls_cot_listener.py"]
+
+  fusion-tls:
+    profiles: ["tls"]
+    build:
+      context: .
+      target: runtime
+    image: context-foundry:dev
+    depends_on:
+      - tls-listener
+    volumes:
+      - ./dev/certs:/certs:ro
+    command:
+      - --replay-file
+      - data/examples/sapient_messages.json
+      - --config
+      - config/sensors/joensuu.json
+      - --tak-tls-host
+      - tls-listener
+      - --tak-tls-cert
+      - /certs/client.pem
+      - --tak-tls-key
+      - /certs/client.key
+      - --tak-tls-ca
+      - /certs/ca.pem

@@ -7,7 +7,7 @@ COMPOSE := $(ENGINE) compose
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build demo test lint shell down
+.PHONY: help build demo test lint shell certs tls-demo down
 
 help: ## Show available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -29,5 +29,15 @@ lint: ## Run ruff lint + format check in-container (matches CI)
 shell: ## Open a shell in the dev image with the worktree mounted
 	$(COMPOSE) run --rm test sh
 
+certs: ## Generate throwaway TLS certs for the local CoT listener (openssl runs in-container)
+	$(COMPOSE) run --rm --no-deps test sh dev/gen-certs.sh
+
+tls-demo: certs ## Replay -> TLS -> local listener; prints the CoT it receives
+	$(COMPOSE) --profile tls up -d --build tls-listener
+	$(COMPOSE) --profile tls run --rm fusion-tls; status=$$?; \
+		echo "=== tls-listener received ==="; \
+		$(COMPOSE) --profile tls logs tls-listener; \
+		$(COMPOSE) --profile tls down >/dev/null 2>&1; exit $$status
+
 down: ## Stop and remove compose resources
-	$(COMPOSE) down --remove-orphans
+	$(COMPOSE) --profile tls down --remove-orphans
