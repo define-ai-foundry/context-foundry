@@ -3,6 +3,7 @@
 
 import argparse
 import logging
+import time
 from pathlib import Path
 
 from context_foundry.fusion import config
@@ -28,6 +29,18 @@ def fusion_main():
     )
     parser.add_argument("--enable-cot", action="store_true", help="Enable live CoT UDP stream")
     parser.add_argument("--replay-file", type=str, help="Path to JSON scenario file")
+    parser.add_argument(
+        "--loop",
+        action="store_true",
+        help="When replaying a --replay-file, restart the replay continuously instead of "
+        "exiting (turns a finite replay into a long-running feed).",
+    )
+    parser.add_argument(
+        "--loop-delay",
+        type=float,
+        default=60.0,
+        help="Seconds to wait between replay iterations when --loop is set (default: 60).",
+    )
     parser.add_argument(
         "--log-to-file",
         action="store_true",
@@ -68,6 +81,12 @@ def fusion_main():
     )
     parser.add_argument("--config", type=str, required=True, help="Path to sensor config JSON")
     args = parser.parse_args()
+
+    if args.loop and not args.replay_file:
+        logger.warning("--loop has no effect without --replay-file; live sources never terminate.")
+
+    # A negative sleep would raise; clamp once and use the local everywhere below.
+    loop_delay = max(0.0, args.loop_delay)
 
     # Load the sensor network from the file
     try:
@@ -168,6 +187,15 @@ def fusion_main():
                 and not args.enable_cot
                 and not processed_any_events
             ):
+                if args.loop:
+                    logger.info(f"Replay drained. Looping again in {loop_delay}s.")
+                    for source in sources:
+                        source.reset()
+                    # Replay timestamps jump backwards on restart and Stone Soup cannot
+                    # predict backwards, so a fresh tracker per pass is required.
+                    tracker = SapientAsynchronousTracker()
+                    time.sleep(loop_delay)
+                    continue
                 logger.info("Replay file processing complete. Exiting.")
                 break
     finally:

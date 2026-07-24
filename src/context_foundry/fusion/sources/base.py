@@ -29,3 +29,9 @@ class SapientSource(ABC):
             iterable of Stone Soup Detection objects
         """
         raise NotImplementedError
+
+    def reset(self):  # noqa: B027  intentional concrete no-op; replay sources override
+        """Rewind the source so iter_events() can be consumed again.
+
+        No-op for live streams; finite replay sources override this.
+        """

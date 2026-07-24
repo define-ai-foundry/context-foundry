@@ -75,6 +75,21 @@ def test_iter_events_is_one_shot(tmp_path):
     assert list(source.iter_events()) == []
 
 
+def test_reset_allows_replay_to_be_consumed_again(tmp_path):
+    """reset() flips _exhausted back so a drained source re-yields its file."""
+    ts = "2026-01-01T00:00:00.000000Z"
+    messages = [_msg("node-A", ts, "obj-1")]
+    path = tmp_path / "scenario.json"
+    path.write_text(json.dumps(messages), encoding="utf-8")
+
+    source = JsonSapientSource(path)
+    assert len(list(source.iter_events())) == 1
+    assert list(source.iter_events()) == []  # drained
+
+    source.reset()
+    assert len(list(source.iter_events())) == 1  # re-armed, same events again
+
+
 def test_iter_events_drops_invalid_messages(tmp_path):
     ts = "2026-01-01T00:00:00.000000Z"
     invalid = {"sapientMessage": {"timestamp": ts, "nodeId": "node-A"}}  # no detectionReport

@@ -85,6 +85,12 @@ Test the math engine and tracking logic by replaying a validated scenario file. 
 context-foundry-fusion --replay-file data/examples/sapient_messages.json --config config/sensors/joensuu.json --log-to-file
 ```
 
+A finite replay exits once drained. Add `--loop` to restart it continuously (waiting `--loop-delay` seconds, default `60`, between iterations), turning a one-shot scenario into a long-running feed — ideal as a persistent Deployment demo streaming into TAK. Each iteration starts a fresh tracker, since replay timestamps jump backwards on restart. `--loop` only applies with `--replay-file`; live sources never terminate.
+
+```bash
+context-foundry-fusion --replay-file data/examples/sapient_messages.json --config config/sensors/joensuu.json --log-to-file --loop --loop-delay 30
+```
+
 ## Running in a Container
 
 The engine ships a container image and a `make`-driven dev loop that works with **Docker or Podman** (auto-detected; override with `make ENGINE=podman …`).
@@ -121,6 +127,8 @@ The installation exposes the `context-foundry-fusion` command globally. `--confi
 | :--- | :--- | :--- | :--- |
 | `--config` | `String` | Path to the sensor network config JSON. | *Required* |
 | `--replay-file` | `String` | Path to a JSON scenario file to replay. | *One source required* |
+| `--loop` | `Flag` | With `--replay-file`, restart the replay continuously instead of exiting — turns a one-shot replay into a continuous feed (ideal as a long-running Deployment demo streaming into TAK). No effect without `--replay-file`. | `False` |
+| `--loop-delay` | `Float` | Seconds to wait between replay iterations when `--loop` is set. | `60` |
 | `--enable-sapient` | `Flag` | Enable the live SAPIENT UDP stream (port 5000). | `False` |
 | `--enable-cot` | `Flag` | Enable the live CoT UDP stream (port 6969). | `False` |
 | `--log-to-file` | `Flag` | Write fused CoT to `fused_tracks_debug.xml` for offline validation. | *One sink required* |
