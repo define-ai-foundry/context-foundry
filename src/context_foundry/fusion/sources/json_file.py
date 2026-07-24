@@ -32,6 +32,10 @@ class JsonSapientSource(SapientSource):
         # A replay file is finite: it is drained on the first pass and empty after
         self._exhausted = False
 
+    def reset(self):
+        # Re-arm the finite file so a subsequent iter_events() re-reads and re-yields it.
+        self._exhausted = False
+
     def iter_events(self):
         # The main loop re-polls every source each pass; a finite file must be
         # consumed exactly once, otherwise the replay-exit condition is never met

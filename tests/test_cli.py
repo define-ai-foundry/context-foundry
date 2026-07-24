@@ -53,6 +53,25 @@ class _EventsThenStopSource:
             raise _Stop
 
 
+class _ResettableEventsSource:
+    """Fake replay source: yields `events` on the first iter_events() after each
+    reset(), nothing after. Records reset() invocations for loop assertions."""
+
+    def __init__(self, events):
+        self._events = events
+        self.calls = 0
+        self.resets = 0
+
+    def iter_events(self):
+        self.calls += 1
+        if self.calls == 1:
+            yield from self._events
+
+    def reset(self):
+        self.resets += 1
+        self.calls = 0
+
+
 class _FakeTracker:
     def __init__(self, tracks_by_call):
         self._tracks_by_call = tracks_by_call
@@ -355,6 +374,133 @@ def test_tak_ws_host_constructs_sink_streams_payload_and_closes(monkeypatch, cap
     assert any("TRK-track-ws00" in payload for payload in sink.sent)
     assert sink.closed is True
     assert any("Streaming CoT to TAK Server takhost:8446" in r.message for r in caplog.records)
+
+
+def _run_looping_replay(monkeypatch, tmp_path, extra_argv):
+    """Drive fusion_main in --loop mode with a finite replay + file sink.
+
+    Returns (source, sleep_seconds, tracker_count). cli.time.sleep is patched to
+    record its argument and raise _Stop so the second (drained) pass escapes.
+    """
+    monkeypatch.chdir(tmp_path)
+    replay_path = tmp_path / "scenario.json"
+    replay_path.write_text("[]", encoding="utf-8")
+
+    source = _ResettableEventsSource([(T0, [object()])])
+    track = _fake_track("loop-track-01", T0)
+    tracker_count = {"n": 0}
+
+    def _make_tracker():
+        tracker_count["n"] += 1
+        return _FakeTracker([[track]])
+
+    monkeypatch.setattr(cli, "JsonSapientSource", lambda path: source)
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", _make_tracker)
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+
+    recorded = {}
+
+    def _sleep_stop(seconds):
+        recorded["sleep"] = seconds
+        raise _Stop
+
+    monkeypatch.setattr(cli.time, "sleep", _sleep_stop)
+
+    argv = [
+        "fusion",
+        "--config",
+        "sensors.json",
+        "--replay-file",
+        str(replay_path),
+        "--log-to-file",
+    ]
+    argv += extra_argv
+    monkeypatch.setattr("sys.argv", argv)
+
+    with pytest.raises(_Stop):
+        cli.fusion_main()
+
+    return source, recorded["sleep"], tracker_count["n"]
+
+
+def test_loop_reruns_replay_resets_source_and_rebuilds_tracker(monkeypatch, tmp_path):
+    source, sleep_seconds, tracker_count = _run_looping_replay(monkeypatch, tmp_path, ["--loop"])
+
+    assert sleep_seconds == 60.0  # default loop delay
+    assert source.resets == 1  # source rewound before the next pass
+    assert tracker_count >= 2  # fresh tracker per loop
+
+
+def test_loop_continues_to_a_second_iteration(monkeypatch, tmp_path):
+    """The loop `continue`s past sleep back into a fresh pass; escape on the
+    second sleep so a full re-iteration (reset -> re-yield -> drain) is exercised."""
+    monkeypatch.chdir(tmp_path)
+    replay_path = tmp_path / "scenario.json"
+    replay_path.write_text("[]", encoding="utf-8")
+
+    source = _ResettableEventsSource([(T0, [object()])])
+    track = _fake_track("loop-track-02", T0)
+    monkeypatch.setattr(cli, "JsonSapientSource", lambda path: source)
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[track]]))
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+
+    sleeps = []
+
+    def _sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) >= 2:
+            raise _Stop
+
+    monkeypatch.setattr(cli.time, "sleep", _sleep)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "fusion",
+            "--config",
+            "sensors.json",
+            "--replay-file",
+            str(replay_path),
+            "--log-to-file",
+            "--loop",
+        ],
+    )
+
+    with pytest.raises(_Stop):
+        cli.fusion_main()
+
+    assert len(sleeps) == 2  # looped once past `continue`, escaped on the second drain
+    assert source.resets == 2
+
+
+def test_loop_delay_is_honored(monkeypatch, tmp_path):
+    _, sleep_seconds, _ = _run_looping_replay(
+        monkeypatch, tmp_path, ["--loop", "--loop-delay", "5"]
+    )
+    assert sleep_seconds == 5.0
+
+
+def test_negative_loop_delay_clamps_to_zero(monkeypatch, tmp_path):
+    _, sleep_seconds, _ = _run_looping_replay(
+        monkeypatch, tmp_path, ["--loop", "--loop-delay", "-3"]
+    )
+    assert sleep_seconds == 0.0
+
+
+def test_loop_without_replay_file_warns_and_is_noop(monkeypatch, caplog):
+    monkeypatch.setattr(
+        cli, "NetworkSapientStream", lambda port: _EventsThenStopSource([(T0, [object()])])
+    )
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["fusion", "--config", "sensors.json", "--enable-sapient", "--loop", "--log-to-file"],
+    )
+
+    with caplog.at_level("WARNING"), pytest.raises(_Stop):
+        cli.fusion_main()
+
+    assert any("--loop has no effect without --replay-file" in r.message for r in caplog.records)
 
 
 def test_no_sink_message_names_the_ws_sink(monkeypatch, caplog, tmp_path):
