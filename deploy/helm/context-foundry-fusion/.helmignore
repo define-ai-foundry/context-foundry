@@ -1,0 +1,14 @@
+# Patterns to ignore when packaging Helm charts.
+.DS_Store
+.git/
+.gitignore
+.bak
+.tmp
+.orig
+*~
+# CI/editor cruft
+.idea/
+.vscode/
+*.swp
+# Test/render artifacts
+ci/

@@ -1,0 +1,210 @@
+# Default values for context-foundry-fusion.
+#
+# The app is ENTIRELY argv-driven. It reads NO environment variables. Every
+# knob below is translated by the chart into the container's `args` (argv) list
+# plus a mounted JSON config file. See templates/_helpers.tpl (the argv builder).
+#
+# ---------------------------------------------------------------------------
+# THE SOURCE/SINK CONTRACT (enforced by the app; the chart also fails fast):
+#   * You MUST enable AT LEAST ONE source: {replayFile, sapient, cot}
+#   * The sink is the WebTAK WebSocket (sinks.takWs), on by default.
+# Otherwise the app errors and exits. The chart's validation helper `fail`s at
+# template time if no source is set or the WS sink is disabled.
+#
+# The workload is a long-running Deployment (replicas: 1, strategy: Recreate):
+# either LIVE sources (sapient/cot UDP) or a looping replay (sources.loop) feed
+# the WebTAK-WS sink. A one-shot finite replay belongs in local dev (docker run /
+# compose / `make demo`), not a cluster deploy — so there is no Job mode.
+#
+# OUT-OF-THE-BOX default render is a valid looping replay -> WebTAK-WS demo:
+#   source = replayFile (baked-in sample, sources.loop on), sink = takWs (dev).
+# ---------------------------------------------------------------------------
+
+image:
+  repository: context-foundry
+  tag: dev
+  pullPolicy: IfNotPresent
+
+# Secrets for pulling the image from a private registry.
+imagePullSecrets: []
+#  - name: my-registry-creds
+
+# Override the generated names.
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Create a dedicated ServiceAccount. The app needs no Kubernetes API access.
+  create: true
+  # Name to use; if empty and create=true a name is derived from the fullname.
+  name: ""
+  annotations: {}
+
+# Number of replicas. Keep at 1 — the fusion engine holds in-memory track
+# state and is not horizontally scalable.
+replicaCount: 1
+
+# ---------------------------------------------------------------------------
+# CONFIG JSON (--config, ALWAYS required)
+# ---------------------------------------------------------------------------
+config:
+  # If set, mount this existing ConfigMap instead of rendering one from
+  # `config.sensors`. The ConfigMap must contain a key `sensors.json`.
+  existingConfigMap: ""
+  # Sensor-network definition, rendered to /etc/context-foundry/sensors.json
+  # (via toJson) when existingConfigMap is empty. Default = the real Joensuu
+  # network so the chart works out-of-the-box.
+  sensors:
+    version: "1.0"
+    name: "Joensuu Blue Team Sensor Network"
+    description: "Primary sensor deployment for the Joensuu test area"
+    primary_anchor_node: "FI-MIL-RAD-KOLI-01"
+    coordinate_system: "WGS84"
+    sensors:
+      - id: "FI-MIL-RAD-KOLI-01"
+        type: "radar"
+        subtype: "long_range_surveillance"
+        lat: 62.95
+        lon: 29.8
+        alt: 250.0
+        range_m: 15000
+        update_rate_sec: 2.0
+        capabilities: ["position_3d", "velocity", "classification"]
+        status: "operational"
+        notes: "Primary anchor node - establishes ENU origin"
+      - id: "acoustic_array_01"
+        type: "acoustic"
+        subtype: "passive_ring_array"
+        lat: 62.593
+        lon: 29.836
+        alt: 180.0
+        range_m: 8000
+        update_rate_sec: 5.0
+        capabilities: ["bearing_only"]
+        status: "operational"
+        notes: "Passive acoustic array - provides azimuth measurements"
+      - id: "eo_sensor_01"
+        type: "electro_optical"
+        subtype: "thermal_visible"
+        lat: 62.601
+        lon: 29.763
+        alt: 195.0
+        range_m: 6000
+        update_rate_sec: 1.0
+        capabilities: ["position_3d", "classification"]
+        status: "operational"
+    metadata:
+      deployment_date: "2026-06-01"
+      operator: "FIN NIR LCI-X Crucible 2-26"
+      theater: "Joensuu Test Range"
+      default_max_coastal_seconds: 45.0
+
+# ---------------------------------------------------------------------------
+# SOURCES — enable AT LEAST ONE.
+# ---------------------------------------------------------------------------
+sources:
+  # Replay a finite JSON scenario. Path is inside the image (baked-in sample
+  # shown) or a mounted file. Empty string = disabled.
+  replayFile: "data/examples/sapient_messages.json"
+  # Continuously re-run the replay when it finishes (only applies with
+  # replayFile). Turns a one-shot replay into a long-running feed so the pod
+  # stays Running/healthy (vs the exit-then-restart CrashLoopBackOff you'd get
+  # otherwise). The engine rebuilds its tracker each pass. Set false only if the
+  # source is actually live (sapient/cot) rather than a replay file.
+  loop:
+    enabled: true
+    delaySeconds: 60
+  # Live SAPIENT protobuf over UDP :5000 (binds 0.0.0.0). Needs a Service.
+  sapient:
+    enabled: false
+  # Live CoT over UDP :6969 (binds 0.0.0.0). Needs a Service.
+  cot:
+    enabled: false
+
+# ---------------------------------------------------------------------------
+# SINK — WebTAK streaming over WSS: wss://<host>:<port>/takproto/1
+# The one blessed transport (outbound only, needs no Service). CoT is tagged
+# with the token's Keycloak groups for per-group isolation. (The app also
+# supports a raw-TLS and a file sink; those are local-dev paths — use
+# `make demo` / docker run — and are intentionally not exposed by this chart.)
+# ---------------------------------------------------------------------------
+sinks:
+  takWs:
+    enabled: true
+    host: "tak-server.tak.svc.cluster.local"
+    port: 8446
+    # present => verify server TLS. Off (dev) => skip verification.
+    verifyTls: false
+    # Auth is OPTIONAL (anonymous/dev when all empty). Provide EITHER the
+    # Keycloak client_credentials trio (prod, per-group cf-<group>) OR a static
+    # bearer token (handy for quick tests — mint one and pass it).
+    auth:
+      # Keycloak .../protocol/openid-connect/token
+      keycloakTokenUrl: ""
+      oidcClientId: ""
+      # SECRET MATERIAL — never rendered into args as a literal. Sourced as an
+      # env var (secretKeyRef) and referenced in args as $(OIDC_CLIENT_SECRET).
+      #   secretName: reference an existing Secret's key (preferred in prod).
+      #   value:      dev convenience — chart renders a Secret holding this.
+      oidcClientSecret:
+        secretName: ""
+        secretKey: "oidc-client-secret"
+        value: ""
+      # Static bearer alternative — SECRET MATERIAL, same handling.
+      bearerToken:
+        secretName: ""
+        secretKey: "tak-bearer-token"
+        value: ""
+
+# Extra raw args appended verbatim to the end of the argv list.
+extraArgs: []
+
+# ---------------------------------------------------------------------------
+# Service — rendered only when service.enabled OR a live UDP source is on.
+# The WS sink is OUTBOUND, so it needs no Service. UDP 5000 = sapient,
+# UDP 6969 = cot.
+# ---------------------------------------------------------------------------
+service:
+  enabled: false
+  type: ClusterIP
+  annotations: {}
+
+# ---------------------------------------------------------------------------
+# Security — prod-safe defaults matching the image (non-root uid/gid 10001).
+# ---------------------------------------------------------------------------
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault
+  # The WS sink is outbound-only and needs no local writes.
+  readOnlyRootFilesystem: true
+
+resources:
+  # Fusion engine runs Stone Soup UKF/JPDA — give it headroom.
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+podAnnotations: {}
+podLabels: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
