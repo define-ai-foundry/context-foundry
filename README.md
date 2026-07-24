@@ -40,7 +40,7 @@ Supports validated tactical data flows including:
 Transforms sensor data into operational tracks by:
 - Converting kinematic vectors into WGS84 geospatial coordinates.
 - Adding contextual metadata.
-- Streaming standardized Cursor-on-Target (CoT) XML to a TAK Server over TCP+TLS, which disseminates it to connected ATAK/WinTAK clients — or writing it to file for offline validation.
+- Delivering standardized Cursor-on-Target (CoT) XML to a TAK Server — over the WebTAK streaming WebSocket (bearer-authenticated; tracks tagged with the producer's Keycloak groups) or a raw TCP+TLS stream — for dissemination to connected WebTAK/ATAK/WinTAK clients, or writing it to file for offline validation.
 
 ### Edge-Native Integration
 
@@ -53,7 +53,7 @@ The system operates on a "Rosetta Stone" methodology. Incoming data is immediate
 ```text
 [ ASMs / Sensors ]         [ The Core Engine ]          [ C2 Consumers ]
                                                                  
-SAPIENT (JSON)   ──┐   ┌──> Pydantic Validation ──┐   ┌──> Cursor on Target (TAK/TLS)
+SAPIENT (JSON)   ──┐   ┌──> Pydantic Validation ──┐   ┌──> Cursor on Target → TAK (WS / TLS)
                    ├───┤                          ├───┤
 SAPIENT (Binary) ──┘   └──> Stone Soup Tracker  ──┘   └──> SAPIENT (HLDMM)
                             (UKF + JPDA)
@@ -85,9 +85,37 @@ Test the math engine and tracking logic by replaying a validated scenario file. 
 context-foundry-fusion --replay-file data/examples/sapient_messages.json --config config/sensors/joensuu.json --log-to-file
 ```
 
+## Running in a Container
+
+The engine ships a container image and a `make`-driven dev loop that works with **Docker or Podman** (auto-detected; override with `make ENGINE=podman …`).
+
+```bash
+make build     # build the runtime + dev images
+make demo      # replay the example scenario, log fused CoT, clean exit
+make test      # run the suite in-container (matches CI, 95% coverage gate)
+make lint      # ruff check + format --check in-container
+make shell     # shell into the dev image with the worktree mounted
+```
+
+`make test`/`make lint` bind-mount the live worktree, so edits need no rebuild. `make demo` runs the **baked** runtime image — re-run `make build` after changing `src/`.
+
+### Validate against a real TAK Server + WebTAK (per-group isolation)
+
+A `tak` compose profile stands up a real `pvarki/tak-server` + PostGIS locally and demonstrates the group-correct path: two groups, each with its own producer, tracks visible **only** to that group's WebTAK users.
+
+```bash
+make tak-up      # start TAK Server + Postgres (first boot ~2–3 min)
+make tak-users   # create one File user per group: 'alpha' (group alpha), 'bravo' (group bravo)
+make tak-demo                        # replay into group 'alpha' over the WebTAK WebSocket sink
+make tak-demo TAK_DEMO_GROUP=bravo   # ...or into group 'bravo'
+make tak-down    # stop (keeps volumes);  make tak-clean wipes them
+```
+
+`make tak-demo` fetches a TAK `/oauth/token` bearer for that group's File user and runs `TakWsSink` against `wss://…:8446/takproto/1`, so the CoT is tagged with the user's single TAK group. Log into `https://localhost:8446` as `alpha` / `Fusion-Demo-2026!` — with the map open **before** you run `make tak-demo` (TAK does not backfill history to a viewer that connects after the stream) — and you will see the tracks; log in as `bravo` and you will not. This mirrors the production model (one producer per group), using TAK File-user tokens locally in place of Keycloak; the Keycloak-token equivalent has been verified against a real TAK + Keycloak cluster. A raw TCP+TLS sink is also available (`make tls-demo`).
+
 ## CLI Reference
 
-The installation exposes the context-foundry-fusion command globally. `--config` is always required, and at least one source (`--replay-file`, `--enable-sapient`, or `--enable-cot`) must be provided. At least one output sink is also required — `--log-to-file`, `--tak-tls-host`, or both.
+The installation exposes the `context-foundry-fusion` command globally. `--config` is always required, and at least one source (`--replay-file`, `--enable-sapient`, or `--enable-cot`) must be provided. At least one output sink is also required — `--log-to-file`, `--tak-ws-host`, `--tak-tls-host`, or any combination.
 
 | Flag / Argument | Type | Description | Default / Required |
 | :--- | :--- | :--- | :--- |
@@ -96,20 +124,39 @@ The installation exposes the context-foundry-fusion command globally. `--config`
 | `--enable-sapient` | `Flag` | Enable the live SAPIENT UDP stream (port 5000). | `False` |
 | `--enable-cot` | `Flag` | Enable the live CoT UDP stream (port 6969). | `False` |
 | `--log-to-file` | `Flag` | Write fused CoT to `fused_tracks_debug.xml` for offline validation. | *One sink required* |
-| `--tak-tls-host` | `String` | TAK Server host to stream CoT to over TCP+TLS; providing it enables the TLS sink. | *One sink required* |
-| `--tak-tls-port` | `Integer` | TAK Server TLS port. | `8089` |
+| `--tak-ws-host` | `String` | TAK host for the WebTAK WebSocket sink (bearer-auth; CoT tagged with the token's Keycloak groups). Enables the sink. | *One sink required* |
+| `--tak-ws-port` | `Integer` | WebTAK WebSocket port. | `8446` |
+| `--keycloak-token-url` | `String` | Keycloak token endpoint for the `client_credentials` grant. | *WS: unless `--tak-bearer-token`* |
+| `--oidc-client-id` | `String` | Keycloak client id — the producer identity, whose group its CoT lands in. | *WS: with token URL* |
+| `--oidc-client-secret` | `String` | Keycloak client secret (confidential client). | *Optional* |
+| `--tak-bearer-token` | `String` | Static bearer token, as an alternative to a Keycloak grant. | *Optional* |
+| `--tak-ws-verify-tls` | `Flag` | Verify the TAK server TLS cert (default skips it, for self-signed dev). | `False` |
+| `--tak-tls-host` | `String` | TAK host to stream CoT to over raw TCP+TLS (port 8089); enables the TLS sink. | *One sink required* |
+| `--tak-tls-port` | `Integer` | TAK TLS port. | `8089` |
 | `--tak-tls-cert` | `String` | Client certificate (PEM) for mutual TLS. | *Optional* |
 | `--tak-tls-key` | `String` | Client private key (PEM). | *Optional* |
 | `--tak-tls-ca` | `String` | CA bundle (PEM) used to verify the TAK Server. | *Optional* |
 
-The TAK Server `stdssl` CoT input (port 8089) is a mutual-TLS stream: supply a client certificate signed by the TAK CA (`--tak-tls-cert`/`--tak-tls-key`) and the CA bundle (`--tak-tls-ca`). Omitting `--tak-tls-ca` skips server verification (useful only for local/self-signed testing).
+### Delivering CoT to a TAK Server
 
-Example:
+TAK only shows a track to viewers who share a **group** with it, so the choice of sink is really a choice of how the producer's group is assigned:
 
-```bash
-context-foundry-fusion --enable-sapient --config config/sensors/joensuu.json \
-  --tak-tls-host tak.example.mil --tak-tls-cert client.pem --tak-tls-key client.key --tak-tls-ca ca.pem
-```
+- **WebTAK WebSocket + Keycloak (`--tak-ws-host`, recommended).** The producer authenticates to `wss://<host>:8446/takproto/1` with a Keycloak bearer (a `client_credentials` grant via `--keycloak-token-url`/`--oidc-client-id`/`--oidc-client-secret`, or a static `--tak-bearer-token`). **CoT is tagged with the token's Keycloak `groups`** — so run **one producer per group** with a Keycloak identity in that single group, and only that group's WebTAK users see its tracks. No client certificate. This is the group-correct path for a multi-tenant TAK, verified end-to-end against a real TAK + Keycloak cluster.
+
+  ```bash
+  context-foundry-fusion --replay-file data/examples/sapient_messages.json \
+    --config config/sensors/joensuu.json \
+    --tak-ws-host tak.example.mil \
+    --keycloak-token-url https://iam.example.mil/realms/rain-realm/protocol/openid-connect/token \
+    --oidc-client-id cf-team-viper --oidc-client-secret "$CF_CLIENT_SECRET"
+  ```
+
+- **Raw TCP+TLS stream (`--tak-tls-host`).** Streams newline-delimited CoT to the TAK `stdssl` input (port 8089). With `authRequired="true"` it is mutual TLS — supply a CA-signed client cert (`--tak-tls-cert`/`--tak-tls-key`) and the CA bundle (`--tak-tls-ca`); omitting `--tak-tls-ca` skips server verification (local/self-signed only). **Group assignment is server-side, not from the cert's OU** — TAK's `x509groups` OU→group mapping does not work on the stock pvarki image, so the group comes from a `<filtergroup>` on the input or from registering the cert as a group user (`certmod -g`, which requires a messaging restart).
+
+  ```bash
+  context-foundry-fusion --enable-sapient --config config/sensors/joensuu.json \
+    --tak-tls-host tak.example.mil --tak-tls-cert client.pem --tak-tls-key client.key --tak-tls-ca ca.pem
+  ```
 
 ## Repository Structure
 
@@ -172,6 +219,11 @@ context-foundry/
 │  │  │  │  ├─ base.py
 │  │  │  │  ├─ cot.py
 │  │  │  │  └─ sapient.py
+│  │  │  ├─ sinks/
+│  │  │  │  ├─ base.py
+│  │  │  │  ├─ file.py
+│  │  │  │  ├─ tak_tls.py
+│  │  │  │  └─ tak_ws.py
 │  │  │  ├─ augmentor.py
 │  │  │  ├─ config.py
 │  │  │  ├─ models.py
@@ -201,6 +253,11 @@ context-foundry/
 ├─ .github/
 │  └─ workflows/
 │     └─ ci.yml
+├─ Dockerfile
+├─ .dockerignore
+├─ compose.yaml
+├─ Makefile
+├─ dev/                    # local TLS listener + real-TAK stack helpers (certs gitignored)
 ├─ compile_protos.sh
 ├─ winter_swarm_header.jpg
 ├─ LICENSE
