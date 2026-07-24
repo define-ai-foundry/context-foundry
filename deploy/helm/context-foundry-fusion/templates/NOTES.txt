@@ -1,0 +1,25 @@
+context-foundry-fusion  {{ .Chart.AppVersion }}  —  release {{ .Release.Name }}
+
+Argv the container runs (context-foundry-fusion + these args):
+{{- include "context-foundry-fusion.args" . | nindent 2 }}
+
+────────────────────────────────────────────────────────────────────
+View logs
+  kubectl -n {{ .Release.Namespace }} logs -f deploy/{{ include "context-foundry-fusion.fullname" . }}
+
+Continuous replay feed (default)
+  With sources.loop.enabled=true (default) the replay restarts every
+  {{ .Values.sources.loop.delaySeconds }}s, so the Deployment runs as a healthy long-lived feed
+  (no exit/restart CrashLoopBackOff). The engine rebuilds its tracker each pass.
+  Point at live sensors instead with sources.sapient.enabled / sources.cot.enabled.
+
+Wire Keycloak auth for the WebTAK-WS sink
+  --set sinks.takWs.auth.keycloakTokenUrl=https://<iam>/realms/<realm>/protocol/openid-connect/token \
+  --set sinks.takWs.auth.oidcClientId=<client-id> \
+  --set sinks.takWs.auth.oidcClientSecret.secretName=<existing-secret> \
+  --set sinks.takWs.auth.oidcClientSecret.secretKey=oidc-client-secret \
+  --set sinks.takWs.verifyTls=true
+  (Secrets are sourced via secretKeyRef and referenced in args as $(OIDC_CLIENT_SECRET);
+   the literal never appears in the pod spec. For dev you may pass
+   sinks.takWs.auth.oidcClientSecret.value=<secret> and the chart mints a Secret.)
+────────────────────────────────────────────────────────────────────

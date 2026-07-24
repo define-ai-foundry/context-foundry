@@ -1,0 +1,11 @@
+{{- if not .Values.config.existingConfigMap }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-sensors" (include "context-foundry-fusion.fullname" .) }}
+  labels:
+    {{- include "context-foundry-fusion.labels" . | nindent 4 }}
+data:
+  sensors.json: |-
+    {{- .Values.config.sensors | toPrettyJson | nindent 4 }}
+{{- end }}

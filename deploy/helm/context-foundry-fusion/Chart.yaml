@@ -1,0 +1,17 @@
+apiVersion: v2
+name: context-foundry-fusion
+description: >-
+  Deploy the context-foundry-fusion track-fusion engine: ingests SAPIENT/CoT
+  (live UDP or replay file), fuses tracks (Stone Soup UKF/JPDA) and emits to
+  TAK via WebTAK WS or raw TLS. Fully argv-driven; no env-var config.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/define-ai-foundry/context-foundry
+sources:
+  - https://github.com/define-ai-foundry/context-foundry
+keywords:
+  - tak
+  - cot
+  - sapient
+  - fusion

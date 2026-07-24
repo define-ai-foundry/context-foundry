@@ -1,0 +1,29 @@
+{{- if include "context-foundry-fusion.needsService" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "context-foundry-fusion.fullname" . }}
+  labels:
+    {{- include "context-foundry-fusion.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "context-foundry-fusion.selectorLabels" . | nindent 4 }}
+  ports:
+    {{- if .Values.sources.sapient.enabled }}
+    - name: sapient-udp
+      port: 5000
+      targetPort: 5000
+      protocol: UDP
+    {{- end }}
+    {{- if .Values.sources.cot.enabled }}
+    - name: cot-udp
+      port: 6969
+      targetPort: 6969
+      protocol: UDP
+    {{- end }}
+{{- end }}
