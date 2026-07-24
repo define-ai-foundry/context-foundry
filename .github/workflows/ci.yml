@@ -47,3 +47,22 @@ jobs:
 
       - name: Pytest with coverage
         run: pytest
+
+  helm:
+    runs-on: ubuntu-latest
+    env:
+      CHART: deploy/helm/context-foundry-fusion
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+
+      - name: Helm lint
+        run: helm lint "$CHART"
+
+      # Render each supported shape to catch template/guard regressions.
+      - name: Helm template (default — looping replay feed to WebTAK WS)
+        run: helm template ci "$CHART" >/dev/null
+
+      - name: Helm template (live UDP source + Service)
+        run: helm template ci "$CHART" --set sources.sapient.enabled=true --set service.enabled=true >/dev/null
