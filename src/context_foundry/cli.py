@@ -10,6 +10,7 @@ from context_foundry.fusion.augmentor import TacticalContextAugmentor
 from context_foundry.fusion.serializers import CotSerializer, SapientSerializer
 from context_foundry.fusion.sinks.file import FileCotSink
 from context_foundry.fusion.sinks.tak_tls import TakTlsSink
+from context_foundry.fusion.sinks.tak_ws import TakWsSink
 from context_foundry.fusion.sources.cot_stream import CotNetworkStream
 from context_foundry.fusion.sources.json_file import JsonSapientSource
 from context_foundry.fusion.sources.stream import NetworkSapientStream
@@ -41,6 +42,30 @@ def fusion_main():
     parser.add_argument("--tak-tls-cert", help="Client certificate (PEM) for mutual TLS")
     parser.add_argument("--tak-tls-key", help="Client private key (PEM)")
     parser.add_argument("--tak-tls-ca", help="CA bundle (PEM) to verify the TAK Server")
+    parser.add_argument(
+        "--tak-ws-host",
+        help="TAK Server host for the WebTAK streaming WebSocket sink (bearer-authenticated; "
+        "CoT is tagged with the token's Keycloak groups). Enables the sink.",
+    )
+    parser.add_argument(
+        "--tak-ws-port", type=int, default=8446, help="TAK WebTAK WebSocket port (default 8446)"
+    )
+    parser.add_argument(
+        "--tak-ws-verify-tls",
+        action="store_true",
+        help="Verify the TAK Server TLS cert (default: skip, for self-signed dev)",
+    )
+    parser.add_argument(
+        "--keycloak-token-url",
+        help="Keycloak token endpoint (.../protocol/openid-connect/token) for client_credentials",
+    )
+    parser.add_argument(
+        "--oidc-client-id", help="Keycloak client id for the client_credentials grant"
+    )
+    parser.add_argument("--oidc-client-secret", help="Keycloak client secret (confidential client)")
+    parser.add_argument(
+        "--tak-bearer-token", help="Static bearer token, as an alternative to a Keycloak grant"
+    )
     parser.add_argument("--config", type=str, required=True, help="Path to sensor config JSON")
     args = parser.parse_args()
 
@@ -85,11 +110,28 @@ def fusion_main():
             )
         )
         logger.info(f"Streaming CoT to TAK Server {args.tak_tls_host}:{args.tak_tls_port} over TLS")
+    if args.tak_ws_host:
+        sinks.append(
+            TakWsSink(
+                args.tak_ws_host,
+                args.tak_ws_port,
+                token_url=args.keycloak_token_url,
+                client_id=args.oidc_client_id,
+                client_secret=args.oidc_client_secret,
+                static_token=args.tak_bearer_token,
+                verify_tls=args.tak_ws_verify_tls,
+            )
+        )
+        logger.info(
+            f"Streaming CoT to TAK Server {args.tak_ws_host}:{args.tak_ws_port} "
+            "over the WebTAK WebSocket (group-tagged by token)"
+        )
 
     if not sinks:
         logger.error(
             "No output sink configured. Add --tak-tls-host <host> to stream CoT to a TAK Server "
-            "over TLS, or --log-to-file to write CoT to a file for offline validation."
+            "over TLS, --tak-ws-host <host> for the group-tagged WebTAK WebSocket, "
+            "or --log-to-file to write CoT to a file for offline validation."
         )
         return
 
