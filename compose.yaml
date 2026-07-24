@@ -72,3 +72,96 @@ services:
       - /certs/client.key
       - --tak-tls-ca
       - /certs/ca.pem
+
+  # --- tak profile: a real pvarki/tak-server + Postgres for the CoT -> WebTAK-WebSocket -> per-group isolation demo ---
+  # Postgres/PostGIS backing the TAK Server. Plain TCP, no TLS (in-cluster the
+  # sslmode=disable workaround is CNPG-specific; the stock image connects fine here).
+  tak-db:
+    profiles: ["tak"]
+    image: docker.io/postgis/postgis:15-3.4
+    environment:
+      POSTGRES_DB: cot
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: tak-local-pw
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d cot"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - tak-db-data:/var/lib/postgresql/data
+
+  # Stock pvarki TAK Server, single container running all roles. firstrun.sh
+  # self-generates the CA/server/admin certs and initialises the schema; then
+  # configureInDocker.sh launches config+messaging+api+retention+pm and tails.
+  tak-server:
+    profiles: ["tak"]
+    image: docker.io/pvarki/tak-server:5.7-RELEASE-32
+    depends_on:
+      tak-db:
+        condition: service_healthy
+    command: ["bash", "/opt/tak/launch.sh"]
+    environment:
+      POSTGRES_ADDRESS: tak-db
+      POSTGRES_DB: cot
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: tak-local-pw
+      POSTGRES_SUPERUSER: postgres
+      POSTGRES_SUPER_PASSWORD: tak-local-pw
+      TAK_SERVER_ADDRESS: localhost
+      TAK_SERVER_NAME: cf-local-tak
+      CA_NAME: cf-local-ca
+      COUNTRY: SI
+      STATE: Ljubljana
+      CITY: Ljubljana
+      ORGANIZATION: cf-local
+      ORGANIZATIONAL_UNIT: fusion
+      CA_PASS: atakatak
+      TAKSERVER_CERT_PASS: atakatak
+      ADMIN_CERT_PASS: atakatak
+      ADMIN_CERT_NAME: admin
+      WEBTAK_ENABLE: "true"
+      CONFIG_MAX_HEAP: "1024"
+      MESSAGING_MAX_HEAP: "2048"
+      API_MAX_HEAP: "2048"
+      RETENTION_MAX_HEAP: "512"
+      PLUGIN_MANAGER_MAX_HEAP: "512"
+    ports:
+      - "8089:8089"   # CoT input (mutual TLS)
+      - "8443:8443"   # admin/WebTAK (client-cert)
+      - "8446:8446"   # WebTAK (username/password, clientAuth=NONE)
+    mem_limit: 8g
+    volumes:
+      - tak-data:/opt/tak/data
+      - ./dev/tak/CoreConfig.tpl:/opt/templates/CoreConfig.tpl:ro
+      - ./dev/tak/launch.sh:/opt/tak/launch.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/8089' 2>/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 120s
+
+  # Replays the example scenario into the local TAK over the WebTAK WebSocket sink.
+  # `make tak-demo` fetches a TAK /oauth/token bearer for a group's File user and
+  # injects it as CF_BEARER; the CoT is then tagged with that user's single TAK
+  # group, so only that group's WebTAK users see it.
+  fusion-tak:
+    profiles: ["tak"]
+    build:
+      context: .
+      target: runtime
+    image: context-foundry:dev
+    command:
+      - --replay-file
+      - data/examples/sapient_messages.json
+      - --config
+      - config/sensors/joensuu.json
+      - --tak-ws-host
+      - tak-server
+      - --tak-bearer-token
+      - ${CF_BEARER:-}   # injected by `make tak-demo`; empty default keeps unrelated compose commands parseable
+
+volumes:
+  tak-db-data:
+  tak-data:
