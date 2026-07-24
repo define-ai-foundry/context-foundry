@@ -16,7 +16,10 @@ dependencies = [
     "PyYAML>=6.0.1",
     "grpcio-tools>=1.81.0",
     "protobuf>=6.33.5",
-    "lxml"
+    "lxml",
+    "takproto>=3.0.0",
+    "websocket-client>=1.7.0",
+    "requests>=2.31.0"
 ]
 
 [project.optional-dependencies]
@@ -64,6 +67,8 @@ ignore = [
 "tests/**" = [
     "S101",  # asserts are the point of tests
     "S603",  # subprocess calls in CLI tests are trusted
+    "S105",  # dummy tokens/secrets in fixtures are not real credentials
+    "S106",  # dummy tokens/secrets passed as kwargs in fixtures
 ]
 
 [tool.pytest.ini_options]

@@ -4,9 +4,11 @@
 from .base import CotSink
 from .file import FileCotSink
 from .tak_tls import TakTlsSink
+from .tak_ws import TakWsSink
 
 __all__ = [
     "CotSink",
     "FileCotSink",
     "TakTlsSink",
+    "TakWsSink",
 ]

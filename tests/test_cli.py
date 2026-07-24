@@ -277,6 +277,103 @@ def test_tak_tls_host_constructs_sink_streams_payload_and_closes(monkeypatch, ca
     )
 
 
+def test_tak_ws_host_constructs_sink_streams_payload_and_closes(monkeypatch, caplog, tmp_path):
+    replay_path = tmp_path / "scenario.json"
+    replay_path.write_text("[]", encoding="utf-8")
+
+    track = _fake_track("track-ws00", T0)
+    monkeypatch.setattr(
+        cli, "JsonSapientSource", lambda path: _EventsOnceSource([(T0, [object()])])
+    )
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[track]]))
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+
+    created = {}
+
+    class _FakeTakWsSink:
+        def __init__(
+            self,
+            host,
+            port,
+            *,
+            token_url=None,
+            client_id=None,
+            client_secret=None,
+            static_token=None,
+            verify_tls=False,
+        ):
+            created.update(
+                host=host,
+                port=port,
+                token_url=token_url,
+                client_id=client_id,
+                client_secret=client_secret,
+                static_token=static_token,
+                verify_tls=verify_tls,
+                obj=self,
+            )
+            self.sent = []
+            self.closed = False
+
+        def send(self, payload):
+            self.sent.append(payload)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(cli, "TakWsSink", _FakeTakWsSink)
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "fusion",
+            "--config",
+            "sensors.json",
+            "--replay-file",
+            str(replay_path),
+            "--tak-ws-host",
+            "takhost",
+            "--keycloak-token-url",
+            "https://iam/token",
+            "--oidc-client-id",
+            "cf-a",
+            "--oidc-client-secret",
+            "secret",
+        ],
+    )
+
+    with caplog.at_level("INFO"):
+        cli.fusion_main()
+
+    assert created["host"] == "takhost"
+    assert created["port"] == 8446
+    assert created["token_url"] == "https://iam/token"
+    assert created["client_id"] == "cf-a"
+    assert created["client_secret"] == "secret"
+    assert created["verify_tls"] is False
+    sink = created["obj"]
+    assert any("TRK-track-ws00" in payload for payload in sink.sent)
+    assert sink.closed is True
+    assert any("Streaming CoT to TAK Server takhost:8446" in r.message for r in caplog.records)
+
+
+def test_no_sink_message_names_the_ws_sink(monkeypatch, caplog, tmp_path):
+    replay_path = tmp_path / "scenario.json"
+    replay_path.write_text("[]", encoding="utf-8")
+
+    monkeypatch.setattr(cli, "JsonSapientSource", lambda path: _EventsOnceSource([]))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+    monkeypatch.setattr(
+        "sys.argv", ["fusion", "--config", "sensors.json", "--replay-file", str(replay_path)]
+    )
+
+    with caplog.at_level("ERROR"):
+        cli.fusion_main()
+
+    assert any("--tak-ws-host" in r.message for r in caplog.records)
+
+
 def test_file_and_tak_tls_sinks_are_both_active(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     replay_path = tmp_path / "scenario.json"
