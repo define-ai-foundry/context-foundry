@@ -164,7 +164,7 @@ def test_persistent_lag_logs_exactly_one_warning_and_never_sleeps(monkeypatch, c
         list(gen)  # drains events 1..3, all still far behind schedule
 
     assert clock.sleeps == []  # never sleeps while behind schedule
-    warnings = [r for r in caplog.records if "Cannot keep up" in r.message]
+    warnings = [r for r in caplog.records if "behind the scenario clock" in r.message]
     assert len(warnings) == 1  # latched after the first report, not one per event
 
 
