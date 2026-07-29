@@ -34,9 +34,9 @@ COPY --chown=fusion:fusion data ./data
 USER fusion
 
 ENTRYPOINT ["context-foundry-fusion"]
-# Default to the replay demo; override in compose / on the CLI.
+# Default to the replay demo, unpaced so a bare `docker run` drains fast; override in compose / on the CLI.
 CMD ["--replay-file", "data/examples/sapient_messages.json", \
-     "--config", "config/sensors/joensuu.json", "--log-to-file"]
+     "--config", "config/sensors/joensuu.json", "--log-to-file", "--realtime-factor", "0"]
 
 # Dev stage: editable install with dev extras for in-container tests + lint (CI parity).
 # The worktree is bind-mounted over /app at run time; the venv lives outside /app.

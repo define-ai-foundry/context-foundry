@@ -106,6 +106,12 @@ sources:
   # Replay a finite JSON scenario. Path is inside the image (baked-in sample
   # shown) or a mounted file. Empty string = disabled.
   replayFile: "data/examples/sapient_messages.json"
+  # Speed to emit replayFile events at, relative to the scenario's own
+  # timeline (only applies with replayFile): 1.0 (default) replays at real
+  # time, 5 replays five times faster, 0 disables pacing and drains as fast
+  # as events can be fused. Kept at real time here since this is a demo feed
+  # into WebTAK, where scenario-cadence arrival is the point.
+  realtimeFactor: 1.0
   # Continuously re-run the replay when it finishes (only applies with
   # replayFile). Turns a one-shot replay into a long-running feed so the pod
   # stays Running/healthy (vs the exit-then-restart CrashLoopBackOff you'd get

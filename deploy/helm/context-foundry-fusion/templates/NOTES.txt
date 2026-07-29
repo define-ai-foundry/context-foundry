@@ -13,6 +13,11 @@ Continuous replay feed (default)
   (no exit/restart CrashLoopBackOff). The engine rebuilds its tracker each pass.
   Point at live sensors instead with sources.sapient.enabled / sources.cot.enabled.
 
+  Events are paced to the scenario's own clock (sources.realtimeFactor={{ .Values.sources.realtimeFactor }}).
+  Raise it to replay faster, or set it to 0 to disable pacing and drain as fast
+  as events can be fused — not recommended here, since the point of this feed
+  is scenario-cadence arrival in WebTAK.
+
 Wire Keycloak auth for the WebTAK-WS sink
   --set sinks.takWs.auth.keycloakTokenUrl=https://<iam>/realms/<realm>/protocol/openid-connect/token \
   --set sinks.takWs.auth.oidcClientId=<client-id> \

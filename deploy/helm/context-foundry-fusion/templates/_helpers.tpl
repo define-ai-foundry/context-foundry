@@ -156,6 +156,8 @@ Secrets are referenced as $(VAR) — the literal is NEVER placed in args.
 {{- if .Values.sources.replayFile }}
 - --replay-file
 - {{ .Values.sources.replayFile | quote }}
+- --realtime-factor
+- {{ .Values.sources.realtimeFactor | quote }}
 {{- if .Values.sources.loop.enabled }}
 - --loop
 - --loop-delay

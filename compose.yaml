@@ -5,6 +5,8 @@ name: context-foundry
 
 services:
   # Replay demo: fuse the example scenario and log fused CoT tracks. No network.
+  # --realtime-factor 0: unpaced, so this drains in ~1 min of CPU instead of the
+  # scenario's 38 minutes of real time.
   fusion:
     build:
       context: .
@@ -16,6 +18,8 @@ services:
       - --config
       - config/sensors/joensuu.json
       - --log-to-file
+      - --realtime-factor
+      - "0"
 
   # In-container test + lint (CI parity). Worktree bind-mounted; venv lives at /opt/venv.
   test:
@@ -72,6 +76,9 @@ services:
       - /certs/client.key
       - --tak-tls-ca
       - /certs/ca.pem
+      # Unpaced: this demo prints the received CoT and exits, not a long-running feed.
+      - --realtime-factor
+      - "0"
 
   # --- tak profile: a real pvarki/tak-server + Postgres for the CoT -> WebTAK-WebSocket -> per-group isolation demo ---
   # Postgres/PostGIS backing the TAK Server. Plain TCP, no TLS (in-cluster the
@@ -146,6 +153,8 @@ services:
   # `make tak-demo` fetches a TAK /oauth/token bearer for a group's File user and
   # injects it as CF_BEARER; the CoT is then tagged with that user's single TAK
   # group, so only that group's WebTAK users see it.
+  # Stays at the --realtime-factor default (real time): this streams into a live
+  # WebTAK viewer, where tracks arriving at scenario cadence are the point.
   fusion-tak:
     profiles: ["tak"]
     build:
