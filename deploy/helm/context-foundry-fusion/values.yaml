@@ -190,8 +190,17 @@ securityContext:
       - ALL
   seccompProfile:
     type: RuntimeDefault
-  # The WS sink is outbound-only and needs no local writes.
+  # The WS sink is outbound-only and needs no local writes. An emptyDir is still
+  # mounted at /tmp — see tmpDir below.
   readOnlyRootFilesystem: true
+
+# Writable /tmp, mounted unconditionally because readOnlyRootFilesystem is
+# unconditional. The app itself writes nothing, but its dependency tree assumes a
+# temp dir exists: matplotlib (transitively via stonesoup) raises OSError on
+# import if it can neither write a cache dir nor create a temp dir. Small on
+# purpose — this is scratch space, not storage.
+tmpDir:
+  sizeLimit: 64Mi
 
 resources:
   # Fusion engine runs Stone Soup UKF/JPDA — give it headroom.

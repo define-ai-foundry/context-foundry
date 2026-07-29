@@ -51,11 +51,21 @@ spec:
             - name: sensors-config
               mountPath: /etc/context-foundry
               readOnly: true
+            - name: tmp
+              mountPath: /tmp
           # No HTTP endpoint is exposed (outbound WS client) — no probes.
       volumes:
         - name: sensors-config
           configMap:
             name: {{ include "context-foundry-fusion.configMapName" . }}
+        # readOnlyRootFilesystem leaves no writable path anywhere, and libraries
+        # in the dependency tree expect one: matplotlib (pulled in by stonesoup)
+        # raises OSError on import when it can neither write its cache dir nor
+        # create a temp dir. Nothing on the current code path imports it, so this
+        # is insurance against a dependency or import change, not a live fix.
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ .Values.tmpDir.sizeLimit }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
