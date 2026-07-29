@@ -81,8 +81,10 @@ pip install -e .
 ### 2. Verify with Replay Mode
 Test the math engine and tracking logic by replaying a validated scenario file. `--log-to-file` writes the fused CoT to `fused_tracks_debug.xml` for offline inspection — no network required.
 
+By default a replay is paced to the scenario's own clock (`--realtime-factor 1.0`), so `data/examples/sapient_messages.json` (37.8 minutes of scenario time) takes 37.8 minutes to drain. Use `--realtime-factor N` to run N times faster (`5` replays a 38-minute scenario in ~7.6 minutes), or `--realtime-factor 0` to disable pacing and drain the file as fast as it can be fused — the fast path for offline math validation:
+
 ```bash
-context-foundry-fusion --replay-file data/examples/sapient_messages.json --config config/sensors/joensuu.json --log-to-file
+context-foundry-fusion --replay-file data/examples/sapient_messages.json --config config/sensors/joensuu.json --log-to-file --realtime-factor 0
 ```
 
 A finite replay exits once drained. Add `--loop` to restart it continuously (waiting `--loop-delay` seconds, default `60`, between iterations), turning a one-shot scenario into a long-running feed — ideal as a persistent Deployment demo streaming into TAK. Each iteration starts a fresh tracker, since replay timestamps jump backwards on restart. `--loop` only applies with `--replay-file`; live sources never terminate.
@@ -129,6 +131,7 @@ The installation exposes the `context-foundry-fusion` command globally. `--confi
 | `--replay-file` | `String` | Path to a JSON scenario file to replay. | *One source required* |
 | `--loop` | `Flag` | With `--replay-file`, restart the replay continuously instead of exiting — turns a one-shot replay into a continuous feed (ideal as a long-running Deployment demo streaming into TAK). No effect without `--replay-file`. | `False` |
 | `--loop-delay` | `Float` | Seconds to wait between replay iterations when `--loop` is set. | `60` |
+| `--realtime-factor` | `Float` | With `--replay-file`, the speed to emit events at relative to the scenario's own timeline: `1.0` replays at real time, `5` replays five times faster, `0` disables pacing and drains as fast as events can be fused. No effect without `--replay-file`. Must be `>= 0`. | `1.0` |
 | `--enable-sapient` | `Flag` | Enable the live SAPIENT UDP stream (port 5000). | `False` |
 | `--enable-cot` | `Flag` | Enable the live CoT UDP stream (port 6969). | `False` |
 | `--log-to-file` | `Flag` | Write fused CoT to `fused_tracks_debug.xml` for offline validation. | *One sink required* |
