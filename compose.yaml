@@ -153,8 +153,10 @@ services:
   # `make tak-demo` fetches a TAK /oauth/token bearer for a group's File user and
   # injects it as CF_BEARER; the CoT is then tagged with that user's single TAK
   # group, so only that group's WebTAK users see it.
-  # Stays at the --realtime-factor default (real time): this streams into a live
-  # WebTAK viewer, where tracks arriving at scenario cadence are the point.
+  # Paced at real time by default: this streams into a live WebTAK viewer, where
+  # tracks arriving at scenario cadence are the point. `make tak-demo
+  # TAK_DEMO_FACTOR=10` compresses the 38-minute scenario when watching it whole
+  # matters less than seeing it arrive.
   fusion-tak:
     profiles: ["tak"]
     build:
@@ -170,6 +172,8 @@ services:
       - tak-server
       - --tak-bearer-token
       - ${CF_BEARER:-}   # injected by `make tak-demo`; empty default keeps unrelated compose commands parseable
+      - --realtime-factor
+      - ${CF_REALTIME_FACTOR:-1}
 
 volumes:
   tak-db-data:

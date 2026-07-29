@@ -16,6 +16,9 @@ COMPOSE := $(ENGINE) compose
 TAK_GROUPS ?= alpha bravo
 TAK_DEMO_PASS ?= Fusion-Demo-2026!
 TAK_DEMO_GROUP ?= alpha
+# Replay speed for tak-demo, relative to the scenario's own clock (1 = real time,
+# so the example scenario streams for ~38 min; 10 compresses it to ~4).
+TAK_DEMO_FACTOR ?= 1
 
 # Resolve the tak-server container id via the compose labels (portable across
 # docker/podman; `compose ps -q <svc>` is unreliable under the podman provider).
@@ -77,14 +80,14 @@ tak-users: ## Create one WebTAK/producer File user per demo group ($(TAK_GROUPS)
 	done
 	@echo "WebTAK https://localhost:8446 — users [$(TAK_GROUPS)] (pass $(TAK_DEMO_PASS)); each is in one group and sees only that group's CoT"
 
-tak-demo: ## Replay into group $(TAK_DEMO_GROUP) via the WebTAK WebSocket sink (override: make tak-demo TAK_DEMO_GROUP=bravo)
+tak-demo: ## Replay into group $(TAK_DEMO_GROUP) at $(TAK_DEMO_FACTOR)x real time via the WebTAK WebSocket sink (override: make tak-demo TAK_DEMO_GROUP=bravo TAK_DEMO_FACTOR=10)
 	@id=$$($(TAK_CID)); \
 	[ -n "$$id" ] || { echo "tak-server not running; run 'make tak-up' first" >&2; exit 1; }; \
 	tok=$$(curl -sk -X POST https://localhost:8446/oauth/token \
 		-d grant_type=password -d username=$(TAK_DEMO_GROUP) -d password='$(TAK_DEMO_PASS)' \
 		| python3 -c 'import sys,json;print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null); \
 	[ -n "$$tok" ] || { echo "no token for user '$(TAK_DEMO_GROUP)' — run 'make tak-users' first" >&2; exit 1; }; \
-	CF_BEARER=$$tok $(COMPOSE) --profile tak run --rm fusion-tak
+	CF_BEARER=$$tok CF_REALTIME_FACTOR=$(TAK_DEMO_FACTOR) $(COMPOSE) --profile tak run --rm fusion-tak
 	@echo "Streamed into group '$(TAK_DEMO_GROUP)'. In WebTAK, only user '$(TAK_DEMO_GROUP)' sees these tracks."
 
 tak-down: ## Stop the TAK stack (keeps the tak-data volume, so the CA + users persist)

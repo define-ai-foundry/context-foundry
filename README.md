@@ -116,10 +116,11 @@ make tak-up      # start TAK Server + Postgres (first boot ~2–3 min)
 make tak-users   # create one File user per group: 'alpha' (group alpha), 'bravo' (group bravo)
 make tak-demo                        # replay into group 'alpha' over the WebTAK WebSocket sink
 make tak-demo TAK_DEMO_GROUP=bravo   # ...or into group 'bravo'
+make tak-demo TAK_DEMO_FACTOR=10     # ...at 10x real time (~4 min instead of ~38)
 make tak-down    # stop (keeps volumes);  make tak-clean wipes them
 ```
 
-`make tak-demo` fetches a TAK `/oauth/token` bearer for that group's File user and runs `TakWsSink` against `wss://…:8446/takproto/1`, so the CoT is tagged with the user's single TAK group. Log into `https://localhost:8446` as `alpha` / `Fusion-Demo-2026!` — with the map open **before** you run `make tak-demo` (TAK does not backfill history to a viewer that connects after the stream) — and you will see the tracks; log in as `bravo` and you will not. This mirrors the production model (one producer per group), using TAK File-user tokens locally in place of Keycloak; the Keycloak-token equivalent has been verified against a real TAK + Keycloak cluster. A raw TCP+TLS sink is also available (`make tls-demo`).
+`make tak-demo` fetches a TAK `/oauth/token` bearer for that group's File user and runs `TakWsSink` against `wss://…:8446/takproto/1`, so the CoT is tagged with the user's single TAK group. It streams at scenario cadence (~38 min for the example scenario) and holds the terminal until drained — raise `TAK_DEMO_FACTOR` to compress it. Log into `https://localhost:8446` as `alpha` / `Fusion-Demo-2026!` — with the map open **before** you run `make tak-demo` (TAK does not backfill history to a viewer that connects after the stream) — and you will see the tracks; log in as `bravo` and you will not. This mirrors the production model (one producer per group), using TAK File-user tokens locally in place of Keycloak; the Keycloak-token equivalent has been verified against a real TAK + Keycloak cluster. A raw TCP+TLS sink is also available (`make tls-demo`).
 
 ## CLI Reference
 
