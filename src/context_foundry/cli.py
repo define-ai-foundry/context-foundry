@@ -14,6 +14,7 @@ from context_foundry.fusion.sinks.tak_tls import TakTlsSink
 from context_foundry.fusion.sinks.tak_ws import TakWsSink
 from context_foundry.fusion.sources.cot_stream import CotNetworkStream
 from context_foundry.fusion.sources.json_file import JsonSapientSource
+from context_foundry.fusion.sources.paced import RealtimeReplaySource
 from context_foundry.fusion.sources.stream import NetworkSapientStream
 from context_foundry.fusion.tracker import SapientAsynchronousTracker
 
@@ -40,6 +41,14 @@ def fusion_main():
         type=float,
         default=60.0,
         help="Seconds to wait between replay iterations when --loop is set (default: 60).",
+    )
+    parser.add_argument(
+        "--realtime-factor",
+        type=float,
+        default=1.0,
+        help="Speed at which a --replay-file is emitted, relative to the scenario's own "
+        "timeline: 1.0 (default) replays at real time, 5 replays five times faster. "
+        "0 disables pacing entirely and drains the file as fast as it can be fused.",
     )
     parser.add_argument(
         "--log-to-file",
@@ -85,6 +94,15 @@ def fusion_main():
     if args.loop and not args.replay_file:
         logger.warning("--loop has no effect without --replay-file; live sources never terminate.")
 
+    if args.realtime_factor < 0:
+        parser.error("--realtime-factor must be >= 0 (0 disables pacing)")
+
+    if args.realtime_factor != 1.0 and not args.replay_file:
+        logger.warning(
+            "--realtime-factor has no effect without --replay-file; live sources "
+            "already arrive in real time."
+        )
+
     # A negative sleep would raise; clamp once and use the local everywhere below.
     loop_delay = max(0.0, args.loop_delay)
 
@@ -98,7 +116,16 @@ def fusion_main():
     # 2. Setup Sources
     sources = []
     if args.replay_file:
-        sources.append(JsonSapientSource(Path(args.replay_file)))
+        replay_source = JsonSapientSource(Path(args.replay_file))
+        if args.realtime_factor > 0:
+            replay_source = RealtimeReplaySource(replay_source, factor=args.realtime_factor)
+            logger.info(
+                f"Replaying {args.replay_file} at {args.realtime_factor}x real time "
+                "(--realtime-factor 0 to drain as fast as possible)"
+            )
+        else:
+            logger.info(f"Replaying {args.replay_file} unpaced, as fast as events can be fused")
+        sources.append(replay_source)
     if args.enable_sapient:
         sources.append(NetworkSapientStream(port=5000))
     if args.enable_cot:
