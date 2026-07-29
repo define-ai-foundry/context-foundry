@@ -520,6 +520,143 @@ def test_no_sink_message_names_the_ws_sink(monkeypatch, caplog, tmp_path):
     assert any("--tak-ws-host" in r.message for r in caplog.records)
 
 
+class _FakeRealtimeReplaySource:
+    """Fake wrapper standing in for the real RealtimeReplaySource: records the
+    (inner, factor) it was constructed with and passes iter_events()/reset()
+    straight through to the inner fake, so fusion_main still runs to
+    completion when this replaces cli.RealtimeReplaySource."""
+
+    def __init__(self, inner, factor):
+        self.inner = inner
+        self.factor = factor
+
+    def iter_events(self):
+        yield from self.inner.iter_events()
+
+    def reset(self):
+        self.inner.reset()
+
+
+def _patch_realtime_wrapper(monkeypatch):
+    """Patch cli.RealtimeReplaySource with the fake; returns the list of
+    wrappers it constructs (empty = pacing was never wired up)."""
+    built = []
+
+    def _build(inner, factor):
+        wrapper = _FakeRealtimeReplaySource(inner, factor)
+        built.append(wrapper)
+        return wrapper
+
+    monkeypatch.setattr(cli, "RealtimeReplaySource", _build)
+    return built
+
+
+def test_default_wraps_replay_source_in_realtime_replay_source_at_factor_one(monkeypatch, tmp_path):
+    replay_path = tmp_path / "scenario.json"
+    replay_path.write_text("[]", encoding="utf-8")
+
+    inner = _EventsOnceSource([(T0, [object()])])
+    monkeypatch.setattr(cli, "JsonSapientSource", lambda path: inner)
+    built = _patch_realtime_wrapper(monkeypatch)
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["fusion", "--config", "sensors.json", "--replay-file", str(replay_path), "--log-to-file"],
+    )
+
+    cli.fusion_main()
+
+    assert len(built) == 1
+    assert built[0].inner is inner
+    assert built[0].factor == 1.0
+
+
+def test_realtime_factor_flag_sets_factor_on_the_wrapper(monkeypatch, tmp_path):
+    replay_path = tmp_path / "scenario.json"
+    replay_path.write_text("[]", encoding="utf-8")
+
+    inner = _EventsOnceSource([(T0, [object()])])
+    monkeypatch.setattr(cli, "JsonSapientSource", lambda path: inner)
+    built = _patch_realtime_wrapper(monkeypatch)
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "fusion",
+            "--config",
+            "sensors.json",
+            "--replay-file",
+            str(replay_path),
+            "--log-to-file",
+            "--realtime-factor",
+            "5",
+        ],
+    )
+
+    cli.fusion_main()
+
+    assert len(built) == 1
+    assert built[0].factor == 5.0
+
+
+def test_realtime_factor_zero_does_not_wrap_and_logs_unpaced(monkeypatch, caplog, tmp_path):
+    replay_path = tmp_path / "scenario.json"
+    replay_path.write_text("[]", encoding="utf-8")
+
+    inner = _EventsOnceSource([(T0, [object()])])
+    monkeypatch.setattr(cli, "JsonSapientSource", lambda path: inner)
+    built = _patch_realtime_wrapper(monkeypatch)
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "fusion",
+            "--config",
+            "sensors.json",
+            "--replay-file",
+            str(replay_path),
+            "--log-to-file",
+            "--realtime-factor",
+            "0",
+        ],
+    )
+
+    with caplog.at_level("INFO"):
+        cli.fusion_main()
+
+    assert built == []  # never constructed
+    assert any("unpaced" in r.message and str(replay_path) in r.message for r in caplog.records)
+
+
+def test_negative_realtime_factor_exits(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "sys.argv", ["fusion", "--config", "sensors.json", "--realtime-factor", "-1"]
+    )
+
+    with pytest.raises(SystemExit):
+        cli.fusion_main()
+
+    assert "--realtime-factor must be >= 0" in capsys.readouterr().err
+
+
+def test_realtime_factor_without_replay_file_warns(monkeypatch, caplog):
+    monkeypatch.setattr(
+        "sys.argv", ["fusion", "--config", "sensors.json", "--realtime-factor", "5"]
+    )
+
+    with caplog.at_level("WARNING"):
+        result = cli.fusion_main()
+
+    assert result is None  # falls through to "No sources enabled" and returns
+    assert any("--realtime-factor has no effect" in r.message for r in caplog.records)
+
+
 def test_file_and_tak_tls_sinks_are_both_active(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     replay_path = tmp_path / "scenario.json"

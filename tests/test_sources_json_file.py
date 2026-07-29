@@ -90,6 +90,30 @@ def test_reset_allows_replay_to_be_consumed_again(tmp_path):
     assert len(list(source.iter_events())) == 1  # re-armed, same events again
 
 
+def test_iter_events_yields_groups_in_timestamp_order_even_when_file_is_shuffled(tmp_path):
+    """Messages in the source file need not be chronological; groups must still
+    come out sorted by timestamp (the tracker can't predict backwards, and
+    realtime pacing anchors off the first yielded event)."""
+    ts_early = "2026-01-01T00:00:00.000000Z"
+    ts_mid = "2026-01-01T00:00:05.000000Z"
+    ts_late = "2026-01-01T00:00:10.000000Z"
+    # Deliberately out of order in the file: late, early, mid.
+    messages = [
+        _msg("node-A", ts_late, "obj-late"),
+        _msg("node-A", ts_early, "obj-early"),
+        _msg("node-A", ts_mid, "obj-mid"),
+    ]
+    path = tmp_path / "scenario.json"
+    path.write_text(json.dumps(messages), encoding="utf-8")
+
+    source = JsonSapientSource(path)
+    events = list(source.iter_events())
+
+    timestamps = [timestamp for timestamp, _ in events]
+    assert timestamps == sorted(timestamps)
+    assert len(timestamps) == 3
+
+
 def test_iter_events_drops_invalid_messages(tmp_path):
     ts = "2026-01-01T00:00:00.000000Z"
     invalid = {"sapientMessage": {"timestamp": ts, "nodeId": "node-A"}}  # no detectionReport
