@@ -48,14 +48,15 @@ class RealtimeReplaySource(SapientSource):
             if lag < 0:
                 time.sleep(-lag)
             elif lag > LAG_WARN_SECONDS and not lag_reported:
-                # Fusion is slower than the requested rate: pacing degrades to
-                # as-fast-as-possible instead of sleeping negative.
+                # Fusion is slower than the requested rate: emit as fast as
+                # possible until the scenario clock is caught up again. Reported
+                # once, so a run that briefly stalls logs one line, not thousands.
                 lag_reported = True
                 logger.warning(
-                    "Cannot keep up with --realtime-factor %g: %.1fs behind the scenario clock. "
-                    "Events are being emitted as fast as they are fused.",
-                    self.factor,
+                    "Fell %.1fs behind the scenario clock at --realtime-factor %g; emitting as "
+                    "fast as events are fused until caught up. Further lag is not reported.",
                     lag,
+                    self.factor,
                 )
 
             yield timestamp, detections
