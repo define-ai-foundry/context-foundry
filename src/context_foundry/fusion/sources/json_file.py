@@ -66,7 +66,9 @@ class JsonSapientSource(SapientSource):
             sensor_frames[(det.timestamp, det.sensor_id)].append(det)
 
         # 4. TRANSLATE TO STONE SOUP DETECTIONS
-        for (timestamp, node_id), reports in sensor_frames.items():
+        # Chronological order, independent of the order messages appear in the file:
+        # the tracker cannot predict backwards, and realtime pacing needs it too.
+        for (timestamp, node_id), reports in sorted(sensor_frames.items(), key=lambda kv: kv[0][0]):
             detections = []
             sensor_meta = config.get_sensor(node_id)
 
