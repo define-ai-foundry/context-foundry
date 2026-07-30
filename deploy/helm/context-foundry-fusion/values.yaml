@@ -162,6 +162,20 @@ sinks:
         secretKey: "tak-bearer-token"
         value: ""
 
+# ---------------------------------------------------------------------------
+# CoT framing
+# ---------------------------------------------------------------------------
+cot:
+  # How long a marker stays live in TAK after the event it was built from. Must
+  # exceed the interval between a track's updates, or each marker expires just
+  # before its own next update and flickers.
+  staleSeconds: 15
+#
+# Replayed events are stamped so the scenario starts now, keeping their original
+# spacing. To emit a scenario's own timestamps instead -- which TAK may treat as
+# too old or too far ahead to display -- add --use-scenario-timestamps via
+# extraArgs below.
+
 # Extra raw args appended verbatim to the end of the argv list.
 extraArgs: []
 

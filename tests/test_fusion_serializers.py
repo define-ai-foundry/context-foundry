@@ -1,6 +1,6 @@
 """Tests for context_foundry.fusion.serializers."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -64,6 +64,39 @@ def test_cot_serializer_produces_expected_fields():
 
     contact = root.find("detail/contact")
     assert contact.get("callsign") == "SWM(2) UAS"
+
+
+def test_cot_serializer_stale_defaults_to_fifteen_seconds_after_the_event():
+    root = etree.fromstring(CotSerializer().serialize(_track()).encode("utf-8"))
+
+    assert root.get("time") == "2026-01-01T12:00:00.000Z"
+    assert root.get("start") == "2026-01-01T12:00:00.000Z"
+    assert root.get("stale") == "2026-01-01T12:00:15.000Z"
+
+
+def test_cot_serializer_stale_window_is_configurable():
+    root = etree.fromstring(CotSerializer(stale_seconds=90).serialize(_track()).encode("utf-8"))
+
+    assert root.get("stale") == "2026-01-01T12:01:30.000Z"
+
+
+def test_cot_serializer_converts_a_non_utc_timestamp_rather_than_relabelling_it():
+    """The `Z` suffix is asserted, so the value has to actually be UTC."""
+    helsinki = timezone(timedelta(hours=3))
+    track = _track(timestamp=datetime(2026, 1, 1, 15, 0, 0, tzinfo=helsinki))
+
+    root = etree.fromstring(CotSerializer().serialize(track).encode("utf-8"))
+
+    assert root.get("time") == "2026-01-01T12:00:00.000Z"
+    assert root.get("stale") == "2026-01-01T12:00:15.000Z"
+
+
+def test_cot_serializer_reads_a_naive_timestamp_as_utc():
+    track = _track(timestamp=datetime(2026, 1, 1, 12, 0, 0))
+
+    root = etree.fromstring(CotSerializer().serialize(track).encode("utf-8"))
+
+    assert root.get("time") == "2026-01-01T12:00:00.000Z"
 
 
 def test_cot_serializer_hostile_identity():
