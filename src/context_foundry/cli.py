@@ -8,12 +8,17 @@ from pathlib import Path
 
 from context_foundry.fusion import config
 from context_foundry.fusion.augmentor import TacticalContextAugmentor
-from context_foundry.fusion.serializers import CotSerializer, SapientSerializer
+from context_foundry.fusion.serializers import (
+    DEFAULT_STALE_SECONDS,
+    CotSerializer,
+    SapientSerializer,
+)
 from context_foundry.fusion.sinks.file import FileCotSink
 from context_foundry.fusion.sinks.tak_tls import TakTlsSink
 from context_foundry.fusion.sinks.tak_ws import TakWsSink
 from context_foundry.fusion.sources.cot_stream import CotNetworkStream
 from context_foundry.fusion.sources.json_file import JsonSapientSource
+from context_foundry.fusion.sources.offset import OffsetReplaySource
 from context_foundry.fusion.sources.paced import RealtimeReplaySource
 from context_foundry.fusion.sources.stream import NetworkSapientStream
 from context_foundry.fusion.tracker import SapientAsynchronousTracker
@@ -49,6 +54,21 @@ def fusion_main():
         help="Speed at which a --replay-file is emitted, relative to the scenario's own "
         "timeline: 1.0 (default) replays at real time, 5 replays five times faster. "
         "0 disables pacing entirely and drains the file as fast as it can be fused.",
+    )
+    parser.add_argument(
+        "--use-scenario-timestamps",
+        action="store_true",
+        help="Stamp replayed events with the timestamps in the file instead of shifting the "
+        "scenario to start now. Recorded scenarios are then emitted with their original "
+        "clock, which TAK clients may treat as too old or too far ahead to display.",
+    )
+    parser.add_argument(
+        "--cot-stale-seconds",
+        type=float,
+        default=DEFAULT_STALE_SECONDS,
+        help=f"How long a CoT marker stays live in TAK after the event it was built from "
+        f"(default: {DEFAULT_STALE_SECONDS:g}). Raise it above the interval between a "
+        "track's updates to stop markers expiring between them.",
     )
     parser.add_argument(
         "--log-to-file",
@@ -103,6 +123,12 @@ def fusion_main():
             "already arrive in real time."
         )
 
+    if args.use_scenario_timestamps and not args.replay_file:
+        logger.warning(
+            "--use-scenario-timestamps has no effect without --replay-file; live sources "
+            "are already stamped with the present."
+        )
+
     # A negative sleep would raise; clamp once and use the local everywhere below.
     loop_delay = max(0.0, args.loop_delay)
 
@@ -117,6 +143,12 @@ def fusion_main():
     sources = []
     if args.replay_file:
         replay_source = JsonSapientSource(Path(args.replay_file))
+        # Offset first, pace second: the pacer sleeps against the intervals
+        # between events, which the offset leaves untouched.
+        if not args.use_scenario_timestamps:
+            replay_source = OffsetReplaySource(replay_source)
+        else:
+            logger.info(f"Replaying {args.replay_file} with the scenario's own timestamps")
         if args.realtime_factor > 0:
             replay_source = RealtimeReplaySource(replay_source, factor=args.realtime_factor)
             logger.info(
@@ -138,7 +170,10 @@ def fusion_main():
     # 3. Initialize Core Components
     tracker = SapientAsynchronousTracker()
     augmentor = TacticalContextAugmentor()
-    serializers = {"TAK": CotSerializer(), "SAPIENT": SapientSerializer()}
+    serializers = {
+        "TAK": CotSerializer(stale_seconds=args.cot_stale_seconds),
+        "SAPIENT": SapientSerializer(),
+    }
 
     # Setup output sinks. At least one is required; file and TLS can be combined.
     sinks = []
@@ -218,8 +253,10 @@ def fusion_main():
                     logger.info(f"Replay drained. Looping again in {loop_delay}s.")
                     for source in sources:
                         source.reset()
-                    # Replay timestamps jump backwards on restart and Stone Soup cannot
-                    # predict backwards, so a fresh tracker per pass is required.
+                    # A restart is a new scenario, not a continuation, so track state must
+                    # not carry over. Required outright under --use-scenario-timestamps:
+                    # timestamps jump backwards there and Stone Soup cannot predict
+                    # backwards.
                     tracker = SapientAsynchronousTracker()
                     time.sleep(loop_delay)
                     continue

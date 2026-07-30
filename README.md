@@ -87,7 +87,11 @@ By default a replay is paced to the scenario's own clock (`--realtime-factor 1.0
 context-foundry-fusion --replay-file data/examples/sapient_messages.json --config config/sensors/joensuu.json --log-to-file --realtime-factor 0
 ```
 
-A finite replay exits once drained. Add `--loop` to restart it continuously (waiting `--loop-delay` seconds, default `60`, between iterations), turning a one-shot scenario into a long-running feed — ideal as a persistent Deployment demo streaming into TAK. Each iteration starts a fresh tracker, since replay timestamps jump backwards on restart. `--loop` only applies with `--replay-file`; live sources never terminate.
+Replayed events are stamped so the scenario **starts now**, keeping the original spacing between them. A recorded file therefore surfaces as if it were happening live, which is what consumers assume — TAK will not draw a marker for an event dated months away from the present. This is independent of `--realtime-factor`: the factor changes how fast events are emitted, never what they are stamped with. Pass `--use-scenario-timestamps` to emit the file's own clock instead, e.g. when comparing output against a recorded run.
+
+`--cot-stale-seconds` (default `15`) sets how long a CoT marker stays live in TAK after the event it was built from. Raise it above the interval between a track's updates, or each marker expires just before its own next update and flickers on the map.
+
+A finite replay exits once drained. Add `--loop` to restart it continuously (waiting `--loop-delay` seconds, default `60`, between iterations), turning a one-shot scenario into a long-running feed — ideal as a persistent Deployment demo streaming into TAK. Each iteration re-stamps the scenario to the new present, and starts a fresh tracker: a restart is a new scenario rather than a continuation, and under `--use-scenario-timestamps` the timestamps jump backwards, which Stone Soup cannot predict through. `--loop` only applies with `--replay-file`; live sources never terminate.
 
 ```bash
 context-foundry-fusion --replay-file data/examples/sapient_messages.json --config config/sensors/joensuu.json --log-to-file --loop --loop-delay 30
@@ -133,6 +137,8 @@ The installation exposes the `context-foundry-fusion` command globally. `--confi
 | `--loop` | `Flag` | With `--replay-file`, restart the replay continuously instead of exiting — turns a one-shot replay into a continuous feed (ideal as a long-running Deployment demo streaming into TAK). No effect without `--replay-file`. | `False` |
 | `--loop-delay` | `Float` | Seconds to wait between replay iterations when `--loop` is set. | `60` |
 | `--realtime-factor` | `Float` | With `--replay-file`, the speed to emit events at relative to the scenario's own timeline: `1.0` replays at real time, `5` replays five times faster, `0` disables pacing and drains as fast as events can be fused. No effect without `--replay-file`. Must be `>= 0`. | `1.0` |
+| `--use-scenario-timestamps` | `Flag` | With `--replay-file`, stamp events with the timestamps in the file instead of shifting the scenario to start now. TAK may treat the result as too old or too far ahead to display. No effect without `--replay-file`. | `False` |
+| `--cot-stale-seconds` | `Float` | How long a CoT marker stays live in TAK after the event it was built from. | `15` |
 | `--enable-sapient` | `Flag` | Enable the live SAPIENT UDP stream (port 5000). | `False` |
 | `--enable-cot` | `Flag` | Enable the live CoT UDP stream (port 6969). | `False` |
 | `--log-to-file` | `Flag` | Write fused CoT to `fused_tracks_debug.xml` for offline validation. | *One sink required* |

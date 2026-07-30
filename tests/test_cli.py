@@ -17,8 +17,17 @@ import pytest
 
 from context_foundry import cli
 from context_foundry.fusion.schemas import TacticalTrack
+from context_foundry.fusion.sources.offset import OffsetReplaySource
 
 T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+class _Detection:
+    """Fake Stone Soup Detection. Only .timestamp is touched by the code under
+    test -- OffsetReplaySource rewrites it, so it must be assignable."""
+
+    def __init__(self, timestamp=T0):
+        self.timestamp = timestamp
 
 
 class _Stop(BaseException):
@@ -157,14 +166,22 @@ def test_replay_file_log_to_file_broadcasts_only_matching_timestamp(monkeypatch,
     )
 
     monkeypatch.setattr(
-        cli, "JsonSapientSource", lambda path: _EventsOnceSource([(T0, [object()])])
+        cli, "JsonSapientSource", lambda path: _EventsOnceSource([(T0, [_Detection()])])
     )
     monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[fresh, stale]]))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
 
     monkeypatch.setattr(
         "sys.argv",
-        ["fusion", "--config", "sensors.json", "--replay-file", str(replay_path), "--log-to-file"],
+        [
+            "fusion",
+            "--config",
+            "sensors.json",
+            "--replay-file",
+            str(replay_path),
+            "--use-scenario-timestamps",
+            "--log-to-file",
+        ],
     )
 
     with caplog.at_level("INFO"):
@@ -210,7 +227,7 @@ def test_enable_sapient_and_cot_sources_are_constructed_with_expected_ports(monk
 
     def fake_sapient_stream(port):
         created["sapient_port"] = port
-        return _EventsThenStopSource([(T0, [object()])])
+        return _EventsThenStopSource([(T0, [_Detection()])])
 
     def fake_cot_stream(port):
         created["cot_port"] = port
@@ -238,7 +255,7 @@ def test_tak_tls_host_constructs_sink_streams_payload_and_closes(monkeypatch, ca
 
     track = _fake_track("track-tls0", T0)
     monkeypatch.setattr(
-        cli, "JsonSapientSource", lambda path: _EventsOnceSource([(T0, [object()])])
+        cli, "JsonSapientSource", lambda path: _EventsOnceSource([(T0, [_Detection()])])
     )
     monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[track]]))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
@@ -267,6 +284,7 @@ def test_tak_tls_host_constructs_sink_streams_payload_and_closes(monkeypatch, ca
             "sensors.json",
             "--replay-file",
             str(replay_path),
+            "--use-scenario-timestamps",
             "--tak-tls-host",
             "takhost",
             "--tak-tls-cert",
@@ -302,7 +320,7 @@ def test_tak_ws_host_constructs_sink_streams_payload_and_closes(monkeypatch, cap
 
     track = _fake_track("track-ws00", T0)
     monkeypatch.setattr(
-        cli, "JsonSapientSource", lambda path: _EventsOnceSource([(T0, [object()])])
+        cli, "JsonSapientSource", lambda path: _EventsOnceSource([(T0, [_Detection()])])
     )
     monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[track]]))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
@@ -350,6 +368,7 @@ def test_tak_ws_host_constructs_sink_streams_payload_and_closes(monkeypatch, cap
             "sensors.json",
             "--replay-file",
             str(replay_path),
+            "--use-scenario-timestamps",
             "--tak-ws-host",
             "takhost",
             "--keycloak-token-url",
@@ -386,7 +405,7 @@ def _run_looping_replay(monkeypatch, tmp_path, extra_argv):
     replay_path = tmp_path / "scenario.json"
     replay_path.write_text("[]", encoding="utf-8")
 
-    source = _ResettableEventsSource([(T0, [object()])])
+    source = _ResettableEventsSource([(T0, [_Detection()])])
     track = _fake_track("loop-track-01", T0)
     tracker_count = {"n": 0}
 
@@ -438,7 +457,7 @@ def test_loop_continues_to_a_second_iteration(monkeypatch, tmp_path):
     replay_path = tmp_path / "scenario.json"
     replay_path.write_text("[]", encoding="utf-8")
 
-    source = _ResettableEventsSource([(T0, [object()])])
+    source = _ResettableEventsSource([(T0, [_Detection()])])
     track = _fake_track("loop-track-02", T0)
     monkeypatch.setattr(cli, "JsonSapientSource", lambda path: source)
     monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[track]]))
@@ -488,7 +507,7 @@ def test_negative_loop_delay_clamps_to_zero(monkeypatch, tmp_path):
 
 def test_loop_without_replay_file_warns_and_is_noop(monkeypatch, caplog):
     monkeypatch.setattr(
-        cli, "NetworkSapientStream", lambda port: _EventsThenStopSource([(T0, [object()])])
+        cli, "NetworkSapientStream", lambda port: _EventsThenStopSource([(T0, [_Detection()])])
     )
     monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
@@ -555,7 +574,7 @@ def test_default_wraps_replay_source_in_realtime_replay_source_at_factor_one(mon
     replay_path = tmp_path / "scenario.json"
     replay_path.write_text("[]", encoding="utf-8")
 
-    inner = _EventsOnceSource([(T0, [object()])])
+    inner = _EventsOnceSource([(T0, [_Detection()])])
     monkeypatch.setattr(cli, "JsonSapientSource", lambda path: inner)
     built = _patch_realtime_wrapper(monkeypatch)
     monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
@@ -569,15 +588,19 @@ def test_default_wraps_replay_source_in_realtime_replay_source_at_factor_one(mon
     cli.fusion_main()
 
     assert len(built) == 1
-    assert built[0].inner is inner
     assert built[0].factor == 1.0
+    # Offset inside pacer: the pacer sleeps against the intervals between
+    # events, which the offset leaves untouched. Reverse the two and the pacer
+    # would be measuring against timestamps that no longer match the file.
+    assert isinstance(built[0].inner, OffsetReplaySource)
+    assert built[0].inner.inner is inner
 
 
 def test_realtime_factor_flag_sets_factor_on_the_wrapper(monkeypatch, tmp_path):
     replay_path = tmp_path / "scenario.json"
     replay_path.write_text("[]", encoding="utf-8")
 
-    inner = _EventsOnceSource([(T0, [object()])])
+    inner = _EventsOnceSource([(T0, [_Detection()])])
     monkeypatch.setattr(cli, "JsonSapientSource", lambda path: inner)
     built = _patch_realtime_wrapper(monkeypatch)
     monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
@@ -607,7 +630,7 @@ def test_realtime_factor_zero_does_not_wrap_and_logs_unpaced(monkeypatch, caplog
     replay_path = tmp_path / "scenario.json"
     replay_path.write_text("[]", encoding="utf-8")
 
-    inner = _EventsOnceSource([(T0, [object()])])
+    inner = _EventsOnceSource([(T0, [_Detection()])])
     monkeypatch.setattr(cli, "JsonSapientSource", lambda path: inner)
     built = _patch_realtime_wrapper(monkeypatch)
     monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
@@ -664,7 +687,7 @@ def test_file_and_tak_tls_sinks_are_both_active(monkeypatch, tmp_path):
 
     track = _fake_track("track-both0", T0)
     monkeypatch.setattr(
-        cli, "JsonSapientSource", lambda path: _EventsOnceSource([(T0, [object()])])
+        cli, "JsonSapientSource", lambda path: _EventsOnceSource([(T0, [_Detection()])])
     )
     monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[track]]))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
@@ -691,6 +714,7 @@ def test_file_and_tak_tls_sinks_are_both_active(monkeypatch, tmp_path):
             "sensors.json",
             "--replay-file",
             str(replay_path),
+            "--use-scenario-timestamps",
             "--log-to-file",
             "--tak-tls-host",
             "takhost",
@@ -703,3 +727,165 @@ def test_file_and_tak_tls_sinks_are_both_active(monkeypatch, tmp_path):
     file_out = (tmp_path / "fused_tracks_debug.xml").read_text(encoding="utf-8")
     assert "TRK-track-both0" in file_out
     assert any("TRK-track-both0" in payload for payload in tls_sent)
+
+
+class _EchoTracker:
+    """Fake tracker that stamps its track with the timestamp it was handed, so
+    the broadcast gate matches whatever the source actually emitted."""
+
+    def __init__(self, track_id):
+        self.track_id = track_id
+        self.seen = []
+
+    def process_async_event(self, timestamp, detection_group):
+        self.seen.append(timestamp)
+        return [_fake_track(self.track_id, timestamp)]
+
+
+def test_default_offsets_replay_timestamps_and_still_broadcasts(monkeypatch, caplog, tmp_path):
+    """End-to-end guard on the default path.
+
+    The scenario is dated months from now; the emitted CoT must carry the
+    present instead. This also covers the silent-failure mode: if the offset
+    moved the event timestamp without moving the detections', the tracker's
+    track would not match and nothing would be broadcast at all.
+    """
+    monkeypatch.chdir(tmp_path)
+    replay_path = tmp_path / "scenario.json"
+    replay_path.write_text("[]", encoding="utf-8")
+
+    scenario_time = datetime(2026, 11, 15, 2, 45, tzinfo=timezone.utc)
+    tracker = _EchoTracker("offset-track-0001")
+
+    monkeypatch.setattr(
+        cli,
+        "JsonSapientSource",
+        lambda path: _EventsOnceSource([(scenario_time, [_Detection(scenario_time)])]),
+    )
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: tracker)
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["fusion", "--config", "sensors.json", "--replay-file", str(replay_path), "--log-to-file"],
+    )
+
+    with caplog.at_level("INFO"):
+        cli.fusion_main()
+
+    assert any("Broadcast Update for Track 0001" in r.message for r in caplog.records)
+
+    emitted = tracker.seen[0]
+    assert emitted != scenario_time
+    assert abs((emitted - datetime.now(timezone.utc)).total_seconds()) < 60
+
+    # And the serialised CoT carries the shifted time, not the file's.
+    output = (tmp_path / "fused_tracks_debug.xml").read_text(encoding="utf-8")
+    assert "2026-11-15" not in output
+
+
+def test_use_scenario_timestamps_keeps_the_file_clock_and_skips_the_wrapper(
+    monkeypatch, caplog, tmp_path
+):
+    replay_path = tmp_path / "scenario.json"
+    replay_path.write_text("[]", encoding="utf-8")
+
+    scenario_time = datetime(2026, 11, 15, 2, 45, tzinfo=timezone.utc)
+    tracker = _EchoTracker("scenario-track-0001")
+
+    monkeypatch.setattr(
+        cli,
+        "JsonSapientSource",
+        lambda path: _EventsOnceSource([(scenario_time, [_Detection(scenario_time)])]),
+    )
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: tracker)
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+    built = _patch_realtime_wrapper(monkeypatch)
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "fusion",
+            "--config",
+            "sensors.json",
+            "--replay-file",
+            str(replay_path),
+            "--use-scenario-timestamps",
+            "--log-to-file",
+        ],
+    )
+
+    with caplog.at_level("INFO"):
+        cli.fusion_main()
+
+    assert tracker.seen == [scenario_time]
+    assert not isinstance(built[0].inner, OffsetReplaySource)
+    assert any("with the scenario's own timestamps" in r.message for r in caplog.records)
+
+
+def test_use_scenario_timestamps_without_replay_file_warns(monkeypatch, caplog):
+    monkeypatch.setattr(
+        "sys.argv", ["fusion", "--config", "sensors.json", "--use-scenario-timestamps"]
+    )
+
+    with caplog.at_level("WARNING"):
+        cli.fusion_main()
+
+    assert any("--use-scenario-timestamps has no effect" in r.message for r in caplog.records)
+
+
+def test_cot_stale_seconds_flag_reaches_the_serializer(monkeypatch, tmp_path):
+    replay_path = tmp_path / "scenario.json"
+    replay_path.write_text("[]", encoding="utf-8")
+
+    built = []
+    monkeypatch.setattr(
+        cli,
+        "CotSerializer",
+        lambda stale_seconds: built.append(stale_seconds) or _FakeAugmentor(),
+    )
+    monkeypatch.setattr(cli, "JsonSapientSource", lambda path: _EventsOnceSource([]))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "fusion",
+            "--config",
+            "sensors.json",
+            "--replay-file",
+            str(replay_path),
+            "--log-to-file",
+            "--cot-stale-seconds",
+            "90",
+        ],
+    )
+
+    cli.fusion_main()
+
+    assert built == [90.0]
+
+
+def test_cot_stale_seconds_defaults_to_the_serializer_default(monkeypatch, tmp_path):
+    replay_path = tmp_path / "scenario.json"
+    replay_path.write_text("[]", encoding="utf-8")
+
+    built = []
+    monkeypatch.setattr(
+        cli,
+        "CotSerializer",
+        lambda stale_seconds: built.append(stale_seconds) or _FakeAugmentor(),
+    )
+    monkeypatch.setattr(cli, "JsonSapientSource", lambda path: _EventsOnceSource([]))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["fusion", "--config", "sensors.json", "--replay-file", str(replay_path), "--log-to-file"],
+    )
+
+    cli.fusion_main()
+
+    assert built == [cli.DEFAULT_STALE_SECONDS]

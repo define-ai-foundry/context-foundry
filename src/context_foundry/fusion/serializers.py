@@ -3,9 +3,18 @@
 
 import xml.etree.ElementTree as ET
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
+from datetime import datetime, timedelta
 
 from .schemas import TacticalTrack
+from .timeutil import as_utc
+
+# How long a marker stays live in TAK after the event it was built from.
+DEFAULT_STALE_SECONDS = 15.0
+
+
+def _cot_time(moment: datetime) -> str:
+    """CoT wants UTC, millisecond precision, `Z`-suffixed."""
+    return as_utc(moment).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 class BaseSerializer(ABC):
@@ -17,14 +26,12 @@ class BaseSerializer(ABC):
 class CotSerializer(BaseSerializer):
     """Formats tactical state for ATAK/WinTAK networks."""
 
+    def __init__(self, stale_seconds: float = DEFAULT_STALE_SECONDS):
+        self.stale_seconds = stale_seconds
+
     def serialize(self, state: TacticalTrack, node_id: str = "FUSION-NODE") -> str:
-        now = state.timestamp.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-        stale = (
-            datetime.fromtimestamp(state.timestamp.timestamp() + 15.0, timezone.utc).strftime(
-                "%Y-%m-%dT%H:%M:%S.%f"
-            )[:-3]
-            + "Z"
-        )
+        now = _cot_time(state.timestamp)
+        stale = _cot_time(state.timestamp + timedelta(seconds=self.stale_seconds))
 
         identity = "h" if state.threat_level == "hostile" else "s"
         sidc = f"a-{identity}-A-M-F"

@@ -193,6 +193,9 @@ Secrets are referenced as $(VAR) — the literal is NEVER placed in args.
 - $(TAK_BEARER_TOKEN)
 {{- end }}
 {{- end }}
+{{- /* --- cot framing --- */}}
+- --cot-stale-seconds
+- {{ .Values.cot.staleSeconds | quote }}
 {{- /* --- extra --- */}}
 {{- range .Values.extraArgs }}
 - {{ . | quote }}
