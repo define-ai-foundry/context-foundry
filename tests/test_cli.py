@@ -991,7 +991,7 @@ def test_events_older_than_the_last_processed_are_dropped(monkeypatch, caplog):
         cli.fusion_main()
 
     assert tracker.seen == [T0, T0]
-    warnings = [r for r in caplog.records if "5.0s behind" in r.message]
+    warnings = [r for r in caplog.records if "5.0s behind the newest event" in r.message]
     assert len(warnings) == 1
     # Names the sensor whose clock is out of step, not just the fact of a drop.
     assert "node-late" in warnings[0].message
@@ -1014,7 +1014,70 @@ def test_late_events_are_reported_periodically_not_once(monkeypatch, caplog):
     with caplog.at_level("WARNING"), pytest.raises(SystemExit):
         cli.fusion_main()
 
-    reports = [r for r in caplog.records if "behind" in r.message]
+    reports = [r for r in caplog.records if "behind the newest event" in r.message]
     assert len(reports) == 4
     # Each report carries the running total, so the scale of the loss is visible.
     assert "Dropped 4 event(s)" in reports[-1].message
+    # And the total is flushed on the way out, for a run that ends mid-window.
+    assert any("in total for timestamps out of step" in r.message for r in caplog.records)
+
+
+def test_a_future_stamped_live_event_does_not_become_the_watermark(monkeypatch, caplog):
+    """One sensor with a fast clock, an NTP step, or a spoofed datagram would
+    otherwise set a mark every healthy event afterwards falls behind, silencing
+    the engine for the rest of the run."""
+    now = datetime.now(timezone.utc)
+    far_future = now + timedelta(hours=6)
+    good = [
+        (now + timedelta(seconds=i), [_Detection(now + timedelta(seconds=i))]) for i in range(3)
+    ]
+    events = [good[0], (far_future, [_Detection(far_future, node_id="node-fast")]), *good[1:]]
+
+    tracker = _EchoTracker("future-track-0001")
+    monkeypatch.setattr(cli, "NetworkSapientStream", lambda port: _EventsOnceSource(events))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: tracker)
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+    monkeypatch.setattr(
+        "sys.argv", ["fusion", "--config", "sensors.json", "--enable-sapient", "--log-to-file"]
+    )
+
+    with caplog.at_level("WARNING"), pytest.raises(SystemExit):
+        cli.fusion_main()
+
+    # The future event is refused; every healthy one still gets through.
+    assert tracker.seen == [e[0] for e in good]
+    reports = [r for r in caplog.records if "ahead of the present" in r.message]
+    assert len(reports) == 1
+    assert "node-fast" in reports[0].message
+
+
+def test_a_replay_running_ahead_of_the_wall_clock_is_not_gated(monkeypatch, caplog, tmp_path):
+    """A replay legitimately emits timestamps minutes into the future -- the
+    scenario is re-stamped to start now and then runs on its own clock."""
+    replay_path = tmp_path / "scenario.json"
+    replay_path.write_text("[]", encoding="utf-8")
+
+    ahead = datetime.now(timezone.utc) + timedelta(minutes=30)
+    tracker = _EchoTracker("ahead-track-0001")
+    monkeypatch.setattr(
+        cli, "JsonSapientSource", lambda path: _EventsOnceSource([(ahead, [_Detection(ahead)])])
+    )
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: tracker)
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "fusion",
+            "--config",
+            "sensors.json",
+            "--replay-file",
+            str(replay_path),
+            "--use-scenario-timestamps",
+            "--log-to-file",
+        ],
+    )
+
+    cli.fusion_main()
+
+    assert tracker.seen == [ahead]
+    assert not [r for r in caplog.records if "out of step" in r.message]

@@ -172,8 +172,11 @@ sinks:
 cot:
   # How long a marker stays live in TAK after the event it was built from. Must
   # exceed the interval between a track's updates, or each marker expires just
-  # before its own next update and flickers.
-  staleSeconds: 15
+  # before its own next update and flickers. The Joensuu network reports each
+  # object about every 18s, so the app's own 15s default is too short for it --
+  # raise this to match whatever the deployed sensors (or the replayed scenario)
+  # actually do.
+  staleSeconds: 30
 #
 # Replayed events are stamped so the scenario starts now, keeping their original
 # spacing. To emit a scenario's own timestamps instead -- which TAK may treat as

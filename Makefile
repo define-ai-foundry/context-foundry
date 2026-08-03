@@ -93,10 +93,14 @@ tak-demo: ## Replay into group $(TAK_DEMO_GROUP) at $(TAK_DEMO_FACTOR)x real tim
 # --- live ingestion (tak profile): UDP sensor traffic -> fusion -> WebTAK WebSocket ---
 
 # Which live protocol the feeder speaks, and how fast it replays the scenario.
+# Real time by default: the feeder stamps datagrams as it sends them, so a
+# compressed feed also compresses the timeline the tracker sees, tightening its
+# association gate until every detection starts its own track. Raise it to smoke
+# out the ingest path in a hurry, not to judge the fusion picture.
 LIVE_PROTOCOL ?= sapient
-LIVE_FACTOR ?= 10
+LIVE_FACTOR ?= 1
 
-live-demo: ## Feed live UDP sensor traffic into the engine and on to TAK (override: make live-demo LIVE_PROTOCOL=cot LIVE_FACTOR=1)
+live-demo: ## Feed live UDP sensor traffic into the engine and on to TAK, at scenario cadence (override: make live-demo LIVE_PROTOCOL=cot LIVE_FACTOR=10)
 	@id=$$($(TAK_CID)); \
 	[ -n "$$id" ] || { echo "tak-server not running; run 'make tak-up' first" >&2; exit 1; }; \
 	tok=$$(curl -sk -X POST https://localhost:8446/oauth/token \
@@ -113,10 +117,19 @@ live-demo: ## Feed live UDP sensor traffic into the engine and on to TAK (overri
 live-down: ## Stop the live-ingestion engine (leaves the TAK stack up)
 	$(COMPOSE) --profile tak stop fusion-live
 
-tak-tail: ## Print the CoT a WebTAK user actually receives (override: make tak-tail TAK_DEMO_GROUP=bravo)
-	$(COMPOSE) --profile tak run --rm --no-deps sensor-feeder \
+# Receiving nothing is the expected result for a group the producer is not in,
+# so this target reports it rather than failing; the script still exits non-zero
+# for a caller that wants to assert delivery.
+tak-tail: ## Print the CoT a WebTAK user actually receives; a group with none is not an error (override: make tak-tail TAK_DEMO_GROUP=bravo)
+	@$(COMPOSE) --profile tak run --rm --no-deps sensor-feeder \
 		python dev/webtak_ws_tail.py --host tak-server --user $(TAK_DEMO_GROUP) \
-		--password '$(TAK_DEMO_PASS)' --seconds 30
+		--password '$(TAK_DEMO_PASS)' --seconds 30; \
+	rc=$$?; \
+	if [ $$rc -eq 1 ]; then \
+		echo "Group '$(TAK_DEMO_GROUP)' received nothing — expected unless it is the producer's group."; \
+	elif [ $$rc -ne 0 ]; then \
+		echo "tak-tail itself failed (exit $$rc) — this is not the isolation result." >&2; exit $$rc; \
+	fi
 
 tak-down: ## Stop the TAK stack (keeps the tak-data volume, so the CA + users persist)
 	$(COMPOSE) --profile tak down --remove-orphans

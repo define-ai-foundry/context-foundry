@@ -103,3 +103,29 @@ def test_tactical_track_full_population():
     assert track.threat_level == "hostile"
     assert track.velocity == [1.0, 2.0, 3.0]
     assert track.metadata == {"foo": "bar"}
+
+
+def test_naive_timestamps_are_treated_as_utc():
+    """A CoT `time` attribute may legally omit its offset, and one naive
+    timestamp mixed with the aware ones took the whole engine down comparing
+    them."""
+    det = InternalDetection(
+        sensor_id="node-A",
+        timestamp="2026-01-01T00:00:00.000",  # schema-valid CoT, no offset
+        latitude=62.9,
+        longitude=29.8,
+    )
+
+    assert det.timestamp.tzinfo is not None
+    assert det.timestamp == datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+def test_an_offset_timestamp_is_converted_to_utc():
+    det = InternalDetection(
+        sensor_id="node-A",
+        timestamp="2026-01-01T02:00:00+02:00",
+        latitude=62.9,
+        longitude=29.8,
+    )
+
+    assert det.timestamp == datetime(2026, 1, 1, tzinfo=timezone.utc)

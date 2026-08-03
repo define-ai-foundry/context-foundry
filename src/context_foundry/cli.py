@@ -5,6 +5,7 @@ import argparse
 import logging
 import signal
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from context_foundry.fusion import config
@@ -28,13 +29,19 @@ from context_foundry.fusion.tracker import SapientAsynchronousTracker
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("FusionEngine")
 
-# How often to report events dropped for arriving out of order. A skewed sensor
+# How often to report events dropped for arriving out of step. A skewed sensor
 # clock produces one per packet, so this is a rate limit, not a one-shot.
 LATE_EVENT_REPORT_SECONDS = 60.0
 
+# How far ahead of now a live event may be stamped. Live sensors report the
+# present, so anything beyond this is a broken clock or a spoofed datagram --
+# and without the bound one such packet would become the high-water mark that
+# every healthy event afterwards is measured against and dropped.
+FUTURE_HORIZON_SECONDS = 10.0
+
 
 def _sensor_ids(detections):
-    """The sensors an event came from, for reporting which one is misbehaving."""
+    """The sensors an event came from, for reporting which one is out of step."""
     ids = {getattr(det, "metadata", {}).get("nodeId") for det in detections}
     return ", ".join(sorted(str(node_id) for node_id in ids if node_id)) or "an unnamed sensor"
 
@@ -268,8 +275,10 @@ def fusion_main():
 
     # 4. The Main Loop
     latest_timestamp = None
-    late_events = 0
-    next_late_report = 0.0
+    out_of_step_events = 0
+    next_skew_report = 0.0
+    # Only a live run has a present to be measured against; see the gate below.
+    future_horizon = FUTURE_HORIZON_SECONDS if not args.replay_file else None
     try:
         while True:
             processed_any_events = False
@@ -281,24 +290,45 @@ def fusion_main():
                     # older than the last one rewinds every track's timestamp and
                     # re-broadcasts the lot with a CoT time that moves back, which
                     # TAK draws as markers jumping into the past -- for every
-                    # track, not just the late sensor's. UDP reordering produces
-                    # the odd one; a sensor whose clock is behind produces nothing
-                    # but, and is effectively out of the fusion picture until its
-                    # clock is fixed, so keep saying so.
-                    if latest_timestamp is not None and timestamp < latest_timestamp:
-                        late_events += 1
-                        if time.monotonic() >= next_late_report:
-                            next_late_report = time.monotonic() + LATE_EVENT_REPORT_SECONDS
+                    # track, not just the late sensor's. So events are gated to
+                    # the highest timestamp seen so far.
+                    #
+                    # That makes the gate only as good as the highest timestamp,
+                    # which is why a live event stamped in the future is refused
+                    # the mark: one bad clock or spoofed datagram would otherwise
+                    # set a watermark every healthy sensor then falls behind, and
+                    # the engine would go quiet for good. A replay legitimately
+                    # runs ahead of the wall clock, and cannot be combined with a
+                    # live source, so the horizon only applies to live runs.
+                    skew = None
+                    if future_horizon is not None:
+                        ahead = (timestamp - datetime.now(timezone.utc)).total_seconds()
+                        if ahead > future_horizon:
+                            skew = f"{ahead:.1f}s ahead of the present"
+                    if (
+                        skew is None
+                        and latest_timestamp is not None
+                        and timestamp < latest_timestamp
+                    ):
+                        behind = (latest_timestamp - timestamp).total_seconds()
+                        skew = f"{behind:.1f}s behind the newest event seen"
+
+                    if skew is not None:
+                        out_of_step_events += 1
+                        if time.monotonic() >= next_skew_report:
+                            next_skew_report = time.monotonic() + LATE_EVENT_REPORT_SECONDS
                             logger.warning(
-                                "Dropped %d event(s) stamped before the last one processed; "
-                                "the latest is %.1fs behind, from %s. Its sensor's clock is "
-                                "out of step and its detections are not being fused.",
-                                late_events,
-                                (latest_timestamp - timestamp).total_seconds(),
+                                "Dropped %d event(s) whose timestamps are out of step with the "
+                                "rest; the latest is %s, from %s. Fusing it would drag every "
+                                "track's time with it. Check the sensors' clocks.",
+                                out_of_step_events,
+                                skew,
                                 _sensor_ids(detections),
                             )
                         continue
-                    latest_timestamp = timestamp
+
+                    if latest_timestamp is None or timestamp > latest_timestamp:
+                        latest_timestamp = timestamp
 
                     active_tracks = tracker.process_async_event(timestamp, set(detections))
 
@@ -348,6 +378,13 @@ def fusion_main():
                 logger.info("Replay file processing complete. Exiting.")
                 break
     finally:
+        if out_of_step_events:
+            # The periodic report can end mid-window, so a short run would
+            # otherwise finish under-reporting what it dropped.
+            logger.warning(
+                "Dropped %d event(s) in total for timestamps out of step with the rest.",
+                out_of_step_events,
+            )
         for sink in sinks:
             sink.close()
 

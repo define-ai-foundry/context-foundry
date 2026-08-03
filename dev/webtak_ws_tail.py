@@ -27,6 +27,10 @@ def fetch_token(host, port, username, password, verify):
     return resp.json()["access_token"]
 
 
+EMPTY_TAIL = 1  # nothing arrived: a valid result for a group the producer is not in
+FAILED = 2  # the tail itself broke, which is not
+
+
 def main():
     parser = argparse.ArgumentParser(description="Tail the CoT a WebTAK user receives")
     parser.add_argument("--host", default="localhost")
@@ -71,9 +75,16 @@ def main():
 
     ws.close()
     print(f"[{args.user}] received {received} frames", flush=True)
-    # Non-zero when nothing arrived, so a shell check can assert delivery.
-    sys.exit(0 if received else 1)
+    # Distinct codes, so a caller can tell "this group sees nothing" (the point of
+    # the isolation check) from "the tailer broke" (which would otherwise pass it).
+    sys.exit(0 if received else EMPTY_TAIL)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"tail failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        sys.exit(FAILED)
