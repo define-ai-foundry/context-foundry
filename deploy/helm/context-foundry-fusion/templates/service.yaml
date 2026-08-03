@@ -10,7 +10,16 @@ metadata:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
+  {{- if and (eq .Values.service.type "ClusterIP") (include "context-foundry-fusion.liveSource" .) }}
+  # ClusterIP: in-cluster senders only. Sensors outside the cluster cannot deliver
+  # here -- see the SENSOR INGRESS section of values.yaml (hostPorts, hostNetwork,
+  # or a NodePort with service.nodePorts pinned).
+  {{- end }}
   type: {{ .Values.service.type }}
+  {{- if ne .Values.service.type "ClusterIP" }}
+  # Local keeps the sender's source address; Cluster masquerades it to the node IP.
+  externalTrafficPolicy: {{ .Values.service.externalTrafficPolicy }}
+  {{- end }}
   selector:
     {{- include "context-foundry-fusion.selectorLabels" . | nindent 4 }}
   ports:
@@ -19,11 +28,17 @@ spec:
       port: 5000
       targetPort: 5000
       protocol: UDP
+      {{- with .Values.service.nodePorts.sapient }}
+      nodePort: {{ . }}
+      {{- end }}
     {{- end }}
     {{- if .Values.sources.cot.enabled }}
     - name: cot-udp
       port: 6969
       targetPort: 6969
       protocol: UDP
+      {{- with .Values.service.nodePorts.cot }}
+      nodePort: {{ . }}
+      {{- end }}
     {{- end }}
 {{- end }}

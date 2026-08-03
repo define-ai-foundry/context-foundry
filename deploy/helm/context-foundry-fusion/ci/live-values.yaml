@@ -1,0 +1,25 @@
+# Live UDP ingest on a single node: host ports for the sensors, a Keycloak grant
+# for the sink, and TAK verified by a CA bundle -- the production shape.
+sources:
+  replayFile: ""
+  sapient:
+    enabled: true
+  cot:
+    enabled: true
+hostPorts:
+  enabled: true
+# Pinned rather than inherited, so an app-default change cannot move a live
+# deployment's operating point: 45s covers two revisits of the 18s reference
+# network, and 300 detections is nearly four times its densest instant.
+tracker:
+  maxCoastSeconds: 45
+  maxEventDetections: 300
+sinks:
+  takWs:
+    caSecret:
+      name: tak-ca
+    auth:
+      keycloakTokenUrl: "https://iam.lab.iamrain.ai/realms/rain-realm/protocol/openid-connect/token"
+      oidcClientId: "cf-rain-team"
+      oidcClientSecret:
+        secretName: context-foundry-oidc

@@ -7,24 +7,108 @@ Argv the container runs (context-foundry-fusion + these args):
 View logs
   kubectl -n {{ .Release.Namespace }} logs -f deploy/{{ include "context-foundry-fusion.fullname" . }}
 
+{{- if .Values.sources.replayFile }}
 Continuous replay feed (default)
+{{- if .Values.sources.loop.enabled }}
   With sources.loop.enabled=true (default) the replay restarts every
   {{ .Values.sources.loop.delaySeconds }}s, so the Deployment runs as a healthy long-lived feed
   (no exit/restart CrashLoopBackOff). The engine rebuilds its tracker each pass.
+{{- else }}
+  sources.loop.enabled=false: the replay is finite, so the container exits when it
+  drains and the Deployment restarts it (CrashLoopBackOff). Turn looping on for a
+  long-running feed.
+{{- end }}
   Point at live sensors instead with sources.sapient.enabled / sources.cot.enabled.
 
   Events are paced to the scenario's own clock (sources.realtimeFactor={{ .Values.sources.realtimeFactor }}).
   Raise it to replay faster, or set it to 0 to disable pacing and drain as fast
   as events can be fused — not recommended here, since the point of this feed
   is scenario-cadence arrival in WebTAK.
+{{- else }}
+Live feed
+  Sources: {{ if .Values.sources.sapient.enabled }}SAPIENT protobuf on UDP 5000{{ end }}{{ if and .Values.sources.sapient.enabled .Values.sources.cot.enabled }}, {{ end }}{{ if .Values.sources.cot.enabled }}CoT XML on UDP 6969{{ end }}.
+  Each sensor-instant is held {{ .Values.sources.frameWindowSeconds }}s to collect the rest of its datagrams
+  before being fused as one event; a sweep that arrives more spread out than that
+  splits into single-detection events. Keep the sensors' clocks in step — an event
+  out of step with the newest timestamp seen is dropped.
 
-Wire Keycloak auth for the WebTAK-WS sink
+  A track is dropped after {{ include "context-foundry-fusion.trackerBound" (dict "values" .Values.tracker "key" "maxCoastSeconds") | default "45" }}s (tracker.maxCoastSeconds) without a real detection, so that
+  has to exceed the sensors' revisit interval or tracks expire between revisits and
+  each revisit re-initiates them.
+
+  One fusion pass is bounded by tracker.maxLiveTracks x tracker.maxEventDetections:
+  measured on one core at the reference density (9 nodes, ~80 objects, 18s revisit)
+  a pass costs 0.44s, and 1.27s at the {{ include "context-foundry-fusion.trackerBound" (dict "values" .Values.tracker "key" "maxEventDetections") | default "300" }}-detection cap. That run fused every
+  sweep whole at a {{ .Values.sources.frameWindowSeconds }}s window, with zero splits and nothing discarded by the
+  kernel. Watch the fusion summary (every 60s): events dropped out of step, and
+  "Discarded by the kernel before ingest" — the loss no in-process counter sees. If
+  those move, or the logs report the live-track limit being hit, thin the sensor
+  network rather than raising tracker.maxLiveTracks.
+{{- end }}
+
+Get sensor traffic in (live sources only)
+{{- if include "context-foundry-fusion.liveSource" . }}
+{{- if .Values.hostNetwork.enabled }}
+  hostNetwork is ON: the container binds the node's interfaces directly, so the ASMs
+  send to <node-ip>:5000 (sapient) / <node-ip>:6969 (cot) with no NAT in the way.
+  DNS policy is {{ include "context-foundry-fusion.dnsPolicy" . }}, so {{ .Values.sinks.takWs.host }} still resolves.
+{{- else if .Values.hostPorts.enabled }}
+  hostPorts is ON: the node's 5000/6969 map to the pod, so the ASMs send to
+  <node-ip>:5000 (sapient) / <node-ip>:6969 (cot). Those ports must be free on the node.
+{{- else if ne .Values.service.type "ClusterIP" }}
+  Service type {{ .Values.service.type }}, externalTrafficPolicy {{ .Values.service.externalTrafficPolicy }}. Point the ASMs at the
+  published node port(s):
+    kubectl -n {{ .Release.Namespace }} get svc {{ include "context-foundry-fusion.fullname" . }} -o wide
+  A pinned port outside 30000-32767 needs the API server's --service-node-port-range
+  to include it.
+{{- else }}
+  WARNING: a live source is enabled but the only ingress is a ClusterIP Service —
+  reachable from inside the cluster only. Sensors on the network cannot deliver to it.
+  Choose one: hostPorts.enabled=true (recommended on a single-node edge box),
+  hostNetwork.enabled=true, or service.type=NodePort with service.nodePorts pinned.
+{{- end }}
+{{- else }}
+  Not applicable: no live source is enabled (this release replays a file).
+{{- end }}
+
+Change the sensor network
+{{- if .Values.config.existingConfigMap }}
+  The registry comes from ConfigMap {{ .Values.config.existingConfigMap }}, which this chart does not own.
+  The app reads it once at startup, and the chart cannot hash content it cannot see,
+  so editing that ConfigMap does NOT restart the pod. After an edit:
+    kubectl -n {{ .Release.Namespace }} rollout restart deploy/{{ include "context-foundry-fusion.fullname" . }}
+{{- else }}
+  Edit config.sensors and upgrade: the pod's checksum/config annotation changes with
+  the ConfigMap, so the pod is replaced and picks the new registry up. Every node that
+  reports must be listed, or its detections carry no station position.
+{{- end }}
+
+Sink auth (in use)
+{{- if .Values.sinks.takWs.auth.keycloakTokenUrl }}
+  Keycloak client_credentials as client {{ .Values.sinks.takWs.auth.oidcClientId }}, refreshed before expiry.
+  CoT is tagged with that token's groups, which is what isolates one group's picture.
+{{- if not (include "context-foundry-fusion.oidcSecretEnabled" .) }}
+  WARNING: no client secret is configured (sinks.takWs.auth.oidcClientSecret.secretName
+  or .value). The token request goes out as a public client; Keycloak rejects it if
+  the client is confidential, and the sink then publishes nothing.
+{{- end }}
+{{- else }}
+  Static bearer token from Secret {{ include "context-foundry-fusion.bearerSecretName" . }}, key {{ .Values.sinks.takWs.auth.bearerToken.secretKey }}.
+  It is never refreshed: when it expires the sink stops publishing until the Secret
+  is replaced and the pod restarted. Use Keycloak for anything long-lived.
+{{- end }}
+
+Wire Keycloak auth for the WebTAK-WS sink (required unless a static bearer token is
+set; with neither, the chart refuses to render)
   --set sinks.takWs.auth.keycloakTokenUrl=https://<iam>/realms/<realm>/protocol/openid-connect/token \
   --set sinks.takWs.auth.oidcClientId=<client-id> \
   --set sinks.takWs.auth.oidcClientSecret.secretName=<existing-secret> \
   --set sinks.takWs.auth.oidcClientSecret.secretKey=oidc-client-secret \
-  --set sinks.takWs.verifyTls=true
+  --set sinks.takWs.caSecret.name=<secret-holding-tak-ca> --set sinks.takWs.caSecret.key=ca.crt
   (Secrets are sourced via secretKeyRef and referenced in args as $(OIDC_CLIENT_SECRET);
    the literal never appears in the pod spec. For dev you may pass
    sinks.takWs.auth.oidcClientSecret.value=<secret> and the chart mints a Secret.)
+  Verify TAK with caSecret, not verifyTls: reached at its in-cluster service name, TAK's
+  certificate does not carry that name, so verifyTls fails the hostname check. The
+  Keycloak token exchange is verified against the system trust store either way.
 ────────────────────────────────────────────────────────────────────

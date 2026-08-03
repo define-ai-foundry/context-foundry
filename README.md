@@ -24,8 +24,10 @@ Supports both:
 
 Built on the Stone Soup framework, leveraging:
 - 9D Unscented Kalman Filters (UKF) for nonlinear state estimation.
-- Joint Probabilistic Data Association (JPDA) for multi-sensor track correlation.
+- Global nearest-neighbour association over a Mahalanobis gate, solved as a 2D assignment, for multi-sensor track correlation.
 - Persistent tracking of dynamic targets, including UAV and swarm scenarios.
+
+Association cost is polynomial in tracks × detections, and every term of one fusion pass is bounded — the live track population, the detections one event may carry, and how long a track may coast. That matters at density: exact joint association is exponential once coasting tracks' gates overlap into a single cluster, which at 9 nodes and 80 objects meant one call that never returned and allocated 9.8 GiB.
 
 <br clear="right"/>
 
@@ -56,7 +58,7 @@ The system operates on a "Rosetta Stone" methodology. Incoming data is immediate
 SAPIENT (JSON)   ──┐   ┌──> Pydantic Validation ──┐   ┌──> Cursor on Target → TAK (WS / TLS)
                    ├───┤                          ├───┤
 SAPIENT (Binary) ──┘   └──> Stone Soup Tracker  ──┘   └──> SAPIENT (HLDMM)
-                            (UKF + JPDA)
+                            (UKF + GNN)
 ```
 
 ## Quick Start
@@ -142,7 +144,9 @@ make live-down                           # stop the engine (leaves TAK up)
 
 `make live-demo` starts the engine detached and runs the feeder in the foreground, so the run lasts as long as the feed. Both live sources are read concurrently, so `--enable-sapient --enable-cot` together work: each source gets its own reader thread, and events are fused in arrival order. An event whose timestamp is **out of step with the rest** is dropped: the tracker cannot predict backwards, so letting a late one through rewinds *every* track's timestamp and redraws its TAK marker in the past. Events are therefore gated to the newest timestamp seen — and a live event stamped more than ten seconds **ahead of the present** is refused that mark, or one bad clock (or one spoofed datagram) would set a watermark every healthy sensor then falls behind, silencing the engine for good. Drops are re-reported once a minute with a running count and the node id involved, rather than once per run. **Keep the sensors' clocks in step.** If fusion falls behind the incoming rate the readers stall rather than discard, so nothing is lost in-process; sustained overload then overruns the kernel's socket receive buffer (visible as the drop counter for the socket in `/proc/net/udp`).
 
-A live socket sees one datagram at a time, but a sensor that reports five objects at one instant sends five of them, and the fused result depends on that instant arriving as **one event** — the contract a replay file's grouping gives for free, and what JPDA needs to associate more than one detection per track update. The engine therefore assembles the datagrams of one sensor-instant into a single event, bounded by a short window (50 ms) from the instant's first datagram: every live detection pays at least that window in latency — a frame surfaces on the first read that returns after it expires, so a slow consumer adds to it — and a sweep that takes longer than the window to arrive splits across events. Several sensors' frames are assembled independently and in parallel, so two nodes whose sweeps overlap interleave on the wire without either losing detections, and each is handed on when its own window is up, in the order the datagrams arrived.
+A live socket sees one datagram at a time, but a sensor that reports five objects at one instant sends five of them, and the fused result depends on that instant arriving as **one event** — the contract a replay file's grouping gives for free, and what the associator needs in order to match more than one detection per track update. The engine therefore assembles the datagrams of one sensor-instant into a single event, bounded by a short window (`--frame-window-seconds`, 250 ms) from the instant's first datagram: every live detection pays at least that window in latency — a frame surfaces on the first read that returns after it expires, so a slow consumer adds to it — and a sweep whose datagrams are spread wider than the window splits across events. Several sensors' frames are assembled independently and in parallel, so two nodes whose sweeps overlap interleave on the wire without either losing detections, and each is handed on when its own window is up, in the order the datagrams arrived.
+
+The window bounds a sweep's **arrival spread**, which is why 250 ms is enough for sweeps that a sensor emits as a burst: measured at 9 nodes × 80 objects, every sweep arrived whole with no splits and nothing discarded, while one fusion pass took 0.44 s. A pass that overlaps a frame still being assembled can split it, so if the per-event log line starts reporting partial sweeps, raise the window. The two things worth watching in the summary are that and the kernel discard counter.
 
 A replay file and a live source cannot be combined — the engine refuses the pair. A scenario runs on its own clock, minutes or hours away from the sensors', and the gate above would silently discard whichever is behind.
 
@@ -183,7 +187,14 @@ The installation exposes the `context-foundry-fusion` command globally. `--confi
 | `--oidc-client-id` | `String` | Keycloak client id — the producer identity, whose group its CoT lands in. | *WS: with token URL* |
 | `--oidc-client-secret` | `String` | Keycloak client secret (confidential client). | *Optional* |
 | `--tak-bearer-token` | `String` | Static bearer token, as an alternative to a Keycloak grant. | *Optional* |
-| `--tak-ws-verify-tls` | `Flag` | Verify the TAK server TLS cert (default skips it, for self-signed dev). | `False` |
+| `--tak-ws-verify-tls` | `Flag` | Verify the TAK server against the system trust store. A server dialled by a name its certificate does not carry — an in-cluster Service name — fails here; use `--tak-ws-ca`. Never affects the Keycloak token exchange, which is always verified. | `False` |
+| `--tak-ws-ca` | `String` | CA bundle (PEM) verifying the TAK server on the WebSocket sink. The production trust setting; takes precedence over `--tak-ws-verify-tls`. | *Optional* |
+| `--tak-ws-token-timeout` | `Float` | Seconds to wait on the Keycloak token endpoint. The fetch blocks the fusion loop, so the sensor sockets go unread for its duration. | `5` |
+| `--frame-window-seconds` | `Float` | How long a live source holds one sensor-instant open to collect the rest of its datagrams before handing it on as one event. Must exceed both the spread of a sweep's datagrams and one fusion pass, or sweeps split into single-detection events. Costs that much latency per live detection. | `0.25` |
+| `--max-live-tracks` | `Integer` | Live tracks held at once. Detections that associate with nothing each start a track, so clutter or an injected feed grow the population; past this bound new tracks are refused and reported, which keeps the targets already being followed. | `120` |
+| `--max-track-history` | `Integer` | States retained per track. Nothing downstream reads history; it is history times the track bound that has to fit the memory limit. | `20` |
+| `--max-event-detections` | `Integer` | Largest number of detections one event carries into association — the only cost term a sender controls. Past it detections are shed in a deterministic order and reported. | `300` |
+| `--max-coast-seconds` | `Float` | How long a track may coast without a real detection before it is dropped. Must exceed the interval at which a target is re-detected, or tracks die between revisits (on the reference scenario, `20` gives 274 tracks against 88 at the default). | `45` |
 | `--tak-tls-host` | `String` | TAK host to stream CoT to over raw TCP+TLS (port 8089); enables the TLS sink. | *One sink required* |
 | `--tak-tls-port` | `Integer` | TAK TLS port. | `8089` |
 | `--tak-tls-cert` | `String` | Client certificate (PEM) for mutual TLS. | *Optional* |

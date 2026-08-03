@@ -19,9 +19,24 @@ spec:
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- with .Values.podAnnotations }}
+      {{- /* The app reads the sensor registry once at startup and never reloads it,
+             so a registry edit has to replace the pod. Hashing the rendered
+             ConfigMap makes the pod template change with it, which the Recreate
+             strategy turns into a restart. Nothing to hash when the registry
+             lives in a ConfigMap the chart does not own (config.existingConfigMap):
+             an edit there leaves the pod running the registry it started with. */}}
+      {{- $cfgsum := "" }}
+      {{- if not .Values.config.existingConfigMap }}
+      {{- $cfgsum = include (print $.Template.BasePath "/configmap-sensors.yaml") . | sha256sum }}
+      {{- end }}
+      {{- if or $cfgsum .Values.podAnnotations }}
       annotations:
+        {{- if $cfgsum }}
+        checksum/config: {{ $cfgsum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- end }}
     spec:
       {{- with .Values.imagePullSecrets }}
@@ -30,6 +45,10 @@ spec:
       {{- end }}
       serviceAccountName: {{ include "context-foundry-fusion.serviceAccountName" . }}
       automountServiceAccountToken: false
+      {{- if .Values.hostNetwork.enabled }}
+      hostNetwork: true
+      {{- end }}
+      dnsPolicy: {{ include "context-foundry-fusion.dnsPolicy" . }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
@@ -38,6 +57,25 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             {{- include "context-foundry-fusion.args" . | nindent 12 }}
+          {{- if include "context-foundry-fusion.liveSource" . }}
+          ports:
+            {{- if .Values.sources.sapient.enabled }}
+            - name: sapient-udp
+              containerPort: 5000
+              protocol: UDP
+              {{- if .Values.hostPorts.enabled }}
+              hostPort: 5000
+              {{- end }}
+            {{- end }}
+            {{- if .Values.sources.cot.enabled }}
+            - name: cot-udp
+              containerPort: 6969
+              protocol: UDP
+              {{- if .Values.hostPorts.enabled }}
+              hostPort: 6969
+              {{- end }}
+            {{- end }}
+          {{- end }}
           {{- $env := include "context-foundry-fusion.env" . }}
           {{- if trim $env }}
           env:
@@ -51,6 +89,11 @@ spec:
             - name: sensors-config
               mountPath: /etc/context-foundry
               readOnly: true
+            {{- if include "context-foundry-fusion.caEnabled" . }}
+            - name: tak-ca
+              mountPath: {{ include "context-foundry-fusion.caDir" . }}
+              readOnly: true
+            {{- end }}
             - name: tmp
               mountPath: /tmp
           # No HTTP endpoint is exposed (outbound WS client) — no probes.
@@ -58,6 +101,15 @@ spec:
         - name: sensors-config
           configMap:
             name: {{ include "context-foundry-fusion.configMapName" . }}
+        {{- if include "context-foundry-fusion.caEnabled" . }}
+        # CA bundle the WS sink verifies the TAK server's chain against.
+        - name: tak-ca
+          secret:
+            secretName: {{ .Values.sinks.takWs.caSecret.name }}
+            items:
+              - key: {{ .Values.sinks.takWs.caSecret.key | quote }}
+                path: {{ .Values.sinks.takWs.caSecret.key | quote }}
+        {{- end }}
         # readOnlyRootFilesystem leaves no writable path anywhere, and libraries
         # in the dependency tree expect one: matplotlib (pulled in by stonesoup)
         # raises OSError on import when it can neither write its cache dir nor

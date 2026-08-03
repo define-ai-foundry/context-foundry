@@ -57,12 +57,31 @@ jobs:
 
       - uses: azure/setup-helm@v4
 
-      - name: Helm lint
-        run: helm lint "$CHART"
+      # Both supported shapes, from the values files that describe them. Linting
+      # bare values stops at the sink-auth guard and would exercise no manifest.
+      - name: Helm lint (replay shape)
+        run: helm lint "$CHART" --values "$CHART/ci/replay-values.yaml"
+
+      - name: Helm lint (live shape)
+        run: helm lint "$CHART" --values "$CHART/ci/live-values.yaml"
 
       # Render each supported shape to catch template/guard regressions.
-      - name: Helm template (default — looping replay feed to WebTAK WS)
-        run: helm template ci "$CHART" >/dev/null
+      - name: Helm template (looping replay feed to WebTAK WS)
+        run: helm template ci "$CHART" --values "$CHART/ci/replay-values.yaml" >/dev/null
 
-      - name: Helm template (live UDP source + Service)
-        run: helm template ci "$CHART" --set sources.sapient.enabled=true --set service.enabled=true >/dev/null
+      - name: Helm template (live UDP ingest via host ports)
+        run: helm template ci "$CHART" --values "$CHART/ci/live-values.yaml" >/dev/null
+
+      # The guards are the chart's contract, so a render that should fail must.
+      - name: Helm guards refuse invalid combinations
+        run: |
+          set -e
+          refuse() {
+            if helm template ci "$CHART" "$@" >/dev/null 2>&1; then
+              echo "guard did not fire: $*" >&2; exit 1
+            fi
+          }
+          refuse                                                   # no sink auth
+          refuse --values "$CHART/ci/live-values.yaml" --set sources.replayFile=data/examples/sapient_messages.json
+          refuse --values "$CHART/ci/replay-values.yaml" --set sinks.takWs.enabled=false
+          refuse --values "$CHART/ci/live-values.yaml" --set hostPorts.enabled=false --set service.type=NodePort --set service.externalTrafficPolicy=Cluster

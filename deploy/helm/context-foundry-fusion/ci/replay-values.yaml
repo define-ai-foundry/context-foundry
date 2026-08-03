@@ -1,0 +1,8 @@
+# Looping replay -> WebTAK WS, the shape `make demo` mirrors. Auth is mandatory,
+# so CI supplies a throwaway bearer token rather than rendering a pod that would
+# exit at startup.
+sinks:
+  takWs:
+    auth:
+      bearerToken:
+        value: "ci-not-a-real-token"

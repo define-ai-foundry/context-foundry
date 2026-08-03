@@ -26,7 +26,13 @@ from context_foundry.fusion.sources.multiplex import MultiplexedSource
 from context_foundry.fusion.sources.offset import OffsetReplaySource
 from context_foundry.fusion.sources.paced import RealtimeReplaySource
 from context_foundry.fusion.sources.stream import NetworkSapientStream
-from context_foundry.fusion.tracker import SapientAsynchronousTracker
+from context_foundry.fusion.tracker import (
+    MAX_COAST_SECONDS,
+    MAX_EVENT_DETECTIONS,
+    MAX_LIVE_TRACKS,
+    MAX_TRACK_HISTORY,
+    SapientAsynchronousTracker,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("FusionEngine")
@@ -47,14 +53,69 @@ FUTURE_HORIZON_SECONDS = 10.0
 # live run will accept is pinned to the present. A gate with no tolerance
 # therefore drops the ordinary case: measured, healthy sensors landed 0.3s behind
 # a mark an out-of-step sender had pulled up to now, and every one was refused.
-# Beyond this it is a clock that disagrees rather than latency, and the rewind it
-# would cost the tracker is a fraction of one update interval either way.
+# Beyond this it is a clock that disagrees rather than latency. This is also the
+# whole bound on how far an accepted event can rewind the tracker, because the
+# tracker is fed the same clamped timestamp the mark is made of: the mark never
+# runs ahead of the present, so an event that passes this gate is at most this far
+# behind what was last fused.
 LATE_EVENT_TOLERANCE_SECONDS = 2.0
 
 # How often to log the running fusion summary. Without it an engine that is up
 # and fusing nothing logs the same lines as a healthy one and then nothing at
 # all, so there is no way to tell a quiet sensor network from a broken ingress.
 SUMMARY_REPORT_SECONDS = 60.0
+
+# Where Linux publishes per-socket receive-drop counters. Both families are read
+# because a source binds one socket and the operator does not necessarily know
+# which table it lands in.
+PROC_UDP_FILES = ("/proc/net/udp", "/proc/net/udp6")
+
+
+def _kernel_udp_drops(ports):
+    """Packets the kernel discarded per bound local port, as {port: drops}.
+
+    This is the loss the engine's own counters cannot see. Under sustained
+    overload the sockets fill and the kernel drops datagrams before anything
+    reads them, so every in-process counter stays consistent while most of the
+    feed is gone.
+
+    Only read once per summary, never per event: it re-reads the whole table.
+
+    Ports with no counter are left out and a table that cannot be read yields
+    nothing, so a host without /proc/net/udp -- anything that is not Linux --
+    degrades to a summary without this clause rather than to an error. The two
+    fields wanted are taken from the ends of each row after checking the header
+    names them there, because the columns are not one per header name:
+    tx_queue:rx_queue and tr:tm->when are each printed as one colon-joined field,
+    so counting header columns finds the wrong values.
+    """
+    wanted = set(ports)
+    drops = {}
+    if not wanted:
+        return drops
+    for path in PROC_UDP_FILES:
+        try:
+            lines = Path(path).read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        if not lines:
+            continue
+        header = lines[0].split()
+        if len(header) < 3 or header[1] != "local_address" or header[-1] != "drops":
+            continue
+        for line in lines[1:]:
+            fields = line.split()
+            if len(fields) < 3:
+                continue
+            try:
+                port = int(fields[1].rsplit(":", 1)[1], 16)
+                count = int(fields[-1])
+            except (IndexError, ValueError):
+                continue
+            if port in wanted:
+                # One port can appear more than once (several bound sockets).
+                drops[port] = drops.get(port, 0) + count
+    return drops
 
 
 def _sensor_ids(detections):
@@ -63,7 +124,7 @@ def _sensor_ids(detections):
     return ", ".join(sorted(str(node_id) for node_id in ids if node_id)) or "an unnamed sensor"
 
 
-def _start_summary_reporter(counters):
+def _start_summary_reporter(counters, live_ports=()):
     """Report the summary every SUMMARY_REPORT_SECONDS; returns the stop switch.
 
     A daemon thread rather than a check inside the fusion loop, because the loop
@@ -76,28 +137,34 @@ def _start_summary_reporter(counters):
 
     def report():
         while not stop.wait(SUMMARY_REPORT_SECONDS):
-            _log_summary(counters, "Fusion summary")
+            _log_summary(counters, "Fusion summary", live_ports)
 
     threading.Thread(target=report, name="summary-reporter", daemon=True).start()
     return stop
 
 
-def _log_summary(counters, prefix):
+def _log_summary(counters, prefix, live_ports=()):
     """Report the running totals an operator needs to place the engine's state.
 
-    All four failure modes read differently here: nothing arriving leaves every
+    All five failure modes read differently here: nothing arriving leaves every
     counter at zero, arriving-and-dropped moves only the drop count, healthy
-    fusion moves all of them, and a TAK server refusing the stream shows CoT
-    still being sent while the sink logs its own connection warnings.
+    fusion moves all of them, a TAK server refusing the stream shows CoT still
+    being sent while the sink logs its own connection warnings -- and a feed being
+    lost in the kernel before ingest moves only the socket drop counts, which
+    every in-process counter is blind to.
     """
+    drops = _kernel_udp_drops(live_ports)
+    per_port = ", ".join(f"UDP {port}: {count}" for port, count in sorted(drops.items()))
+    sockets = f" Discarded by the kernel before ingest -- {per_port}." if per_port else ""
     logger.info(
         "%s: %d event(s) fused, %d detection(s) ingested, %d CoT message(s) sent, "
-        "%d event(s) dropped out of step.",
+        "%d event(s) dropped out of step.%s",
         prefix,
         counters["events"],
         counters["detections"],
         counters["cot"],
         counters["dropped"],
+        sockets,
     )
 
 
@@ -214,6 +281,44 @@ def fusion_main():
         "single-detection events. Costs that much latency per live detection.",
     )
     parser.add_argument(
+        "--max-live-tracks",
+        type=int,
+        default=MAX_LIVE_TRACKS,
+        help=f"Live tracks held at once; unassociated detections stop starting new ones past it "
+        f"(default: {MAX_LIVE_TRACKS}). The default is where one fusion pass reaches the frame "
+        "window on one core, so raising it needs --frame-window-seconds raised with it or the "
+        "engine falls behind the feed and never recovers.",
+    )
+    parser.add_argument(
+        "--max-track-history",
+        type=int,
+        default=MAX_TRACK_HISTORY,
+        help=f"States retained per track (default: {MAX_TRACK_HISTORY}). Nothing downstream reads "
+        "more than the newest, so this is memory: lower it to afford more live tracks.",
+    )
+    parser.add_argument(
+        "--max-coast-seconds",
+        type=float,
+        default=MAX_COAST_SECONDS,
+        help=f"How long a track may coast on prediction alone, without a detection, before it is "
+        f"dropped (default: {MAX_COAST_SECONDS:g}). Size it against the revisit interval of the "
+        "sensors that see a track: it has to exceed one revisit, and two or three of them to ride "
+        "out sweeps that miss, or tracks expire between sweeps and every sweep re-initiates them. "
+        "Every second above that is a track whose uncertainty -- and so whose validation gate -- "
+        "keeps widening, until it takes detections away from tracks that still know where their "
+        "target is; such tracks are dropped on uncertainty instead, with a warning.",
+    )
+    parser.add_argument(
+        "--max-event-detections",
+        type=int,
+        default=MAX_EVENT_DETECTIONS,
+        help=f"Detections a single event is associated with; the rest are shed, with a warning "
+        f"(default: {MAX_EVENT_DETECTIONS}). With --max-live-tracks this is what bounds one "
+        "fusion pass: cost is the product of the two. The default is nearly four times the "
+        "densest instant the reference network produces, so reaching it means a sensor is "
+        "reporting more than one sweep at a time -- raise it only with the frame window.",
+    )
+    parser.add_argument(
         "--keycloak-token-url",
         help="Keycloak token endpoint (.../protocol/openid-connect/token) for client_credentials",
     )
@@ -245,6 +350,30 @@ def fusion_main():
 
     if args.realtime_factor < 0:
         parser.error("--realtime-factor must be >= 0 (0 disables pacing)")
+
+    # A window of zero or less expires every frame the moment it opens, so each
+    # datagram becomes its own single-detection event: the per-datagram
+    # degradation frames exist to remove, and with no error to show for it.
+    if args.frame_window_seconds <= 0:
+        parser.error("--frame-window-seconds must be > 0; a sweep needs a window to assemble in")
+
+    # Zero live tracks fuses nothing, and zero retained states leaves a track with
+    # no current state for the augmentor to read.
+    if args.max_live_tracks < 1:
+        parser.error("--max-live-tracks must be >= 1")
+
+    if args.max_track_history < 1:
+        parser.error("--max-track-history must be >= 1")
+
+    # A track that cannot coast at all is dropped the moment the sweep that made
+    # it ends, so every sweep re-initiates the whole picture and nothing is ever
+    # fused across sensors.
+    if args.max_coast_seconds <= 0:
+        parser.error("--max-coast-seconds must be > 0; a track has to survive between sweeps")
+
+    # Zero detections an event may carry sheds every sweep in full.
+    if args.max_event_detections < 1:
+        parser.error("--max-event-detections must be >= 1")
 
     if args.realtime_factor != 1.0 and not args.replay_file:
         logger.warning(
@@ -300,14 +429,34 @@ def fusion_main():
         logger.error("No sources enabled! Use --enable-sapient, --enable-cot, or --replay-file")
         raise SystemExit(1)
 
+    # The sockets whose kernel drop counters the summary reports. Each live source
+    # knows the port it bound; a replay source has none. Collected before the
+    # multiplexer wraps them out of reach.
+    live_ports = sorted({port for port in (getattr(s, "port", None) for s in sources) if port})
+
     if len(sources) > 1:
         # A live source blocks until its own next packet, so the loop below would
         # never reach the sources after it. Read them all concurrently instead.
         sources = [MultiplexedSource(sources)]
         logger.info("Reading all enabled sources concurrently")
 
+    if live_ports and not _kernel_udp_drops(live_ports):
+        # Said once, at startup: the summary then omits the socket counts, and an
+        # operator reading it would otherwise take their absence for zero loss.
+        logger.warning(
+            "No kernel receive-drop counter found for UDP %s; the summary cannot report packets "
+            "discarded before ingest (read from %s, so Linux only).",
+            ", ".join(str(port) for port in live_ports),
+            PROC_UDP_FILES[0],
+        )
+
     # 3. Initialize Core Components
-    tracker = SapientAsynchronousTracker()
+    tracker = SapientAsynchronousTracker(
+        max_live_tracks=args.max_live_tracks,
+        max_track_history=args.max_track_history,
+        max_coast_seconds=args.max_coast_seconds,
+        max_event_detections=args.max_event_detections,
+    )
     augmentor = TacticalContextAugmentor()
     serializers = {
         "TAK": CotSerializer(stale_seconds=args.cot_stale_seconds),
@@ -331,19 +480,30 @@ def fusion_main():
         )
         logger.info(f"Streaming CoT to TAK Server {args.tak_tls_host}:{args.tak_tls_port} over TLS")
     if args.tak_ws_host:
-        sinks.append(
-            TakWsSink(
-                args.tak_ws_host,
-                args.tak_ws_port,
-                token_url=args.keycloak_token_url,
-                client_id=args.oidc_client_id,
-                client_secret=args.oidc_client_secret,
-                static_token=args.tak_bearer_token,
-                verify_tls=args.tak_ws_verify_tls,
-                ca=args.tak_ws_ca,
-                token_timeout=args.tak_ws_token_timeout,
+        try:
+            sinks.append(
+                TakWsSink(
+                    args.tak_ws_host,
+                    args.tak_ws_port,
+                    token_url=args.keycloak_token_url,
+                    client_id=args.oidc_client_id,
+                    client_secret=args.oidc_client_secret,
+                    static_token=args.tak_bearer_token,
+                    verify_tls=args.tak_ws_verify_tls,
+                    ca=args.tak_ws_ca,
+                    token_timeout=args.tak_ws_token_timeout,
+                )
             )
-        )
+        except ValueError as e:
+            # Reported and exited like every other startup misconfiguration here;
+            # unhandled it reaches the operator as a traceback.
+            logger.error(
+                "Cannot authenticate to the WebTAK WebSocket: %s. Supply --keycloak-token-url "
+                "and --oidc-client-id (plus --oidc-client-secret for a confidential client), "
+                "or --tak-bearer-token.",
+                e,
+            )
+            raise SystemExit(1) from e
         logger.info(
             f"Streaming CoT to TAK Server {args.tak_ws_host}:{args.tak_ws_port} "
             "over the WebTAK WebSocket (group-tagged by token)"
@@ -371,7 +531,7 @@ def fusion_main():
     # gone quiet is the case an operator most needs to see, and a loop-driven
     # report says nothing at all precisely then, so silence would have to be read
     # as either "no sensor is sending" or "the process is wedged".
-    stop_summary = _start_summary_reporter(counters)
+    stop_summary = _start_summary_reporter(counters, live_ports)
     # Only a live run has a present to be measured against; see the gate below.
     future_horizon = FUTURE_HORIZON_SECONDS if not args.replay_file else None
     try:
@@ -423,26 +583,42 @@ def fusion_main():
                             )
                         continue
 
-                    # The event is fused with its own timestamp, but the watermark
-                    # it sets is clamped to the present on a live run: a sensor a
-                    # few seconds fast is inside the future horizon, and letting it
-                    # mark the future would put the gate ahead of what the healthy
-                    # sensors report, so their events -- not its -- get dropped.
+                    # On a live run the event is fused at the present rather than at
+                    # its own timestamp, and that clamped time is also the watermark
+                    # it sets. A sensor a few seconds fast is inside the future
+                    # horizon, so it is fused -- and with its raw timestamp it would
+                    # push every track's state that far ahead, while the next healthy
+                    # event, inside the lateness tolerance and so accepted, rewound
+                    # the tracker by the whole offset and re-broadcast every track
+                    # with a CoT time in the past. Clamping bounds any rewind by the
+                    # tolerance alone. Letting it mark the future would also put the
+                    # gate ahead of what the healthy sensors report, so their events
+                    # -- not its -- get dropped. A replay has no present to be
+                    # measured against and keeps its own timestamps throughout.
                     mark = timestamp if now is None else min(timestamp, now)
                     if latest_timestamp is None or mark > latest_timestamp:
                         latest_timestamp = mark
                         watermark_sensor = _sensor_ids(detections)
 
+                    if mark != timestamp:
+                        # The detections move with the event. Stone Soup predicts
+                        # each hypothesis to its detection's own timestamp, so a
+                        # track updated by one ends up stamped with it -- leave them
+                        # raw and the broadcast gate below matches nothing, which
+                        # emits no CoT at all for that sensor and says nothing.
+                        for detection in detections:
+                            detection.timestamp = mark
+
                     counters["events"] += 1
                     counters["detections"] += len(detections)
-                    active_tracks = tracker.process_async_event(timestamp, set(detections))
+                    active_tracks = tracker.process_async_event(mark, set(detections))
                     broadcast = 0
 
                     # Serialization / Output
                     for track in active_tracks:
                         # ONLY broadcast if this track was updated during this specific event
                         # timestamp; this prevents re-broadcasting tracks that haven't changed
-                        if track.state.timestamp == timestamp:
+                        if track.state.timestamp == mark:
                             tactical_track = augmentor.extract_tactical_track(track)
                             cot_payload = serializers["TAK"].serialize(tactical_track)
 
@@ -461,7 +637,7 @@ def fusion_main():
 
                     logger.info(
                         "Fused event at %s: %d detection(s) in, %d track(s) broadcast.",
-                        timestamp.isoformat(timespec="seconds"),
+                        mark.isoformat(timespec="seconds"),
                         len(detections),
                         broadcast,
                     )
@@ -488,7 +664,12 @@ def fusion_main():
                     # not carry over. Required outright under --use-scenario-timestamps:
                     # timestamps jump backwards there and Stone Soup cannot predict
                     # backwards.
-                    tracker = SapientAsynchronousTracker()
+                    tracker = SapientAsynchronousTracker(
+                        max_live_tracks=args.max_live_tracks,
+                        max_track_history=args.max_track_history,
+                        max_coast_seconds=args.max_coast_seconds,
+                        max_event_detections=args.max_event_detections,
+                    )
                     # The new iteration re-anchors the clock, so the previous
                     # one's timestamps must not gate it.
                     latest_timestamp = None
@@ -505,7 +686,7 @@ def fusion_main():
                 counters["dropped"],
             )
         stop_summary.set()
-        _log_summary(counters, "Fusion totals at shutdown")
+        _log_summary(counters, "Fusion totals at shutdown", live_ports)
         for sink in sinks:
             sink.close()
 
