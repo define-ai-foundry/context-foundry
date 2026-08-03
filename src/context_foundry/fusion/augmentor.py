@@ -58,8 +58,10 @@ class TacticalContextAugmentor:
         # Note: atan2(x, y) vs atan2(y, x) maps math angles to compass navigation angles
         heading_deg = (math.degrees(math.atan2(ve, vn))) % 360.0
 
-        # Recover context passed through the tracker from the JSON source
-        metadata = getattr(state, "metadata", {})
+        # Recover the source context the tracker carried through. Stone Soup
+        # accumulates detection metadata on the Track, not on its states, so
+        # reading the state yields nothing and every track looks unclassified.
+        metadata = getattr(track, "metadata", None) or {}
         classification = metadata.get("classification", "Unknown")
         swarm_count = metadata.get("swarm_count", 1)
 

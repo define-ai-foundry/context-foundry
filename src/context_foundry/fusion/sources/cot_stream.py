@@ -56,7 +56,13 @@ class CotNetworkStream(SapientSource):
                     timestamp=clean_det.timestamp,
                 )
 
-                detection.metadata = {"nodeId": clean_det.sensor_id, "type": "CoT"}
+                # The CoT event type is the sender's own classification; pass it
+                # through so fused tracks are labelled rather than "Unknown".
+                detection.metadata = {
+                    "nodeId": clean_det.sensor_id,
+                    "type": "CoT",
+                    "classification": clean_det.classification or "Unknown",
+                }
 
                 yield clean_det.timestamp, [detection]
 

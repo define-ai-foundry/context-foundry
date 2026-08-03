@@ -222,20 +222,25 @@ def test_no_sink_configured_errors_with_guidance(monkeypatch, caplog, tmp_path):
     )
 
 
-def test_enable_sapient_and_cot_sources_are_constructed_with_expected_ports(monkeypatch):
+def test_enable_sapient_and_cot_reads_both_sources_concurrently(monkeypatch, caplog):
+    """Both live sources must be drained. Consuming them in sequence starved the
+    CoT socket behind the SAPIENT source's blocking read, so it was never served.
+    """
     created = {}
+    sapient = _EventsOnceSource([(T0, [_Detection()])])
+    cot = _EventsOnceSource([(T0, [_Detection()])])
 
     def fake_sapient_stream(port):
         created["sapient_port"] = port
-        return _EventsThenStopSource([(T0, [_Detection()])])
+        return sapient
 
     def fake_cot_stream(port):
         created["cot_port"] = port
-        return _EventsOnceSource([])
+        return cot
 
     monkeypatch.setattr(cli, "NetworkSapientStream", fake_sapient_stream)
     monkeypatch.setattr(cli, "CotNetworkStream", fake_cot_stream)
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[], []]))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
 
     monkeypatch.setattr(
@@ -243,10 +248,14 @@ def test_enable_sapient_and_cot_sources_are_constructed_with_expected_ports(monk
         ["fusion", "--config", "sensors.json", "--enable-sapient", "--enable-cot", "--log-to-file"],
     )
 
-    with pytest.raises(_Stop):
+    # Both fakes run dry, so the loop exits instead of re-polling dead sources.
+    with caplog.at_level("ERROR"):
         cli.fusion_main()
 
     assert created == {"sapient_port": 5000, "cot_port": 6969}
+    assert sapient.calls >= 1
+    assert cot.calls >= 1
+    assert any("Every live source ended" in r.message for r in caplog.records)
 
 
 def test_tak_tls_host_constructs_sink_streams_payload_and_closes(monkeypatch, caplog, tmp_path):
@@ -889,3 +898,48 @@ def test_cot_stale_seconds_defaults_to_the_serializer_default(monkeypatch, tmp_p
     cli.fusion_main()
 
     assert built == [cli.DEFAULT_STALE_SECONDS]
+
+
+def test_sigterm_handler_is_installed_and_stops_the_run(monkeypatch):
+    """A live producer only ever ends by signal, and as PID 1 it gets no default
+    SIGTERM action -- without an explicit handler it runs until SIGKILL.
+    """
+    handler = None
+
+    def capture(signum, hnd):
+        nonlocal handler
+        assert signum == cli.signal.SIGTERM
+        handler = hnd
+
+    monkeypatch.setattr(cli.signal, "signal", capture)
+
+    class _SignalOnFirstEvent:
+        """Fires the installed SIGTERM handler mid-run, as the runtime would."""
+
+        def iter_events(self):
+            handler(cli.signal.SIGTERM, None)
+            yield  # pragma: no cover  -- the handler raises first
+
+    monkeypatch.setattr(cli, "NetworkSapientStream", lambda port: _SignalOnFirstEvent())
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+
+    closed = []
+
+    class _RecordingSink:
+        def send(self, payload):  # pragma: no cover  -- no event is ever emitted
+            pass
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(cli, "FileCotSink", lambda path: _RecordingSink())
+    monkeypatch.setattr(
+        "sys.argv", ["fusion", "--config", "sensors.json", "--enable-sapient", "--log-to-file"]
+    )
+
+    with pytest.raises(SystemExit):
+        cli.fusion_main()
+
+    # Sinks are flushed and closed on the way out, which a SIGKILL would skip.
+    assert closed == [True]

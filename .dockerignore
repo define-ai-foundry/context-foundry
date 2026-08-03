@@ -34,6 +34,8 @@ fused_tracks_debug.xml
 .idea
 docs
 protos
+# ...except the CoT XSDs, which CotValidator loads at run time for --enable-cot.
+!protos/cot
 winter_swarm_header.jpg
 
 # The container/dev artifacts themselves

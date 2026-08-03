@@ -8,7 +8,7 @@ COMPOSE := $(ENGINE) compose
 .DEFAULT_GOAL := help
 
 .PHONY: help build demo test lint shell certs tls-demo down \
-	tak-up tak-users tak-demo tak-down tak-clean
+	tak-up tak-users tak-demo tak-tail live-demo live-down tak-down tak-clean
 
 # Local per-group isolation demo: one TAK File user per group, each in exactly
 # one group. A user's /oauth/token bearer both drives its producer (TakWsSink)
@@ -89,6 +89,34 @@ tak-demo: ## Replay into group $(TAK_DEMO_GROUP) at $(TAK_DEMO_FACTOR)x real tim
 	[ -n "$$tok" ] || { echo "no token for user '$(TAK_DEMO_GROUP)' — run 'make tak-users' first" >&2; exit 1; }; \
 	CF_BEARER=$$tok CF_REALTIME_FACTOR=$(TAK_DEMO_FACTOR) $(COMPOSE) --profile tak run --rm fusion-tak
 	@echo "Streamed into group '$(TAK_DEMO_GROUP)'. In WebTAK, only user '$(TAK_DEMO_GROUP)' sees these tracks."
+
+# --- live ingestion (tak profile): UDP sensor traffic -> fusion -> WebTAK WebSocket ---
+
+# Which live protocol the feeder speaks, and how fast it replays the scenario.
+LIVE_PROTOCOL ?= sapient
+LIVE_FACTOR ?= 10
+
+live-demo: ## Feed live UDP sensor traffic into the engine and on to TAK (override: make live-demo LIVE_PROTOCOL=cot LIVE_FACTOR=1)
+	@id=$$($(TAK_CID)); \
+	[ -n "$$id" ] || { echo "tak-server not running; run 'make tak-up' first" >&2; exit 1; }; \
+	tok=$$(curl -sk -X POST https://localhost:8446/oauth/token \
+		-d grant_type=password -d username=$(TAK_DEMO_GROUP) -d password='$(TAK_DEMO_PASS)' \
+		| python3 -c 'import sys,json;print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null); \
+	[ -n "$$tok" ] || { echo "no token for user '$(TAK_DEMO_GROUP)' — run 'make tak-users' first" >&2; exit 1; }; \
+	CF_BEARER=$$tok $(COMPOSE) --profile tak up -d fusion-live; \
+	echo "Engine listening on UDP 5000 (SAPIENT) + 6969 (CoT); feeding $(LIVE_PROTOCOL) at $(LIVE_FACTOR)x..."; \
+	CF_FEED_PROTOCOL=$(LIVE_PROTOCOL) CF_FEED_FACTOR=$(LIVE_FACTOR) \
+		$(COMPOSE) --profile tak run --rm sensor-feeder; \
+	echo "=== engine ==="; $(COMPOSE) --profile tak logs --tail 15 fusion-live
+	@echo "Fused live tracks went to group '$(TAK_DEMO_GROUP)'. 'make live-down' stops the engine."
+
+live-down: ## Stop the live-ingestion engine (leaves the TAK stack up)
+	$(COMPOSE) --profile tak stop fusion-live
+
+tak-tail: ## Print the CoT a WebTAK user actually receives (override: make tak-tail TAK_DEMO_GROUP=bravo)
+	$(COMPOSE) --profile tak run --rm --no-deps sensor-feeder \
+		python dev/webtak_ws_tail.py --host tak-server --user $(TAK_DEMO_GROUP) \
+		--password '$(TAK_DEMO_PASS)' --seconds 30
 
 tak-down: ## Stop the TAK stack (keeps the tak-data volume, so the CA + users persist)
 	$(COMPOSE) --profile tak down --remove-orphans

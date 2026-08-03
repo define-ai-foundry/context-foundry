@@ -126,6 +126,33 @@ make tak-down    # stop (keeps volumes);  make tak-clean wipes them
 
 `make tak-demo` fetches a TAK `/oauth/token` bearer for that group's File user and runs `TakWsSink` against `wss://…:8446/takproto/1`, so the CoT is tagged with the user's single TAK group. It streams at scenario cadence (~38 min for the example scenario) and holds the terminal until drained — raise `TAK_DEMO_FACTOR` to compress it. Log into `https://localhost:8446` as `alpha` / `Fusion-Demo-2026!` — with the map open **before** you run `make tak-demo` (TAK does not backfill history to a viewer that connects after the stream) — and you will see the tracks; log in as `bravo` and you will not. This mirrors the production model (one producer per group), using TAK File-user tokens locally in place of Keycloak; the Keycloak-token equivalent has been verified against a real TAK + Keycloak cluster. A raw TCP+TLS sink is also available (`make tls-demo`).
 
+### Validate live ingestion (UDP sensor traffic, no file)
+
+The demos above replay a file. `make live-demo` exercises the other mode: the engine reads sensor traffic **off the network** (`--enable-sapient` on UDP 5000, `--enable-cot` on UDP 6969) and streams the fused result into the same per-group WebTAK sink. `dev/udp_feeder.py` stands in for the ASMs — it replays `data/examples/sapient_messages.json` onto those sockets, re-stamped so the scenario starts now, as either binary SAPIENT protobuf or CoT XML.
+
+```bash
+make tak-up && make tak-users            # once, as above
+make live-demo                           # SAPIENT protobuf over UDP, 10x scenario cadence
+make live-demo LIVE_PROTOCOL=cot         # ...CoT XML instead
+make live-demo LIVE_FACTOR=1             # ...at real time (~38 min)
+make tak-tail                            # print the CoT group 'alpha' actually receives
+make tak-tail TAK_DEMO_GROUP=bravo       # ...and confirm 'bravo' receives none
+make live-down                           # stop the engine (leaves TAK up)
+```
+
+`make live-demo` starts the engine detached and runs the feeder in the foreground, so the run lasts as long as the feed. Both live sources are read concurrently, so `--enable-sapient --enable-cot` together work: each source gets its own reader thread, and events are fused in arrival order.
+
+`make tak-tail` is the scriptable stand-in for a WebTAK browser session: it subscribes to `wss://…:8446/takproto/1` as a group's File user and prints the CoT that user is allowed to see, exiting non-zero if nothing arrives. Run it (or open WebTAK) **before** the feed starts — TAK does not backfill to a late subscriber.
+
+Run the feeder against a non-containerised engine the same way:
+
+```bash
+context-foundry-fusion --enable-sapient --config config/sensors/joensuu.json --log-to-file &
+python dev/udp_feeder.py --protocol sapient --realtime-factor 10
+```
+
+A live run only ends when it is signalled; SIGTERM (`docker stop`, a pod deletion) closes the sinks and exits.
+
 ## CLI Reference
 
 The installation exposes the `context-foundry-fusion` command globally. `--config` is always required, and at least one source (`--replay-file`, `--enable-sapient`, or `--enable-cot`) must be provided. At least one output sink is also required — `--log-to-file`, `--tak-ws-host`, `--tak-tls-host`, or any combination.
@@ -232,6 +259,9 @@ context-foundry/
 │  │  │  │  ├─ base.py
 │  │  │  │  ├─ cot_stream.py
 │  │  │  │  ├─ json_file.py
+│  │  │  │  ├─ multiplex.py
+│  │  │  │  ├─ offset.py
+│  │  │  │  ├─ paced.py
 │  │  │  │  └─ stream.py
 │  │  │  ├─ validators/
 │  │  │  │  ├─ base.py
@@ -275,7 +305,7 @@ context-foundry/
 ├─ .dockerignore
 ├─ compose.yaml
 ├─ Makefile
-├─ dev/                    # local TLS listener + real-TAK stack helpers (certs gitignored)
+├─ dev/                    # UDP sensor feeder, WebTAK tail, TLS listener, real-TAK helpers (certs gitignored)
 ├─ compile_protos.sh
 ├─ winter_swarm_header.jpg
 ├─ LICENSE

@@ -1,15 +1,5 @@
 """Tests for context_foundry.fusion.sources.stream (NetworkSapientStream).
 
-KNOWN SOURCE BUG (see final report): the module builds detections with
-`np.array([[e], [n], u])` -- note `u` is not wrapped in its own list, which makes
-the list inhomogeneous and np.array() raises ValueError on every single call,
-regardless of input. This means the "successful yield" path (building a
-Detection, attaching metadata, yielding it) is unreachable dead code in the
-current source; every valid SAPIENT packet actually falls through to the
-generic `except Exception` handler and is silently dropped. We test the code
-AS WRITTEN (asserting the bug fires) and additionally patch numpy.array for one
-test to exercise the otherwise-dead metadata/yield lines for coverage.
-
 We never bind a real socket: socket.socket is replaced with a MagicMock whose
 recvfrom() is scripted via side_effect, terminated by a sentinel BaseException
 that `except Exception`/`except DecodeError` cannot swallow.
@@ -17,7 +7,6 @@ that `except Exception`/`except DecodeError` cannot swallow.
 
 from unittest.mock import MagicMock
 
-import numpy as np
 import pytest
 from google.protobuf.json_format import ParseDict
 
@@ -90,55 +79,26 @@ def test_iter_events_validator_rejects_message(monkeypatch):
         next(gen)
 
 
-def test_iter_events_valid_message_hits_known_array_bug(monkeypatch, caplog):
-    """Documents the bug: a perfectly valid, validator-accepted message still
-    never produces a Detection because of the np.array([[e],[n],u]) typo.
-    """
-    payload = _serialize(_valid_detection_report_payload())
-    stream = _make_stream(monkeypatch, [(payload, ("10.0.0.1", 1)), _Stop()])
-    gen = stream.iter_events()
-
-    with caplog.at_level("ERROR"), pytest.raises(_Stop):
-        next(gen)
-
-    assert any("Unexpected error in live stream ingestion" in r.message for r in caplog.records)
-
-
-def test_iter_events_yields_detection_once_array_bug_is_worked_around(monkeypatch):
-    """Same valid message as above, but with numpy.array patched to tolerate the
-    malformed [[e],[n],u] nesting -- exercises the metadata/yield lines (87-102)
-    that are otherwise permanently dead code given the real bug.
-    """
+def test_iter_events_yields_detection_for_valid_packet(monkeypatch):
     config.load_sensor_network(
         sensor_network_list=[{"id": "FI-MIL-RAD-KOLI-01", "lat": 62.9, "lon": 29.8, "alt": 100.0}]
     )
     payload = _serialize(_valid_detection_report_payload(swarm=5))
     stream = _make_stream(monkeypatch, [(payload, ("10.0.0.1", 1)), _Stop()])
 
-    real_array = np.array
-
-    def tolerant_array(seq, *a, **kw):
-        try:
-            return real_array(seq, *a, **kw)
-        except ValueError:
-            fixed = [x if isinstance(x, list) else [x] for x in seq]
-            return real_array(fixed, *a, **kw)
-
-    monkeypatch.setattr("context_foundry.fusion.sources.stream.np.array", tolerant_array)
-
     gen = stream.iter_events()
-    _timestamp, detections = next(gen)
+    timestamp, detections = next(gen)
 
+    assert timestamp.year == 2026
     assert len(detections) == 1
     det = detections[0]
+    # A 3x1 column vector: an inhomogeneous state vector raised on every packet,
+    # so no live SAPIENT detection ever reached the tracker.
+    assert det.state_vector.shape == (3, 1)
     assert det.metadata["nodeId"] == "FI-MIL-RAD-KOLI-01"
-    # objectId/swarm_count read from raw_metadata["original_report"], but
-    # SapientValidator.normalize() actually stores it under "original_envelope"
-    # (separate key-mismatch bug, see final report) -- so both fall back to
-    # their defaults (None / 1) regardless of the input payload.
-    assert det.metadata["objectId"] is None
+    assert det.metadata["objectId"] == "obj-1"
     assert det.metadata["classification"] == "UAS"
-    assert det.metadata["swarm_count"] == 1
+    assert det.metadata["swarm_count"] == 5
     assert det.metadata["sensor_geodetic"] == {
         "latitude": 62.9,
         "longitude": 29.8,
@@ -149,20 +109,27 @@ def test_iter_events_yields_detection_once_array_bug_is_worked_around(monkeypatc
         next(gen)
 
 
+def test_iter_events_reads_a_full_size_datagram(monkeypatch):
+    """A report larger than 4096 bytes must not be truncated into a DecodeError."""
+    payload_dict = _valid_detection_report_payload()
+    # Pad with valid repeated objectInfo entries until the wire form is oversized.
+    payload_dict["detectionReport"]["objectInfo"] += [
+        {"type": f"filler-{i}", "value": "x" * 100} for i in range(50)
+    ]
+    payload = _serialize(payload_dict)
+    assert len(payload) > 4096
+
+    stream = _make_stream(monkeypatch, [(payload, ("10.0.0.1", 1)), _Stop()])
+    _timestamp, detections = next(stream.iter_events())
+    assert len(detections) == 1
+
+
 def test_iter_events_sensor_geodetic_none_when_sensor_unregistered(monkeypatch):
+    config.load_sensor_network(
+        sensor_network_list=[{"id": "some-other-node", "lat": 62.9, "lon": 29.8, "alt": 100.0}]
+    )
     payload = _serialize(_valid_detection_report_payload())
     stream = _make_stream(monkeypatch, [(payload, ("10.0.0.1", 1)), _Stop()])
-
-    real_array = np.array
-
-    def tolerant_array(seq, *a, **kw):
-        try:
-            return real_array(seq, *a, **kw)
-        except ValueError:
-            fixed = [x if isinstance(x, list) else [x] for x in seq]
-            return real_array(fixed, *a, **kw)
-
-    monkeypatch.setattr("context_foundry.fusion.sources.stream.np.array", tolerant_array)
 
     gen = stream.iter_events()
     _, detections = next(gen)

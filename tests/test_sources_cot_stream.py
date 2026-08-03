@@ -49,7 +49,11 @@ def test_iter_events_yields_detection_for_valid_packet(monkeypatch):
     timestamp, detections = next(gen)
     assert len(detections) == 1
     det = detections[0]
-    assert det.metadata == {"nodeId": "COT-SENSOR-1", "type": "CoT"}
+    assert det.metadata == {
+        "nodeId": "COT-SENSOR-1",
+        "type": "CoT",
+        "classification": "a-f-A-M-F",
+    }
     assert timestamp.year == 2026
 
     with pytest.raises(_Stop):
