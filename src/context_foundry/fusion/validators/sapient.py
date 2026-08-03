@@ -89,5 +89,10 @@ class SapientValidator(ProtocolValidator):
             confidence=report.detection_confidence
             if report.HasField("detection_confidence")
             else None,
-            raw_metadata={"original_envelope": raw_payload},
+            # Sources read the detection report out of "original_report" for the
+            # fields the universal schema does not carry (objectId, swarm count).
+            raw_metadata={
+                "original_envelope": raw_payload,
+                "original_report": raw_payload["sapientMessage"].get("detectionReport", {}),
+            },
         )

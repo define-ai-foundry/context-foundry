@@ -45,15 +45,18 @@ class NetworkSapientStream(SapientSource):
     def iter_events(self):
         while True:
             try:
-                # 1. Block and wait for a network packet
-                payload_bytes, _ = self.sock.recvfrom(4096)
+                # 1. Block and wait for a network packet. Sized to the maximum UDP
+                # payload: a truncated read is a DecodeError, i.e. a silently lost
+                # detection whenever an ASM sends a large report.
+                payload_bytes, _ = self.sock.recvfrom(65535)
 
                 # 2. Parse binary bytes into the full Protobuf Envelope
                 msg = SapientMessage()
                 msg.ParseFromString(payload_bytes)
 
-                # 3. Convert to Dictionary to pass to our unified Gatekeeper
-                # preserving_proto_field_name ensures keys like 'node_id' map correctly
+                # 3. Convert to Dictionary to pass to our unified Gatekeeper.
+                # camelCase keys ('nodeId'), matching the JSON scenario spec the
+                # validator parses.
                 msg_dict = MessageToDict(msg, preserving_proto_field_name=False)
 
                 # Re-wrap in the root key to match JSON spec
@@ -69,8 +72,9 @@ class NetworkSapientStream(SapientSource):
                 alt = clean_det.altitude if clean_det.altitude is not None else 0.0
                 e, n, u = config.wgs84_to_enu(clean_det.latitude, clean_det.longitude, alt)
 
-                # Same swarm extraction logic using raw_metadata
+                # Same swarm extraction logic as the replay source
                 original_report = clean_det.raw_metadata.get("original_report", {})
+
                 swarm_count = 1
                 for info in original_report.get("objectInfo", []):
                     if info.get("type") == "estimatedSwarmCount":
@@ -79,7 +83,7 @@ class NetworkSapientStream(SapientSource):
                 sensor_meta = config.get_sensor(clean_det.sensor_id)
 
                 detection = Detection(
-                    state_vector=np.array([[e], [n], u]),
+                    state_vector=np.array([[e], [n], [u]]),
                     measurement_model=self.cartesian_meas_model,
                     timestamp=clean_det.timestamp,
                 )

@@ -18,10 +18,9 @@ def augmentor():
 
 
 def _make_track(vec, timestamp, metadata=None, track_id="track-1"):
+    # Stone Soup accumulates detection metadata on the Track, not on its states.
     state = SimpleNamespace(state_vector=vec, timestamp=timestamp)
-    if metadata is not None:
-        state.metadata = metadata
-    return SimpleNamespace(id=track_id, state=state)
+    return SimpleNamespace(id=track_id, state=state, metadata=metadata)
 
 
 # --- ecef_to_wgs84 -------------------------------------------------------------
@@ -103,6 +102,27 @@ def test_extract_tactical_track_missing_metadata_defaults(augmentor):
     assert result.classification == "Unknown"
     assert result.swarm_count == 1
     assert result.threat_level == "suspect"
+
+
+def test_extract_tactical_track_reads_metadata_off_a_real_stonesoup_track(augmentor):
+    """Guards the contract the augmentor depends on: Stone Soup exposes detection
+    metadata on Track, and its states carry none. Reading the state instead left
+    every track classified 'Unknown' with swarm_count 1, whatever the sensor said.
+    """
+    from stonesoup.types.state import GaussianState
+    from stonesoup.types.track import Track
+
+    config.set_reference_origin(62.9, 29.8, 0.0)
+    ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    prior = GaussianState(state_vector=np.zeros((9, 1)), covar=np.eye(9), timestamp=ts)
+    track = Track([prior], init_metadata={"classification": "UAV_DECOY", "swarm_count": 12})
+
+    assert not hasattr(track.state, "metadata")
+
+    result = augmentor.extract_tactical_track(track)
+    assert result.classification == "UAV_DECOY"
+    assert result.swarm_count == 12
+    assert result.threat_level == "hostile"
 
 
 def test_extract_tactical_track_heading_wraps_to_0_360(augmentor):

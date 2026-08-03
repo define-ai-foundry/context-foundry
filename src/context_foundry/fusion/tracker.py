@@ -129,7 +129,10 @@ class SapientAsynchronousTracker:
         )
 
         prior = GaussianState(state_vector=state_vector, covar=covar, timestamp=detection.timestamp)
-        self.tracks.add(Track([prior]))
+        # Seed the track's metadata from the hit that spawned it: Stone Soup only
+        # accumulates metadata from Updates, so without this the track is
+        # unclassified until its second detection.
+        self.tracks.add(Track([prior], init_metadata=dict(detection.metadata)))
 
     def _prune_stale_tracks(self, current_time, max_coastal_seconds):
         """Purges tracks that haven't received physical sensor updates within the timeout window."""

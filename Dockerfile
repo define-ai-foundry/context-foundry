@@ -30,6 +30,9 @@ WORKDIR /app
 COPY --from=builder /opt/venv /opt/venv
 COPY --chown=fusion:fusion config ./config
 COPY --chown=fusion:fusion data ./data
+# CotValidator loads the MITRE base-event XSD by relative path on construction,
+# so --enable-cot cannot start without it.
+COPY --chown=fusion:fusion protos/cot ./protos/cot
 
 USER fusion
 

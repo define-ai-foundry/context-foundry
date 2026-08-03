@@ -175,6 +175,50 @@ services:
       - --realtime-factor
       - ${CF_REALTIME_FACTOR:-1}
 
+  # Live-ingestion demo: the engine reads sensor traffic off the network instead
+  # of a file, and streams the fused result into the same per-group WebTAK sink.
+  # Long-running, so `make live-demo` starts it detached and the feeder decides
+  # how long the run lasts.
+  fusion-live:
+    profiles: ["tak"]
+    build:
+      context: .
+      target: runtime
+    image: context-foundry:dev
+    command:
+      - --enable-sapient
+      - --enable-cot
+      - --config
+      - config/sensors/joensuu.json
+      - --tak-ws-host
+      - tak-server
+      - --tak-bearer-token
+      - ${CF_BEARER:-}
+      # Live sensors report every few seconds; a marker must outlive the gap to
+      # its own next update or it expires off the map between them.
+      - --cot-stale-seconds
+      - "120"
+
+  # Stands in for the ASMs: replays the example scenario onto fusion-live's UDP
+  # sockets as SAPIENT protobuf or CoT XML, re-stamped to the present.
+  sensor-feeder:
+    profiles: ["tak"]
+    build:
+      context: .
+      target: dev
+    image: context-foundry:dev-test
+    volumes:
+      - .:/app
+    command:
+      - python
+      - dev/udp_feeder.py
+      - --protocol
+      - ${CF_FEED_PROTOCOL:-sapient}
+      - --host
+      - fusion-live
+      - --realtime-factor
+      - ${CF_FEED_FACTOR:-1}
+
 volumes:
   tak-db-data:
   tak-data:

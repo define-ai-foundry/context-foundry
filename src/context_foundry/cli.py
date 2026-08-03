@@ -3,6 +3,7 @@
 
 import argparse
 import logging
+import signal
 import time
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from context_foundry.fusion.sinks.tak_tls import TakTlsSink
 from context_foundry.fusion.sinks.tak_ws import TakWsSink
 from context_foundry.fusion.sources.cot_stream import CotNetworkStream
 from context_foundry.fusion.sources.json_file import JsonSapientSource
+from context_foundry.fusion.sources.multiplex import MultiplexedSource
 from context_foundry.fusion.sources.offset import OffsetReplaySource
 from context_foundry.fusion.sources.paced import RealtimeReplaySource
 from context_foundry.fusion.sources.stream import NetworkSapientStream
@@ -25,6 +27,22 @@ from context_foundry.fusion.tracker import SapientAsynchronousTracker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("FusionEngine")
+
+
+def _install_shutdown_handler():
+    """Make SIGTERM end the run instead of being ignored.
+
+    A live source never terminates on its own, so the only way the engine ever
+    stops is a signal -- and as PID 1 in a container it gets no default action
+    for SIGTERM, so an unhandled one leaves it running until the runtime loses
+    patience and SIGKILLs it, skipping every sink's close().
+    """
+
+    def shutdown(signum, _frame):
+        logger.info("Received %s; shutting down.", signal.Signals(signum).name)
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, shutdown)
 
 
 def fusion_main():
@@ -167,6 +185,12 @@ def fusion_main():
         logger.error("No sources enabled! Use --enable-sapient, --enable-cot, or --replay-file")
         return
 
+    if len(sources) > 1:
+        # A live source blocks until its own next packet, so the loop below would
+        # never reach the sources after it. Read them all concurrently instead.
+        sources = [MultiplexedSource(sources)]
+        logger.info("Reading all enabled sources concurrently")
+
     # 3. Initialize Core Components
     tracker = SapientAsynchronousTracker()
     augmentor = TacticalContextAugmentor()
@@ -216,6 +240,7 @@ def fusion_main():
         )
         return
 
+    _install_shutdown_handler()
     logger.info("Fusion loop started. Listening for targets...")
 
     # 4. The Main Loop
@@ -242,13 +267,17 @@ def fusion_main():
                                 f"Broadcast Update for Track {tactical_track.track_id[-4:]} | Threat: {tactical_track.threat_level.upper()}"
                             )
 
+            if processed_any_events:
+                continue
+
+            # Every source ran dry on this pass. A live source only does that if
+            # its read loop gave up, and re-polling it would spin at full tilt.
+            if args.enable_sapient or args.enable_cot:
+                logger.error("Every live source ended; nothing left to read. Exiting.")
+                break
+
             # Exit logic for replay files
-            if (
-                args.replay_file
-                and not args.enable_sapient
-                and not args.enable_cot
-                and not processed_any_events
-            ):
+            if args.replay_file:
                 if args.loop:
                     logger.info(f"Replay drained. Looping again in {loop_delay}s.")
                     for source in sources:

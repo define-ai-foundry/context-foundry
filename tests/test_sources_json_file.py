@@ -137,13 +137,7 @@ def test_iter_events_all_invalid_yields_nothing(tmp_path):
     assert list(source.iter_events()) == []
 
 
-def test_iter_events_swarm_count_extraction_is_broken_by_key_mismatch(tmp_path):
-    """KNOWN BUG (see final report): SapientValidator.normalize() stores the raw
-    envelope under raw_metadata["original_envelope"], but json_file.py reads
-    raw_metadata.get("original_report", {}) -- a key name mismatch. This means
-    `original_report` is always {}, so estimatedSwarmCount is never actually
-    read back out and swarm_count is always 1, regardless of the input value.
-    """
+def test_iter_events_reads_swarm_count_from_the_report(tmp_path):
     ts = "2026-01-01T00:00:00.000000Z"
     messages = [_msg("node-A", ts, "obj-1", swarm=7)]
     path = tmp_path / "scenario.json"
@@ -151,7 +145,7 @@ def test_iter_events_swarm_count_extraction_is_broken_by_key_mismatch(tmp_path):
 
     source = JsonSapientSource(path)
     ((_, dets),) = list(source.iter_events())
-    assert dets[0].metadata["swarm_count"] == 1  # NOT 7, due to the key mismatch bug
+    assert dets[0].metadata["swarm_count"] == 7
 
 
 def test_iter_events_default_swarm_count_is_one(tmp_path):
@@ -182,9 +176,7 @@ def test_iter_events_sensor_geodetic_present_when_registered(tmp_path):
         "altitude": 3.0,
     }
     assert dets[0].metadata["nodeId"] == "node-A"
-    # objectId is always None due to the original_report/original_envelope key
-    # mismatch bug documented in test_iter_events_swarm_count_extraction_is_broken_by_key_mismatch.
-    assert dets[0].metadata["objectId"] is None
+    assert dets[0].metadata["objectId"] == "obj-1"
     assert dets[0].metadata["classification"] == "UAS"
 
 
