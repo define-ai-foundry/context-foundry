@@ -32,6 +32,7 @@ class CotNetworkStream(SapientSource):
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind((self.ip, self.port))
+        logger.info(f"Live CoT Stream listening on UDP {self.ip}:{self.port}")
 
     def iter_events(self):
         while True:

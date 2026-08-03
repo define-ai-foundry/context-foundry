@@ -4,6 +4,7 @@
 import logging
 import queue
 import threading
+import time
 
 from .base import SapientSource
 
@@ -18,9 +19,25 @@ DEFAULT_QUEUE_SIZE = 1000
 # consumer has gone away. Bounds how long a thread outlives its consumer.
 PUT_TIMEOUT_SECONDS = 0.5
 
+# How often a reader reports that it is waiting on the fusion loop. A saturated
+# queue makes every event wait, so this is a rate limit: without it the log is
+# one line per packet. "Recovered" is not a usable trigger either -- under
+# sustained overload each event does get through eventually, so the stall looks
+# like thousands of momentary ones rather than the one it is.
+STALL_REPORT_SECONDS = 30.0
+
 
 class _EndOfSource:
     """Sentinel queued by a reader thread when its source is done."""
+
+
+class _ReaderState:
+    """Per-reader stall bookkeeping, so one stall is one log line."""
+
+    def __init__(self, name):
+        self.name = name
+        self.held_up = 0
+        self.next_report = 0.0
 
 
 class MultiplexedSource(SapientSource):
@@ -52,35 +69,38 @@ class MultiplexedSource(SapientSource):
         for source in self.sources:
             source.reset()
 
-    def _put(self, events, item, stop, source):
+    def _put(self, events, item, stop, state):
         """Hand one item to the consumer, giving up if it has gone away."""
-        reported = False
+        waited = False
         while not stop.is_set():
             try:
                 events.put(item, timeout=PUT_TIMEOUT_SECONDS)
                 return
             except queue.Full:
-                if not reported:
-                    # Reported once per stall, not once per event: at packet
-                    # rate the latter is a log firehose.
-                    reported = True
+                if not waited:
+                    waited = True  # count events held up, not waits
+                    state.held_up += 1
+                if time.monotonic() >= state.next_report:
+                    state.next_report = time.monotonic() + STALL_REPORT_SECONDS
                     logger.warning(
-                        "Event queue full (%d); %s is waiting on the fusion loop, which is "
-                        "not keeping up with the incoming rate.",
+                        "Event queue full (%d); %s is waiting on the fusion loop, which is not "
+                        "keeping up with the incoming rate. %d event(s) held up so far.",
                         self.queue_size,
-                        type(source).__name__,
+                        state.name,
+                        state.held_up,
                     )
 
     def _drain(self, source, events, stop):
+        state = _ReaderState(type(source).__name__)
         try:
             for event in source.iter_events():
                 if stop.is_set():
                     return
-                self._put(events, event, stop, source)
+                self._put(events, event, stop, state)
         except Exception:
-            logger.exception("Source %s stopped with an error", type(source).__name__)
+            logger.exception("Source %s stopped with an error", state.name)
         finally:
-            self._put(events, _EndOfSource, stop, source)
+            self._put(events, _EndOfSource, stop, state)
 
     def iter_events(self):
         events = queue.Queue(maxsize=self.queue_size)

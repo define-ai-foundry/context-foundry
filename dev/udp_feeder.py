@@ -4,9 +4,9 @@
 
 # Emits a recorded scenario as live UDP traffic, so the engine's live ingress
 # paths (--enable-sapient / --enable-cot) can be exercised without real sensors.
-# Stands in for an ASM: each scenario detection is re-stamped to the present and
-# sent at the scenario's own cadence, as a SAPIENT protobuf datagram (:5000) or a
-# CoT XML datagram (:6969). Dev tooling only.
+# Stands in for an ASM: each scenario detection is sent at the scenario's own
+# cadence and stamped with the present, as a SAPIENT protobuf datagram (:5000)
+# or a CoT XML datagram (:6969). Dev tooling only.
 
 import argparse
 import json
@@ -93,12 +93,15 @@ def main():
         "--realtime-factor",
         type=float,
         default=1.0,
-        help="Emission speed relative to the scenario's own clock (0 = as fast as possible)",
+        help="Emission speed relative to the scenario's own clock (0 = as fast as possible). "
+        "Events are stamped when sent, so this compresses the timeline the engine sees: "
+        "targets appear to move this many times faster",
     )
     parser.add_argument(
         "--use-scenario-timestamps",
         action="store_true",
-        help="Send the file's own timestamps instead of re-stamping the scenario to start now",
+        help="Send the file's own timestamps instead of the present. The engine drops events "
+        "stamped far from now, so this exercises that gate rather than the happy path",
     )
     parser.add_argument(
         "--cot-stale-seconds", type=float, default=30.0, help="stale window on emitted CoT"
@@ -114,21 +117,19 @@ def main():
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     span = (events[-1][0] - events[0][0]).total_seconds()
+    pace = f"{args.realtime_factor:g}x" if args.realtime_factor > 0 else "unpaced"
     print(
         f"Feeding {len(events)} {args.protocol} detections ({span:.0f}s of scenario time) "
-        f"to udp://{args.host}:{port} at {args.realtime_factor or float('inf')}x",
+        f"to udp://{args.host}:{port}, {pace}",
         flush=True,
     )
 
     while True:
         scenario_start = events[0][0]
-        offset = (
-            timedelta(0)
-            if args.use_scenario_timestamps
-            else datetime.now(timezone.utc) - scenario_start
-        )
         wall_start = time.monotonic()
         sent = 0
+        sweep_key = None
+        sweep_stamp = None
 
         for scenario_time, envelope in events:
             if args.realtime_factor > 0:
@@ -137,7 +138,24 @@ def main():
                 if behind < 0:
                     time.sleep(-behind)
 
-            timestamp = scenario_time + offset
+            # A sensor reports the present, so stamp at the moment of sending.
+            # This is where a live feed differs from the engine's own replay,
+            # which keeps the scenario's spacing while compressing emission: a
+            # compressed feed here compresses the timestamps too, so targets
+            # appear to move --realtime-factor times faster than the scenario
+            # says. Stamping the scenario's own spacing instead would put events
+            # minutes into the future, which no sensor does and the engine
+            # rightly refuses. A sweep (same scenario timestamp and nodeId) is
+            # one sensor report of several objects, so it gets one send-time
+            # stamp, not one per detection.
+            if args.use_scenario_timestamps:
+                timestamp = scenario_time
+            else:
+                key = (scenario_time, envelope.get("nodeId"))
+                if key != sweep_key:
+                    sweep_key = key
+                    sweep_stamp = datetime.now(timezone.utc)
+                timestamp = sweep_stamp
             if args.protocol == "sapient":
                 datagram = as_sapient_datagram(envelope, timestamp)
             else:

@@ -4,7 +4,9 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from .timeutil import as_utc
 
 
 class InternalDetection(BaseModel):
@@ -39,6 +41,14 @@ class InternalDetection(BaseModel):
         default_factory=dict,
         description="Preserved protocol-specific data (e.g., original SAPIENT task ID)",
     )
+
+    @field_validator("timestamp")
+    @classmethod
+    def _as_utc(cls, moment: datetime) -> datetime:
+        # A CoT `time` attribute may legally omit its offset, and a naive
+        # datetime cannot be compared with an aware one -- one such datagram
+        # took the whole engine down with a TypeError.
+        return as_utc(moment)
 
     class Config:
         # Ensures that any extra fields accidentally passed in are dropped,

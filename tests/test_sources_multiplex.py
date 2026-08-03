@@ -118,22 +118,56 @@ def test_a_full_queue_back_pressures_instead_of_losing_events(caplog):
     assert sorted(timestamp for timestamp, _ in events) == [_event(i)[0] for i in range(50)]
 
 
-def test_a_stalled_reader_reports_once_and_stops_with_the_consumer(caplog):
-    source = _ListSource([_event(i) for i in range(3)])
+def test_one_sustained_stall_is_one_log_line(caplog, monkeypatch):
+    """A saturated queue makes every event wait, so reporting per event -- or on
+    every momentary recovery, which under sustained overload is also every event
+    -- is a log line per packet. Measured at 195 lines for one two-minute stall.
+    """
+    monkeypatch.setattr(multiplex, "PUT_TIMEOUT_SECONDS", 0.02)
+    monkeypatch.setattr(multiplex, "STALL_REPORT_SECONDS", 30.0)
+    source = _ListSource([_event(i) for i in range(12)])
+    stream = MultiplexedSource([source], queue_size=2).iter_events()
+
+    seen = []
+    with caplog.at_level("WARNING"):
+        for event in stream:
+            # Slower than the reader, so the queue stays saturated throughout and
+            # every event alternates blocked -> accepted.
+            time.sleep(0.05)
+            seen.append(event)
+
+    assert len(seen) == 12
+    stalls = [r for r in caplog.records if "Event queue full" in r.message]
+    assert len(stalls) == 1
+    # The line carries how many events the stall has held up, so its scale shows.
+    assert "event(s) held up so far" in stalls[0].message
+
+
+def test_a_continuing_stall_is_re_reported_on_its_own_schedule(caplog, monkeypatch):
+    """One line for a stall that never ends would leave an operator watching a
+    permanently degraded feed with nothing after the first minute."""
+    monkeypatch.setattr(multiplex, "PUT_TIMEOUT_SECONDS", 0.02)
+    monkeypatch.setattr(multiplex, "STALL_REPORT_SECONDS", 0.0)  # report every wait
+    source = _ListSource([_event(i) for i in range(6)])
     stream = MultiplexedSource([source], queue_size=1).iter_events()
 
     with caplog.at_level("WARNING"):
-        next(stream)  # leave the rest queued/blocked behind a consumer that stops
-        # Long enough for the reader to fill the queue and block on the next put.
-        time.sleep(multiplex.PUT_TIMEOUT_SECONDS * 3)
-        stream.close()
-        time.sleep(multiplex.PUT_TIMEOUT_SECONDS * 3)
+        for _ in stream:
+            time.sleep(0.05)
 
     stalls = [r for r in caplog.records if "Event queue full" in r.message]
-    # One line per stall, not one per event: at packet rate the latter floods.
-    # (A scheduler hiccup longer than the put timeout could produce a second.)
-    assert len(stalls) <= 2
-    assert stalls
+    assert len(stalls) > 1
+
+
+def test_a_stalled_reader_stops_with_the_consumer(caplog):
+    source = _ListSource([_event(i) for i in range(3)])
+    stream = MultiplexedSource([source], queue_size=1).iter_events()
+
+    next(stream)  # leave the rest queued/blocked behind a consumer that stops
+    time.sleep(multiplex.PUT_TIMEOUT_SECONDS * 3)
+    stream.close()
+    time.sleep(multiplex.PUT_TIMEOUT_SECONDS * 3)
+
     assert not [t for t in threading.enumerate() if t.name.startswith("source-")]
 
 

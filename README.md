@@ -128,25 +128,27 @@ make tak-down    # stop (keeps volumes);  make tak-clean wipes them
 
 ### Validate live ingestion (UDP sensor traffic, no file)
 
-The demos above replay a file. `make live-demo` exercises the other mode: the engine reads sensor traffic **off the network** (`--enable-sapient` on UDP 5000, `--enable-cot` on UDP 6969) and streams the fused result into the same per-group WebTAK sink. `dev/udp_feeder.py` stands in for the ASMs — it replays `data/examples/sapient_messages.json` onto those sockets, re-stamped so the scenario starts now, as either binary SAPIENT protobuf or CoT XML.
+The demos above replay a file. `make live-demo` exercises the other mode: the engine reads sensor traffic **off the network** (`--enable-sapient` on UDP 5000, `--enable-cot` on UDP 6969) and streams the fused result into the same per-group WebTAK sink. `dev/udp_feeder.py` stands in for the ASMs — it replays `data/examples/sapient_messages.json` onto those sockets as either binary SAPIENT protobuf or CoT XML, stamping each datagram at the moment it sends it, as a sensor does.
 
 ```bash
 make tak-up && make tak-users            # once, as above
-make live-demo                           # SAPIENT protobuf over UDP, 10x scenario cadence
+make tak-tail &                          # watch what group 'alpha' receives (start it first)
+make live-demo                           # SAPIENT protobuf over UDP, at scenario cadence (~38 min)
 make live-demo LIVE_PROTOCOL=cot         # ...CoT XML instead
-make live-demo LIVE_FACTOR=1             # ...at real time (~38 min)
-make tak-tail                            # print the CoT group 'alpha' actually receives
-make tak-tail TAK_DEMO_GROUP=bravo       # ...and confirm 'bravo' receives none
+make live-demo LIVE_FACTOR=10            # ...10x faster: an ingest smoke test, see below
+make tak-tail TAK_DEMO_GROUP=bravo       # confirm 'bravo' receives none (during a feed)
 make live-down                           # stop the engine (leaves TAK up)
 ```
 
-`make live-demo` starts the engine detached and runs the feeder in the foreground, so the run lasts as long as the feed. Both live sources are read concurrently, so `--enable-sapient --enable-cot` together work: each source gets its own reader thread, and events are fused in arrival order. An event stamped **earlier than the last one processed** is dropped, because the tracker cannot predict backwards and letting one through rewinds *every* track's timestamp and redraws its TAK marker in the past. UDP reordering produces the odd one; a sensor whose clock is behind produces nothing but, and is then absent from the fusion picture until its clock is fixed — so the drop is re-reported once a minute, with a running count and the sensor's node id, rather than once per run. **Keep the sensors' clocks in step.** If fusion falls behind the incoming rate the readers stall rather than discard, so nothing is lost in-process; sustained overload then overruns the kernel's socket receive buffer (visible as the drop counter for the socket in `/proc/net/udp`).
+`make live-demo` starts the engine detached and runs the feeder in the foreground, so the run lasts as long as the feed. Both live sources are read concurrently, so `--enable-sapient --enable-cot` together work: each source gets its own reader thread, and events are fused in arrival order. An event whose timestamp is **out of step with the rest** is dropped: the tracker cannot predict backwards, so letting a late one through rewinds *every* track's timestamp and redraws its TAK marker in the past. Events are therefore gated to the newest timestamp seen — and a live event stamped more than ten seconds **ahead of the present** is refused that mark, or one bad clock (or one spoofed datagram) would set a watermark every healthy sensor then falls behind, silencing the engine for good. Drops are re-reported once a minute with a running count and the node id involved, rather than once per run. **Keep the sensors' clocks in step.** If fusion falls behind the incoming rate the readers stall rather than discard, so nothing is lost in-process; sustained overload then overruns the kernel's socket receive buffer (visible as the drop counter for the socket in `/proc/net/udp`).
 
 A replay file and a live source cannot be combined — the engine refuses the pair. A scenario runs on its own clock, minutes or hours away from the sensors', and the gate above would silently discard whichever is behind.
 
+Because the feeder stamps at send time, `LIVE_FACTOR` compresses the timeline the engine sees rather than pushing timestamps into the future — the same targets appear to move that many times faster. **Fusion does not survive that.** The tracker's association gate is sized by the interval between events, so a compressed feed makes it too tight to match anything and every detection starts its own track: the scenario's first 40 detections fuse into 16 tracks at `LIVE_FACTOR=1` and 40 — one per detection, i.e. no association at all — at `LIVE_FACTOR=10`. Use a factor above 1 to check that ingest works, and 1 (the default) to judge the fused picture. (16 tracks for those 40 detections is itself more than the objects behind them; association quality on the scenario is a separate, pre-existing matter.) The engine's own `--replay-file` pacing has no such limit: it compresses emission while keeping the scenario's spacing, which is exactly what a replay can do and a live sensor cannot.
+
 The feeder's CoT mode emits a fixed hostile type for every track and carries no classification or swarm count (a CoT `<event>` has nowhere standard to put them), so `LIVE_PROTOCOL=cot` exercises the ingest path, not the classification carry-through that SAPIENT reports drive.
 
-`make tak-tail` is the scriptable stand-in for a WebTAK browser session: it subscribes to `wss://…:8446/takproto/1` as a group's File user and prints the CoT that user is allowed to see, exiting non-zero if nothing arrives. Run it (or open WebTAK) **before** the feed starts — TAK does not backfill to a late subscriber.
+`make tak-tail` is the scriptable stand-in for a WebTAK browser session: it subscribes to `wss://…:8446/takproto/1` as a group's File user and prints the CoT that user is allowed to see. Run it (or open WebTAK) **before** the feed starts — TAK does not backfill to a late subscriber. Receiving nothing is the expected result for a group the producer is not in, so the target says so rather than failing; `dev/webtak_ws_tail.py` itself exits non-zero on an empty tail, for a script that wants to assert delivery.
 
 Run the feeder against a non-containerised engine the same way:
 
@@ -281,6 +283,7 @@ context-foundry/
 │  │  │  ├─ models.py
 │  │  │  ├─ schemas.py
 │  │  │  ├─ serializers.py
+│  │  │  ├─ timeutil.py
 │  │  │  └─ tracker.py
 │  │  └─ cli.py
 │  └─ sapient_msg/
