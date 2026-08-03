@@ -3,6 +3,9 @@
 
 # src/fusion/tracker.py
 
+import logging
+import time
+
 import numpy as np
 from stonesoup.dataassociator.probability import JPDAwithEHM2
 from stonesoup.hypothesiser.probability import PDAHypothesiser
@@ -10,10 +13,33 @@ from stonesoup.predictor.kalman import UnscentedKalmanPredictor
 from stonesoup.types.array import StateVector
 from stonesoup.types.state import GaussianState
 from stonesoup.types.track import Track
-from stonesoup.types.update import Update
 from stonesoup.updater.kalman import UnscentedKalmanUpdater
 
 from .models import create_9d_constant_acceleration_model
+
+logger = logging.getLogger(__name__)
+
+# States kept per track. Every event appends one state (and one metadata copy)
+# to every live track, so an uncapped run grows for as long as it stays up --
+# hundreds of MiB an hour at a few dozen tracks. Nothing downstream reads
+# history: the augmentor reads track.state and the serializers read the tactical
+# track built from it, so this only has to be deep enough to inspect a track's
+# recent past. Kept small deliberately: at ~7.6 KiB a state it is this times
+# MAX_LIVE_TRACKS that has to fit the memory limit, and measuring 20 against 200
+# on a live feed showed 2 MiB between them.
+MAX_TRACK_HISTORY = 20
+
+# Live tracks held at once. Detections that do not associate each start a track,
+# so clutter -- weather, birds, a sensor whose clock disagrees, a spoofer -- grows
+# the population until per-event JPDA cost passes the event rate, and once fusion
+# is behind the backlog keeps it there. Refusing new tracks past this bound sheds
+# the clutter and keeps the ones already being followed; the population then
+# recovers as coasting tracks are pruned.
+MAX_LIVE_TRACKS = 250
+
+# How often to report that the live-track bound is being hit. It is reached by a
+# condition that persists, so this is a rate limit rather than a one-shot.
+TRACK_LIMIT_REPORT_SECONDS = 60.0
 
 
 class SapientAsynchronousTracker:
@@ -43,6 +69,12 @@ class SapientAsynchronousTracker:
         # Track storage manifest
         self.tracks = set()
         self.p_init_val = p_init_variance
+        # Last real detection per track id. Pruning needs it and track history is
+        # capped, so it cannot be recovered by scanning states; see
+        # _prune_stale_tracks.
+        self._last_update_time = {}
+        self._refused_tracks = 0
+        self._next_track_limit_report = 0.0
 
     def process_async_event(self, timestamp, detection_group):
         """
@@ -88,6 +120,11 @@ class SapientAsynchronousTracker:
 
                 updated_state = self.updater.update(joint_hypothesis, **update_context)
                 track.append(updated_state)
+                self._last_update_time[track.id] = timestamp
+
+        # This event appended a state to every track above; cap what is retained.
+        for live_track in self.tracks:
+            self._trim_history(live_track)
 
         # Track Initiation: Handle unassociated hits to capture newly emerging threat vectors
         unassociated_hits = detection_group - associated_detections
@@ -103,7 +140,16 @@ class SapientAsynchronousTracker:
         return self.tracks
 
     def _initialize_new_track(self, detection):
-        """Seeds a brand new 9D Constant Acceleration Gaussian state around a 3D Cartesian hit."""
+        """Seeds a brand new 9D Constant Acceleration Gaussian state around a 3D Cartesian hit.
+
+        Refused once MAX_LIVE_TRACKS are live: the tracks already being followed
+        are worth more than another one built from a hit that associated with
+        nothing, and an unbounded population takes per-event cost past the event
+        rate.
+        """
+        if len(self.tracks) >= MAX_LIVE_TRACKS:
+            self._report_track_limit()
+            return
         e, n, u = (
             detection.state_vector[0, 0],
             detection.state_vector[1, 0],
@@ -132,21 +178,59 @@ class SapientAsynchronousTracker:
         # Seed the track's metadata from the hit that spawned it: Stone Soup only
         # accumulates metadata from Updates, so without this the track is
         # unclassified until its second detection.
-        self.tracks.add(Track([prior], init_metadata=dict(detection.metadata)))
+        track = Track([prior], init_metadata=dict(detection.metadata))
+        self.tracks.add(track)
+        # The seeding hit is a real detection, so it anchors staleness.
+        self._last_update_time[track.id] = detection.timestamp
+
+    def _report_track_limit(self) -> None:
+        self._refused_tracks += 1
+        if time.monotonic() < self._next_track_limit_report:
+            return
+        self._next_track_limit_report = time.monotonic() + TRACK_LIMIT_REPORT_SECONDS
+        logger.warning(
+            "At the %d live-track limit; %d unassociated detection(s) have not started a track "
+            "so far. Something is producing detections that do not associate -- clutter, a "
+            "sensor whose clock disagrees, or an injected feed.",
+            MAX_LIVE_TRACKS,
+            self._refused_tracks,
+        )
+
+    def _trim_history(self, track):
+        """Caps one track's retained history.
+
+        Stone Soup keeps `states` and `metadatas` index-aligned -- each append
+        adds one of each, and `track.metadata` is `metadatas[-1]` -- so both must
+        be truncated by the same amount or the metadata a track reports stops
+        belonging to its current state.
+        """
+        excess = len(track.states) - MAX_TRACK_HISTORY
+        if excess > 0:
+            del track.states[:excess]
+            del track.metadatas[:excess]
 
     def _prune_stale_tracks(self, current_time, max_coastal_seconds):
-        """Purges tracks that haven't received physical sensor updates within the timeout window."""
+        """Purges tracks that haven't received physical sensor updates within the timeout window.
+
+        Staleness is measured from the last real detection, not from
+        track.state.timestamp: coasting appends a prediction each event, so the
+        latter always reads ~now and no track would ever expire. That last
+        detection is read from explicit per-track bookkeeping rather than
+        recovered by scanning history for the newest Update, because history is
+        capped -- once a track has coasted past the cap the Update is gone and
+        such a scan silently loses its anchor, leaving the track immortal.
+        """
         active_set = set()
         for track in self.tracks:
-            # Measure staleness from the last real detection, not track.state.timestamp:
-            # coasting appends a prediction each event, so the latter always reads ~now
-            # and no track would ever expire.
-            last_detection = track.states[0].timestamp
-            for state in reversed(track.states):
-                if isinstance(state, Update):
-                    last_detection = state.timestamp
-                    break
+            last_detection = self._last_update_time.get(track.id, track.states[0].timestamp)
             elapsed = (current_time - last_detection).total_seconds()
             if elapsed <= max_coastal_seconds:
                 active_set.add(track)
         self.tracks = active_set
+        # Forget pruned tracks, or the bookkeeping outlives them for the whole run.
+        active_ids = {track.id for track in active_set}
+        self._last_update_time = {
+            track_id: seen
+            for track_id, seen in self._last_update_time.items()
+            if track_id in active_ids
+        }

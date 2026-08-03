@@ -11,11 +11,16 @@ from google.protobuf.json_format import MessageToDict, ParseDict, ParseError
 from context_foundry.fusion import config
 from context_foundry.fusion.schemas import InternalDetection
 from context_foundry.fusion.validators.base import ProtocolValidator
+from sapient_msg.bsi_flex_335_v2_0.range_bearing_pb2 import RangeBearing
 
 # Now we import the newly compiled root message
 from sapient_msg.bsi_flex_335_v2_0.sapient_message_pb2 import SapientMessage
 
 logger = logging.getLogger(__name__)
+
+# Node IDs already reported as unregistered, so the explanation is logged once per node
+# instead of once per datagram.
+_UNREGISTERED_NODES_SEEN: set[str] = set()
 
 
 class SapientValidator(ProtocolValidator):
@@ -42,6 +47,45 @@ class SapientValidator(ProtocolValidator):
         except ParseError as e:
             return False, f"Protobuf schema violation: {e}"
 
+    def _range_bearing_to_wgs84(
+        self, node_id: str, rb: RangeBearing
+    ) -> tuple[float, float, float | None]:
+        """Place a range/bearing detection using the reporting sensor as the origin.
+
+        Range and azimuth are measured from the sensor (proto: "Range from the node's
+        location", "Azimuth in relation to the node's north"), so resolving them against
+        the network ENU anchor displaces every detection from a non-anchor sensor by the
+        anchor-to-sensor baseline, which is tens of kilometres in a real deployment.
+        """
+        sensor = config.get_sensor(node_id)
+        if sensor is None:
+            if node_id not in _UNREGISTERED_NODES_SEEN:
+                _UNREGISTERED_NODES_SEEN.add(node_id)
+                logger.warning(
+                    f"Node '{node_id}' is not in the sensor registry; its range/bearing "
+                    "detections cannot be geolocated and will be dropped. Add it to the "
+                    "sensor manifest to ingest them."
+                )
+            raise ValueError(f"range_bearing detection from unregistered node '{node_id}'.")
+
+        # Azimuth is clockwise from the node's north; elevation is above its horizon,
+        # so the slant range projects onto the ground plane before splitting East/North.
+        has_elevation = rb.HasField("elevation")
+        az = math.radians(rb.azimuth)
+        elev = math.radians(rb.elevation) if has_elevation else 0.0
+        ground_range = rb.range * math.cos(elev)
+
+        e_offset = ground_range * math.sin(az)
+        n_offset = ground_range * math.cos(az)
+        u_offset = rb.range * math.sin(elev)
+
+        lat, lon, alt = config.enu_to_wgs84_about(
+            e_offset, n_offset, u_offset, sensor["lat"], sensor["lon"], sensor["alt"]
+        )
+        # Without an elevation the message carries no height information, and the sensor's
+        # own altitude would be a fabricated target altitude.
+        return lat, lon, alt if has_elevation else None
+
     def normalize(self, raw_payload: dict[str, Any]) -> InternalDetection:
         msg = SapientMessage()
         ParseDict(raw_payload["sapientMessage"], msg)
@@ -56,18 +100,9 @@ class SapientValidator(ProtocolValidator):
             lon = report.location.x
             alt = report.location.z if report.location.HasField("z") else None
 
-        # 2. Use 'azimuth' for polar coordinates
+        # 2. Resolve polar coordinates against the reporting sensor
         elif report.HasField("range_bearing"):
-            rng = report.range_bearing.range
-            # Corrected: Accessing 'azimuth' instead of 'bearing'
-            az = math.radians(report.range_bearing.azimuth)
-
-            # Calculate offsets in meters (East, North)
-            e_offset = rng * math.sin(az)
-            n_offset = rng * math.cos(az)
-
-            # Use the global stateful origin
-            lat, lon, alt = config.enu_to_wgs84(e_offset, n_offset, 0.0)
+            lat, lon, alt = self._range_bearing_to_wgs84(msg.node_id, report.range_bearing)
 
         else:
             raise ValueError("Detection missing both 'location' and 'range_bearing' fields.")

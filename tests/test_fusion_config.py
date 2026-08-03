@@ -177,6 +177,38 @@ def test_enu_to_wgs84_raises_when_no_origin_anywhere():
         config.enu_to_wgs84(0.0, 0.0, 0.0)
 
 
+def test_enu_to_wgs84_about_uses_the_given_origin_and_touches_no_global_state():
+    config.set_reference_origin(0.0, 0.0, 0.0)
+
+    lat, lon, alt = config.enu_to_wgs84_about(0.0, 0.0, 0.0, 62.593, 29.836, 180.0)
+
+    assert lat == pytest.approx(62.593, abs=1e-9)
+    assert lon == pytest.approx(29.836, abs=1e-9)
+    assert alt == pytest.approx(180.0, abs=1e-6)
+    # The shared dynamic origin is untouched, so concurrent readers are unaffected.
+    assert (config._origin_lat, config._origin_lon, config._origin_alt) == (0.0, 0.0, 0.0)
+
+
+def test_enu_to_wgs84_about_round_trips_against_wgs84_to_enu():
+    origin = (62.593, 29.836, 180.0)
+    config.set_reference_origin(*origin)
+    e, n, u = config.wgs84_to_enu(62.60, 29.85, 300.0)
+
+    lat, lon, alt = config.enu_to_wgs84_about(e, n, u, *origin)
+
+    assert lat == pytest.approx(62.60, abs=1e-9)
+    assert lon == pytest.approx(29.85, abs=1e-9)
+    assert alt == pytest.approx(300.0, abs=1e-3)
+
+
+def test_enu_to_wgs84_about_needs_no_origin_to_have_been_set():
+    assert config._origin_lat is None
+    lat, lon, _alt = config.enu_to_wgs84_about(0.0, 1000.0, 0.0, 62.0, 29.0, 0.0)
+    assert lat > 62.0
+    assert lon == pytest.approx(29.0, abs=1e-9)
+    assert config._origin_lat is None
+
+
 def test_enu_to_wgs84_falls_back_to_registry_origin(joensuu_sensor_network):
     config.load_sensor_network(sensor_network_list=joensuu_sensor_network["sensors"])
     # Dynamic origin was never explicitly set; enu_to_wgs84 should sync from the registry.

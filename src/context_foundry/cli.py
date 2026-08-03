@@ -4,6 +4,7 @@
 import argparse
 import logging
 import signal
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,8 +18,9 @@ from context_foundry.fusion.serializers import (
 )
 from context_foundry.fusion.sinks.file import FileCotSink
 from context_foundry.fusion.sinks.tak_tls import TakTlsSink
-from context_foundry.fusion.sinks.tak_ws import TakWsSink
+from context_foundry.fusion.sinks.tak_ws import DEFAULT_TOKEN_TIMEOUT, TakWsSink
 from context_foundry.fusion.sources.cot_stream import CotNetworkStream
+from context_foundry.fusion.sources.frames import DEFAULT_FRAME_WINDOW_SECONDS
 from context_foundry.fusion.sources.json_file import JsonSapientSource
 from context_foundry.fusion.sources.multiplex import MultiplexedSource
 from context_foundry.fusion.sources.offset import OffsetReplaySource
@@ -39,11 +41,64 @@ LATE_EVENT_REPORT_SECONDS = 60.0
 # every healthy event afterwards is measured against and dropped.
 FUTURE_HORIZON_SECONDS = 10.0
 
+# How far behind the newest event seen a live event may still be fused. A sensor
+# stamps before it transmits, so every event arrives already a little in the past
+# -- flight time, frame assembly, one fusion pass -- while the newest timestamp a
+# live run will accept is pinned to the present. A gate with no tolerance
+# therefore drops the ordinary case: measured, healthy sensors landed 0.3s behind
+# a mark an out-of-step sender had pulled up to now, and every one was refused.
+# Beyond this it is a clock that disagrees rather than latency, and the rewind it
+# would cost the tracker is a fraction of one update interval either way.
+LATE_EVENT_TOLERANCE_SECONDS = 2.0
+
+# How often to log the running fusion summary. Without it an engine that is up
+# and fusing nothing logs the same lines as a healthy one and then nothing at
+# all, so there is no way to tell a quiet sensor network from a broken ingress.
+SUMMARY_REPORT_SECONDS = 60.0
+
 
 def _sensor_ids(detections):
     """The sensors an event came from, for reporting which one is out of step."""
     ids = {getattr(det, "metadata", {}).get("nodeId") for det in detections}
     return ", ".join(sorted(str(node_id) for node_id in ids if node_id)) or "an unnamed sensor"
+
+
+def _start_summary_reporter(counters):
+    """Report the summary every SUMMARY_REPORT_SECONDS; returns the stop switch.
+
+    A daemon thread rather than a check inside the fusion loop, because the loop
+    only runs when an event arrives: the state worth reporting most loudly -- an
+    ingress that has stopped producing anything -- is exactly the one a
+    loop-driven report cannot describe. The counters are only read for a log
+    line, so a torn read costs at most a slightly stale number.
+    """
+    stop = threading.Event()
+
+    def report():
+        while not stop.wait(SUMMARY_REPORT_SECONDS):
+            _log_summary(counters, "Fusion summary")
+
+    threading.Thread(target=report, name="summary-reporter", daemon=True).start()
+    return stop
+
+
+def _log_summary(counters, prefix):
+    """Report the running totals an operator needs to place the engine's state.
+
+    All four failure modes read differently here: nothing arriving leaves every
+    counter at zero, arriving-and-dropped moves only the drop count, healthy
+    fusion moves all of them, and a TAK server refusing the stream shows CoT
+    still being sent while the sink logs its own connection warnings.
+    """
+    logger.info(
+        "%s: %d event(s) fused, %d detection(s) ingested, %d CoT message(s) sent, "
+        "%d event(s) dropped out of step.",
+        prefix,
+        counters["events"],
+        counters["detections"],
+        counters["cot"],
+        counters["dropped"],
+    )
 
 
 def _install_shutdown_handler():
@@ -130,7 +185,33 @@ def fusion_main():
     parser.add_argument(
         "--tak-ws-verify-tls",
         action="store_true",
-        help="Verify the TAK Server TLS cert (default: skip, for self-signed dev)",
+        help="Verify the TAK Server TLS cert against the system trust store. A CA issued for a "
+        "name the sink does not dial by (an in-cluster Service name) fails here; use "
+        "--tak-ws-ca instead. Never affects the Keycloak token exchange, which is always "
+        "verified.",
+    )
+    parser.add_argument(
+        "--tak-ws-ca",
+        help="CA bundle (PEM) used to verify the TAK Server on the WebSocket sink. Takes "
+        "precedence over --tak-ws-verify-tls.",
+    )
+    parser.add_argument(
+        "--tak-ws-token-timeout",
+        type=float,
+        default=DEFAULT_TOKEN_TIMEOUT,
+        help=f"Seconds to wait on the Keycloak token endpoint (default: "
+        f"{DEFAULT_TOKEN_TIMEOUT:g}). The fetch blocks the fusion loop, so the sensor sockets "
+        "go unread for its duration.",
+    )
+    parser.add_argument(
+        "--frame-window-seconds",
+        type=float,
+        default=DEFAULT_FRAME_WINDOW_SECONDS,
+        help=f"How long a live source holds one sensor-instant open to collect the rest of its "
+        f"datagrams before handing it on as a single event (default: "
+        f"{DEFAULT_FRAME_WINDOW_SECONDS:g}). It must exceed both how spread out one sweep's "
+        "datagrams arrive and how long one fusion pass takes, or sweeps split into "
+        "single-detection events. Costs that much latency per live detection.",
     )
     parser.add_argument(
         "--keycloak-token-url",
@@ -184,8 +265,10 @@ def fusion_main():
     try:
         config.load_sensor_network(sensor_config_path=args.config)
     except Exception as e:
+        # Non-zero, or the container exits "Completed" and a misconfiguration
+        # looks exactly like a clean finish to the runtime and to alerting.
         logger.error(f"Failed to load sensor config: {e}")
-        return
+        raise SystemExit(1) from e
 
     # 2. Setup Sources
     sources = []
@@ -207,13 +290,15 @@ def fusion_main():
             logger.info(f"Replaying {args.replay_file} unpaced, as fast as events can be fused")
         sources.append(replay_source)
     if args.enable_sapient:
-        sources.append(NetworkSapientStream(port=5000))
+        sources.append(
+            NetworkSapientStream(port=5000, frame_window_seconds=args.frame_window_seconds)
+        )
     if args.enable_cot:
-        sources.append(CotNetworkStream(port=6969))
+        sources.append(CotNetworkStream(port=6969, frame_window_seconds=args.frame_window_seconds))
 
     if not sources:
         logger.error("No sources enabled! Use --enable-sapient, --enable-cot, or --replay-file")
-        return
+        raise SystemExit(1)
 
     if len(sources) > 1:
         # A live source blocks until its own next packet, so the loop below would
@@ -255,6 +340,8 @@ def fusion_main():
                 client_secret=args.oidc_client_secret,
                 static_token=args.tak_bearer_token,
                 verify_tls=args.tak_ws_verify_tls,
+                ca=args.tak_ws_ca,
+                token_timeout=args.tak_ws_token_timeout,
             )
         )
         logger.info(
@@ -268,15 +355,23 @@ def fusion_main():
             "over TLS, --tak-ws-host <host> for the group-tagged WebTAK WebSocket, "
             "or --log-to-file to write CoT to a file for offline validation."
         )
-        return
+        raise SystemExit(1)
 
     _install_shutdown_handler()
     logger.info("Fusion loop started. Listening for targets...")
 
     # 4. The Main Loop
     latest_timestamp = None
-    out_of_step_events = 0
+    # Which sensor's event set the current watermark, so a drop report can name
+    # the sensor that caused it and not only the one that suffered it.
+    watermark_sensor = "no event accepted yet"
+    counters = {"events": 0, "detections": 0, "cot": 0, "dropped": 0}
     next_skew_report = 0.0
+    # Reported off a timer rather than from the loop below: an ingress that has
+    # gone quiet is the case an operator most needs to see, and a loop-driven
+    # report says nothing at all precisely then, so silence would have to be read
+    # as either "no sensor is sending" or "the process is wedged".
+    stop_summary = _start_summary_reporter(counters)
     # Only a live run has a present to be measured against; see the gate below.
     future_horizon = FUTURE_HORIZON_SECONDS if not args.replay_file else None
     try:
@@ -301,36 +396,47 @@ def fusion_main():
                     # runs ahead of the wall clock, and cannot be combined with a
                     # live source, so the horizon only applies to live runs.
                     skew = None
+                    now = None
                     if future_horizon is not None:
-                        ahead = (timestamp - datetime.now(timezone.utc)).total_seconds()
+                        now = datetime.now(timezone.utc)
+                        ahead = (timestamp - now).total_seconds()
                         if ahead > future_horizon:
                             skew = f"{ahead:.1f}s ahead of the present"
-                    if (
-                        skew is None
-                        and latest_timestamp is not None
-                        and timestamp < latest_timestamp
-                    ):
+                    if skew is None and latest_timestamp is not None:
                         behind = (latest_timestamp - timestamp).total_seconds()
-                        skew = f"{behind:.1f}s behind the newest event seen"
+                        if behind > LATE_EVENT_TOLERANCE_SECONDS:
+                            skew = f"{behind:.1f}s behind the newest event seen"
 
                     if skew is not None:
-                        out_of_step_events += 1
+                        counters["dropped"] += 1
                         if time.monotonic() >= next_skew_report:
                             next_skew_report = time.monotonic() + LATE_EVENT_REPORT_SECONDS
                             logger.warning(
                                 "Dropped %d event(s) whose timestamps are out of step with the "
-                                "rest; the latest is %s, from %s. Fusing it would drag every "
-                                "track's time with it. Check the sensors' clocks.",
-                                out_of_step_events,
+                                "rest; the latest is %s, from %s, against a mark set by %s. "
+                                "Fusing it would drag every track's time with it. Check the "
+                                "sensors' clocks.",
+                                counters["dropped"],
                                 skew,
                                 _sensor_ids(detections),
+                                watermark_sensor,
                             )
                         continue
 
-                    if latest_timestamp is None or timestamp > latest_timestamp:
-                        latest_timestamp = timestamp
+                    # The event is fused with its own timestamp, but the watermark
+                    # it sets is clamped to the present on a live run: a sensor a
+                    # few seconds fast is inside the future horizon, and letting it
+                    # mark the future would put the gate ahead of what the healthy
+                    # sensors report, so their events -- not its -- get dropped.
+                    mark = timestamp if now is None else min(timestamp, now)
+                    if latest_timestamp is None or mark > latest_timestamp:
+                        latest_timestamp = mark
+                        watermark_sensor = _sensor_ids(detections)
 
+                    counters["events"] += 1
+                    counters["detections"] += len(detections)
                     active_tracks = tracker.process_async_event(timestamp, set(detections))
+                    broadcast = 0
 
                     # Serialization / Output
                     for track in active_tracks:
@@ -343,9 +449,22 @@ def fusion_main():
                             for sink in sinks:
                                 sink.send(cot_payload)
 
-                            logger.info(
+                            counters["cot"] += 1
+                            broadcast += 1
+                            # Per track per event: 20 lines a second on a busy
+                            # picture, which buries the drop warnings. The
+                            # per-event line below carries the same information at
+                            # a rate an operator can read.
+                            logger.debug(
                                 f"Broadcast Update for Track {tactical_track.track_id[-4:]} | Threat: {tactical_track.threat_level.upper()}"
                             )
+
+                    logger.info(
+                        "Fused event at %s: %d detection(s) in, %d track(s) broadcast.",
+                        timestamp.isoformat(timespec="seconds"),
+                        len(detections),
+                        broadcast,
+                    )
 
             if processed_any_events:
                 continue
@@ -378,13 +497,15 @@ def fusion_main():
                 logger.info("Replay file processing complete. Exiting.")
                 break
     finally:
-        if out_of_step_events:
+        if counters["dropped"]:
             # The periodic report can end mid-window, so a short run would
             # otherwise finish under-reporting what it dropped.
             logger.warning(
                 "Dropped %d event(s) in total for timestamps out of step with the rest.",
-                out_of_step_events,
+                counters["dropped"],
             )
+        stop_summary.set()
+        _log_summary(counters, "Fusion totals at shutdown")
         for sink in sinks:
             sink.close()
 

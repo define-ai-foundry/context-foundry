@@ -4,9 +4,9 @@
 
 # Emits a recorded scenario as live UDP traffic, so the engine's live ingress
 # paths (--enable-sapient / --enable-cot) can be exercised without real sensors.
-# Stands in for an ASM: each scenario detection is sent at the scenario's own
-# cadence and stamped with the present, as a SAPIENT protobuf datagram (:5000)
-# or a CoT XML datagram (:6969). Dev tooling only.
+# Stands in for an ASM: detections go out at the scenario's own cadence, stamped
+# with the present -- one stamp per sweep, as a sensor reports one -- as SAPIENT
+# protobuf datagrams (:5000) or CoT XML datagrams (:6969). Dev tooling only.
 
 import argparse
 import json
@@ -28,7 +28,13 @@ COT_TYPE = "a-h-A-M-F-Q"
 
 
 def load_messages(path):
-    """Return the scenario's detection reports as (timestamp, envelope) pairs, in time order."""
+    """Return the scenario's detection reports as (timestamp, envelope) pairs, in time order.
+
+    Sorted by node within an instant as well, so one node's sweep is always a
+    contiguous run: the send loop detects a sweep by comparing against the
+    previous message, and a file interleaving two nodes at one instant would
+    otherwise flip the key on every message and stamp each detection separately.
+    """
     with open(path, encoding="utf-8") as f:
         raw = json.load(f)
 
@@ -40,7 +46,7 @@ def load_messages(path):
         timestamp = datetime.fromisoformat(envelope["timestamp"].replace("Z", "+00:00"))
         events.append((timestamp, envelope))
 
-    events.sort(key=lambda pair: pair[0])
+    events.sort(key=lambda pair: (pair[0], pair[1].get("nodeId") or ""))
     return events
 
 

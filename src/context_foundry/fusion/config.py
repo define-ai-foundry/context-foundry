@@ -239,14 +239,32 @@ def enu_to_wgs84(e: float, n: float, u: float) -> tuple[float, float, float]:
     """
     global _origin_lat, _origin_lon, _origin_alt
 
-    # --- ADD THIS SYNC LOGIC ---
-    # If the dynamic origin isn't set, try to grab it from the initialized Registry
+    # If the dynamic origin isn't set, take it from the initialized registry
     if _origin_lat is None and ENU_ORIGIN_LAT is not None:
         set_reference_origin(ENU_ORIGIN_LAT, ENU_ORIGIN_LON, ENU_ORIGIN_ALT)
-    # ---------------------------
 
     if _origin_lat is None:
         raise ValueError("Reference origin was never set. Cannot convert ENU back to WGS84.")
 
     lat, lon, alt = pm.enu2geodetic(e, n, u, _origin_lat, _origin_lon, _origin_alt)
+    return lat, lon, alt
+
+
+def enu_to_wgs84_about(
+    e: float,
+    n: float,
+    u: float,
+    origin_lat: float,
+    origin_lon: float,
+    origin_alt: float,
+) -> tuple[float, float, float]:
+    """
+    Converts local East, North, Up vectors to WGS84 about a caller-supplied origin.
+
+    Sensor-relative measurements (range/bearing) must be resolved against the sensor
+    that made them, not the network anchor. This is stateless on purpose: the shared
+    _origin_* triple is read by every source thread and by the tracker, so temporarily
+    repointing it would corrupt unrelated conversions.
+    """
+    lat, lon, alt = pm.enu2geodetic(e, n, u, origin_lat, origin_lon, origin_alt)
     return lat, lon, alt
