@@ -8,6 +8,8 @@ pure byte transform) so we assert the wire frame is genuine STREAM protobuf.
 
 import base64
 import json
+import socket
+import ssl
 import time
 from unittest.mock import MagicMock
 
@@ -18,6 +20,23 @@ import websocket
 from context_foundry.fusion.sinks.tak_ws import TakWsSink
 
 TOKEN_URL = "https://iam.example/realms/rain-realm/protocol/openid-connect/token"
+
+
+@pytest.fixture
+def dead_port():
+    """A port that completes a TCP connect and then says nothing.
+
+    Enough for the real client libraries to get as far as the TLS handshake, so a
+    test can watch what they do with the options the sink gave them, without any
+    traffic leaving the host.
+    """
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    try:
+        yield listener.getsockname()[1]
+    finally:
+        listener.close()
 
 
 def _jwt(exp: float, groups=None) -> str:
@@ -47,7 +66,7 @@ def _patch_token(monkeypatch, access_token, expires_in=7200):
     calls = []
 
     def fake_post(url, data=None, verify=None, timeout=None):
-        calls.append({"url": url, "data": data, "verify": verify})
+        calls.append({"url": url, "data": data, "verify": verify, "timeout": timeout})
         return resp
 
     monkeypatch.setattr("context_foundry.fusion.sinks.tak_ws.requests.post", fake_post)
@@ -98,7 +117,7 @@ def test_client_credentials_token_is_fetched_and_used(monkeypatch):
         "client_secret": "s3cret",
         "scope": "openid",
     }
-    assert calls[0]["verify"] is False
+    assert calls[0]["verify"] is True
     assert ws.connect.call_args[1]["header"] == [f"Authorization: Bearer {token}"]
 
 
@@ -210,7 +229,8 @@ def test_token_near_expiry_forces_reconnect_with_fresh_token(monkeypatch):
     assert ws.connect.call_args_list[-1][1]["header"] == [f"Authorization: Bearer {fresh}"]
 
 
-def test_verify_tls_toggles_sslopt(monkeypatch):
+def _sslopt_of(monkeypatch, **kwargs):
+    """The sslopt the sink hands the WebSocket for one send."""
     captured = {}
 
     def fake_ctor(*a, **kw):
@@ -218,12 +238,101 @@ def test_verify_tls_toggles_sslopt(monkeypatch):
         return MagicMock()
 
     monkeypatch.setattr("context_foundry.fusion.sinks.tak_ws.websocket.WebSocket", fake_ctor)
+    TakWsSink("tak", static_token=_jwt(time.time() + 3600), **kwargs).send("<event/>")
+    return captured["sslopt"]
 
-    TakWsSink("tak", static_token=_jwt(time.time() + 3600)).send("<event/>")
-    assert captured["sslopt"] == {"cert_reqs": __import__("ssl").CERT_NONE}
 
-    TakWsSink("tak", static_token=_jwt(time.time() + 3600), verify_tls=True).send("<event/>")
-    assert captured["sslopt"] == {}
+def test_verify_tls_toggles_sslopt(monkeypatch):
+    assert _sslopt_of(monkeypatch) == {"cert_reqs": ssl.CERT_NONE}
+    assert _sslopt_of(monkeypatch, verify_tls=True) == {}
+
+
+def test_a_ca_verifies_the_tak_handshake_whatever_verify_tls_says(monkeypatch):
+    """A CA bundle is verification, so it outranks verify_tls=False -- an operator
+    who has a CA must not have to also remember to flip the other knob. The
+    hostname is not checked with it: TAK's certificate names its ingress, not the
+    in-cluster address it is reached at, and that mismatch is what drives an
+    operator to turn verification off instead.
+    """
+    expected = {
+        "cert_reqs": ssl.CERT_REQUIRED,
+        "ca_certs": "/etc/tak/ca.pem",
+        "check_hostname": False,
+    }
+    assert _sslopt_of(monkeypatch, ca="/etc/tak/ca.pem") == expected
+    assert _sslopt_of(monkeypatch, ca="/etc/tak/ca.pem", verify_tls=True) == expected
+
+
+def test_verify_tls_false_still_skips_verifying_tak(monkeypatch):
+    """The local self-signed dev stack has no CA to offer."""
+    assert _sslopt_of(monkeypatch, verify_tls=False)["cert_reqs"] == ssl.CERT_NONE
+
+
+def test_the_ca_reaches_the_tls_layer(dead_port, caplog):
+    """Against the real library rather than a mock: an unreadable bundle has to
+    fail the handshake. websocket-client only consults ca_certs when cert_reqs
+    asks for verification, so this pins both halves of the option landing in
+    OpenSSL -- a dropped one would leave an unverified handshake that instead
+    stalls on the silent peer until the socket timeout.
+    """
+    sink = TakWsSink(
+        "127.0.0.1",
+        dead_port,
+        static_token=_jwt(time.time() + 3600),
+        ca="/nonexistent/tak-ca.pem",
+        verify_tls=False,
+        socket_timeout=2.0,
+        retry_delay=0.0,
+    )
+
+    with caplog.at_level("ERROR"):
+        sink.send("<event/>")  # the WebSocketException is caught and backed off
+
+    assert any("CA certificate loading failed" in r.message for r in caplog.records)
+
+
+def test_the_token_post_is_verified_and_bounded(monkeypatch):
+    """verify is not a knob: the post carries the confidential client secret, and
+    the TAK-side settings must not be able to reach it."""
+    _patch_ws(monkeypatch)
+    calls = _patch_token(monkeypatch, _jwt(time.time() + 7200))
+
+    TakWsSink(
+        "tak", token_url=TOKEN_URL, client_id="cf-a", client_secret="s3cret", verify_tls=False
+    ).send("<event/>")
+    TakWsSink("tak", token_url=TOKEN_URL, client_id="cf-a", ca="/etc/tak/ca.pem").send("<event/>")
+
+    assert [c["verify"] for c in calls] == [True, True]
+    assert [c["timeout"] for c in calls] == [5.0, 5.0]  # the default, not unbounded
+
+
+def test_the_token_timeout_is_configurable(monkeypatch):
+    _patch_ws(monkeypatch)
+    calls = _patch_token(monkeypatch, _jwt(time.time() + 7200))
+
+    TakWsSink("tak", token_url=TOKEN_URL, client_id="cf-a", token_timeout=1.5).send("<event/>")
+
+    assert calls[0]["timeout"] == 1.5
+
+
+def test_an_unreachable_keycloak_gives_up_within_the_token_timeout(dead_port):
+    """Against real requests, not a mock: the post blocks the fusion loop with the
+    sensor sockets unread, so the timeout has to be the one configured.
+    """
+    sink = TakWsSink(
+        "tak",
+        token_url=f"https://127.0.0.1:{dead_port}/token",
+        client_id="cf-a",
+        token_timeout=0.2,
+        retry_delay=0.0,
+    )
+
+    started = time.monotonic()
+    sink.send("<event/>")  # the RequestException is caught and backed off
+    elapsed = time.monotonic() - started
+
+    assert sink.ws is None
+    assert elapsed < 2.0
 
 
 def test_opaque_token_exp_falls_back(monkeypatch):

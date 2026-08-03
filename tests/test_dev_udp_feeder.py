@@ -101,7 +101,7 @@ class _TickingClock(datetime):
     @classmethod
     def now(cls, _tz=None):
         cls._calls += 1
-        return datetime(2026, 8, 3, 12, 0, cls._calls, tzinfo=timezone.utc)
+        return datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc) + timedelta(microseconds=cls._calls)
 
 
 def _sweep_scenario(tmp_path, sweep_sizes, spacing_seconds=600):
@@ -220,3 +220,52 @@ def test_an_empty_scenario_is_refused(feeder, monkeypatch, tmp_path):
 
     with pytest.raises(SystemExit, match="no detection reports"):
         feeder.main()
+
+
+def test_two_nodes_at_one_instant_are_two_sweeps(feeder, monkeypatch, tmp_path, capsys):
+    """A sweep is detected by comparing against the previous message, so a file
+    that interleaves two nodes at one instant would give every detection its own
+    stamp unless the loader groups them."""
+    from sapient_msg.bsi_flex_335_v2_0.sapient_message_pb2 import SapientMessage
+
+    instant = "2026-11-15T02:45:00.000000Z"
+    interleaved = []
+    for object_index in range(2):
+        for node in ("node-A", "node-B"):
+            interleaved.append(
+                {
+                    "sapientMessage": {
+                        "timestamp": instant,
+                        "nodeId": node,
+                        "detectionReport": {
+                            "objectId": f"{node}-{object_index}",
+                            "location": {
+                                "x": 30.6,
+                                "y": 62.1,
+                                "z": 1500.0,
+                                "coordinateSystem": "LOCATION_COORDINATE_SYSTEM_LAT_LNG_DEG_M",
+                                "datum": "LOCATION_DATUM_WGS84_E",
+                            },
+                        },
+                    }
+                }
+            )
+    path = tmp_path / "interleaved.json"
+    path.write_text(json.dumps(interleaved), encoding="utf-8")
+
+    monkeypatch.setattr(feeder, "datetime", _TickingClock)
+    sent = _sent_timestamps(
+        feeder, monkeypatch, ["feeder", "--scenario", str(path), "--realtime-factor", "0"]
+    )
+    capsys.readouterr()
+
+    by_node = {}
+    for datagram in sent:
+        msg = SapientMessage()
+        msg.ParseFromString(datagram)
+        by_node.setdefault(msg.node_id, set()).add(msg.timestamp.ToDatetime())
+
+    # Two nodes, one instant each: two sweeps, one stamp apiece, and they differ.
+    assert sorted(by_node) == ["node-A", "node-B"]
+    assert all(len(stamps) == 1 for stamps in by_node.values())
+    assert by_node["node-A"] != by_node["node-B"]

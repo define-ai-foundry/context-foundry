@@ -18,6 +18,10 @@ from .base import CotSink
 
 logger = logging.getLogger(__name__)
 
+# Seconds to wait on the Keycloak token endpoint. The fetch is synchronous inside
+# a send, so this is time the fusion loop spends not reading its sensor sockets.
+DEFAULT_TOKEN_TIMEOUT = 5.0
+
 
 class TakWsSink(CotSink):
     """
@@ -33,6 +37,22 @@ class TakWsSink(CotSink):
     refreshed before `exp` and on a 401 handshake) or a static bearer token. The
     socket is opened lazily on the first send and re-opened on the next send after
     any failure.
+
+    Two separate TLS connections are involved, and the trust knobs deliberately
+    apply to only one each:
+
+    * The **token endpoint** is always verified against the system trust store.
+      It carries the confidential client secret -- the credential the whole
+      per-group isolation rests on -- to a public host with a publicly trusted
+      certificate, so there is nothing to be gained by weakening it and no knob
+      that does.
+    * The **TAK connection** is governed by `ca` and `verify_tls`. `ca` verifies
+      the server's chain against that bundle and takes precedence over
+      `verify_tls`; it does not require the hostname to match, because TAK is
+      commonly reached at an internal name while its certificate names the
+      ingress. `verify_tls` on its own verifies against the system trust store,
+      hostname included. Neither means the server is not verified at all, which
+      is for a self-signed dev stack only.
     """
 
     def __init__(
@@ -46,10 +66,12 @@ class TakWsSink(CotSink):
         static_token: str | None = None,
         scope: str | None = None,
         verify_tls: bool = False,
+        ca: str | None = None,
         path: str = "/takproto/1",
         refresh_leeway: int = 30,
         retry_delay: float = 5.0,
         socket_timeout: float = 10.0,
+        token_timeout: float = DEFAULT_TOKEN_TIMEOUT,
     ):
         if not static_token and not (token_url and client_id):
             raise ValueError(
@@ -63,10 +85,12 @@ class TakWsSink(CotSink):
         self.static_token = static_token
         self.scope = scope
         self.verify_tls = verify_tls
+        self.ca = ca
         self.path = path
         self.refresh_leeway = refresh_leeway
         self.retry_delay = retry_delay
         self.socket_timeout = socket_timeout
+        self.token_timeout = token_timeout
         self.ws = None
         self._token = None
         self._token_exp = 0.0
@@ -95,7 +119,10 @@ class TakWsSink(CotSink):
             data["client_secret"] = self.client_secret
         if self.scope:
             data["scope"] = self.scope
-        resp = requests.post(self.token_url, data=data, verify=self.verify_tls, timeout=15)
+        # verify is pinned on: the TAK knobs must not reach the secret's channel.
+        # A blocking post stalls the fusion loop with the sensor sockets unread,
+        # so an unreachable Keycloak has to give up in seconds, not tens of them.
+        resp = requests.post(self.token_url, data=data, verify=True, timeout=self.token_timeout)
         resp.raise_for_status()
         body = resp.json()
         self._token = body["access_token"]
@@ -114,13 +141,30 @@ class TakWsSink(CotSink):
     def _url(self) -> str:
         return f"wss://{self.host}:{self.port}{self.path}"
 
+    def _sslopt(self) -> dict:
+        """TLS options for the WSS handshake only; the token endpoint is separate.
+
+        A CA bundle is verification, so it overrides `verify_tls`, but with the
+        hostname check off: the certificate of a TAK reached at an in-cluster
+        Service name names the ingress instead, and failing that check is what
+        pushes an operator into turning verification off altogether.
+        """
+        if self.ca:
+            return {
+                "cert_reqs": ssl.CERT_REQUIRED,
+                "ca_certs": self.ca,
+                "check_hostname": False,
+            }
+        if self.verify_tls:
+            return {}  # library default: system trust store, hostname checked
+        return {"cert_reqs": ssl.CERT_NONE}
+
     def _connect(self) -> None:
         """Open the WS; refresh the token once and retry if the handshake 401s."""
         for attempt in (1, 2):
             if not self._token_valid():
                 self._fetch_token()
-            sslopt = {} if self.verify_tls else {"cert_reqs": ssl.CERT_NONE}
-            ws = websocket.WebSocket(sslopt=sslopt)
+            ws = websocket.WebSocket(sslopt=self._sslopt())
             try:
                 # The timeout belongs here, not on the constructor, which
                 # swallows unknown kwargs. Unbounded, a TAK host that blackholes

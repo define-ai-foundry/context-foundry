@@ -10,6 +10,8 @@ iter_events() that raises a sentinel exception on its second call, which
 deterministically escapes fusion_main's infinite loop.
 """
 
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -33,6 +35,25 @@ class _Detection:
 
 class _Stop(BaseException):
     """Sentinel used to escape fusion_main's infinite while-loop from a test."""
+
+
+class _FakeClock:
+    """Stands in for the wall clock the out-of-step gate reads.
+
+    The gate reads it once per event, so advancing a fixed step per read makes a
+    live run deterministic: event n is evaluated against a present of
+    start + n * step.
+    """
+
+    def __init__(self, start, step_seconds=1.0):
+        self.start = start
+        self.step = timedelta(seconds=step_seconds)
+        self.reads = 0
+
+    def now(self, tz=None):
+        reading = self.start + self.reads * self.step
+        self.reads += 1
+        return reading
 
 
 class _EventsOnceSource:
@@ -130,7 +151,11 @@ def test_missing_required_config_arg_exits(monkeypatch):
         cli.fusion_main()
 
 
-def test_sensor_config_load_failure_returns_without_raising(monkeypatch, caplog):
+def test_sensor_config_load_failure_exits_nonzero(monkeypatch, caplog):
+    """A startup misconfiguration must not exit 0: the runtime reports that as
+    'Completed', indistinguishable from a clean finish, and nothing alerting on
+    a non-zero exit fires."""
+
     def _raise(**kwargs):
         raise RuntimeError("bad config")
 
@@ -139,20 +164,20 @@ def test_sensor_config_load_failure_returns_without_raising(monkeypatch, caplog)
         "sys.argv", ["fusion", "--config", "sensors.json", "--replay-file", "x.json"]
     )
 
-    with caplog.at_level("ERROR"):
-        result = cli.fusion_main()
+    with caplog.at_level("ERROR"), pytest.raises(SystemExit) as exit_info:
+        cli.fusion_main()
 
-    assert result is None
+    assert exit_info.value.code == 1
     assert any("Failed to load sensor config" in r.message for r in caplog.records)
 
 
-def test_no_sources_enabled_returns_without_raising(monkeypatch, caplog):
+def test_no_sources_enabled_exits_nonzero(monkeypatch, caplog):
     monkeypatch.setattr("sys.argv", ["fusion", "--config", "sensors.json"])
 
-    with caplog.at_level("ERROR"):
-        result = cli.fusion_main()
+    with caplog.at_level("ERROR"), pytest.raises(SystemExit) as exit_info:
+        cli.fusion_main()
 
-    assert result is None
+    assert exit_info.value.code == 1
     assert any("No sources enabled" in r.message for r in caplog.records)
 
 
@@ -185,7 +210,7 @@ def test_replay_file_log_to_file_broadcasts_only_matching_timestamp(monkeypatch,
         ],
     )
 
-    with caplog.at_level("INFO"):
+    with caplog.at_level("DEBUG"):
         cli.fusion_main()
 
     assert any("Replay file processing complete" in r.message for r in caplog.records)
@@ -210,10 +235,10 @@ def test_no_sink_configured_errors_with_guidance(monkeypatch, caplog, tmp_path):
         ["fusion", "--config", "sensors.json", "--replay-file", str(replay_path)],
     )
 
-    with caplog.at_level("ERROR"):
-        result = cli.fusion_main()
+    with caplog.at_level("ERROR"), pytest.raises(SystemExit) as exit_info:
+        cli.fusion_main()
 
-    assert result is None
+    assert exit_info.value.code == 1
     # The error names both sinks so the operator knows how to proceed.
     assert any(
         "No output sink configured" in r.message
@@ -231,11 +256,11 @@ def test_enable_sapient_and_cot_reads_both_sources_concurrently(monkeypatch, cap
     sapient = _EventsOnceSource([(T0, [_Detection()])])
     cot = _EventsOnceSource([(T0, [_Detection()])])
 
-    def fake_sapient_stream(port):
+    def fake_sapient_stream(port, **_):
         created["sapient_port"] = port
         return sapient
 
-    def fake_cot_stream(port):
+    def fake_cot_stream(port, **_):
         created["cot_port"] = port
         return cot
 
@@ -351,6 +376,8 @@ def test_tak_ws_host_constructs_sink_streams_payload_and_closes(monkeypatch, cap
             client_secret=None,
             static_token=None,
             verify_tls=False,
+            ca=None,
+            token_timeout=None,
         ):
             created.update(
                 host=host,
@@ -520,7 +547,7 @@ def test_negative_loop_delay_clamps_to_zero(monkeypatch, tmp_path):
 
 def test_loop_without_replay_file_warns_and_is_noop(monkeypatch, caplog):
     monkeypatch.setattr(
-        cli, "NetworkSapientStream", lambda port: _EventsThenStopSource([(T0, [_Detection()])])
+        cli, "NetworkSapientStream", lambda port, **_: _EventsThenStopSource([(T0, [_Detection()])])
     )
     monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
@@ -546,7 +573,7 @@ def test_no_sink_message_names_the_ws_sink(monkeypatch, caplog, tmp_path):
         "sys.argv", ["fusion", "--config", "sensors.json", "--replay-file", str(replay_path)]
     )
 
-    with caplog.at_level("ERROR"):
+    with caplog.at_level("ERROR"), pytest.raises(SystemExit):
         cli.fusion_main()
 
     assert any("--tak-ws-host" in r.message for r in caplog.records)
@@ -686,10 +713,10 @@ def test_realtime_factor_without_replay_file_warns(monkeypatch, caplog):
         "sys.argv", ["fusion", "--config", "sensors.json", "--realtime-factor", "5"]
     )
 
-    with caplog.at_level("WARNING"):
-        result = cli.fusion_main()
+    with caplog.at_level("WARNING"), pytest.raises(SystemExit) as exit_info:
+        cli.fusion_main()
 
-    assert result is None  # falls through to "No sources enabled" and returns
+    assert exit_info.value.code == 1  # falls through to "No sources enabled"
     assert any("--realtime-factor has no effect" in r.message for r in caplog.records)
 
 
@@ -783,7 +810,7 @@ def test_default_offsets_replay_timestamps_and_still_broadcasts(monkeypatch, cap
         ["fusion", "--config", "sensors.json", "--replay-file", str(replay_path), "--log-to-file"],
     )
 
-    with caplog.at_level("INFO"):
+    with caplog.at_level("DEBUG"):
         cli.fusion_main()
 
     assert any("Broadcast Update for Track 0001" in r.message for r in caplog.records)
@@ -841,7 +868,7 @@ def test_use_scenario_timestamps_without_replay_file_warns(monkeypatch, caplog):
         "sys.argv", ["fusion", "--config", "sensors.json", "--use-scenario-timestamps"]
     )
 
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("WARNING"), pytest.raises(SystemExit):
         cli.fusion_main()
 
     assert any("--use-scenario-timestamps has no effect" in r.message for r in caplog.records)
@@ -924,7 +951,7 @@ def test_sigterm_handler_is_installed_and_stops_the_run(monkeypatch):
             handler(cli.signal.SIGTERM, None)
             yield  # pragma: no cover  -- the handler raises first
 
-    monkeypatch.setattr(cli, "NetworkSapientStream", lambda port: _SignalOnFirstEvent())
+    monkeypatch.setattr(cli, "NetworkSapientStream", lambda port, **_: _SignalOnFirstEvent())
     monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
 
@@ -973,7 +1000,7 @@ def test_events_older_than_the_last_processed_are_dropped(monkeypatch, caplog):
     monkeypatch.setattr(
         cli,
         "NetworkSapientStream",
-        lambda port: _EventsOnceSource(
+        lambda port, **_: _EventsOnceSource(
             [
                 (T0, [_Detection(T0)]),
                 (late, [_Detection(late, node_id="node-late")]),
@@ -1003,7 +1030,7 @@ def test_late_events_are_reported_periodically_not_once(monkeypatch, caplog):
     late = T0 - timedelta(seconds=5)
     events = [(T0, [_Detection(T0)])] + [(late, [_Detection(late)]) for _ in range(4)]
 
-    monkeypatch.setattr(cli, "NetworkSapientStream", lambda port: _EventsOnceSource(events))
+    monkeypatch.setattr(cli, "NetworkSapientStream", lambda port, **_: _EventsOnceSource(events))
     monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _EchoTracker("t-0001"))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
     monkeypatch.setattr(cli, "LATE_EVENT_REPORT_SECONDS", 0.0)  # report every drop
@@ -1034,7 +1061,7 @@ def test_a_future_stamped_live_event_does_not_become_the_watermark(monkeypatch, 
     events = [good[0], (far_future, [_Detection(far_future, node_id="node-fast")]), *good[1:]]
 
     tracker = _EchoTracker("future-track-0001")
-    monkeypatch.setattr(cli, "NetworkSapientStream", lambda port: _EventsOnceSource(events))
+    monkeypatch.setattr(cli, "NetworkSapientStream", lambda port, **_: _EventsOnceSource(events))
     monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: tracker)
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
     monkeypatch.setattr(
@@ -1049,6 +1076,102 @@ def test_a_future_stamped_live_event_does_not_become_the_watermark(monkeypatch, 
     reports = [r for r in caplog.records if "ahead of the present" in r.message]
     assert len(reports) == 1
     assert "node-fast" in reports[0].message
+
+
+def test_a_slightly_fast_sensor_does_not_drag_the_watermark_past_the_present(
+    monkeypatch, caplog, tmp_path
+):
+    """A sensor a few seconds fast is inside the future horizon, so its event is
+    fused -- but if it also set the watermark, every sensor reporting the actual
+    present would fall behind it and be dropped, one bad clock erasing the
+    picture the healthy sensors built.
+    """
+    monkeypatch.chdir(tmp_path)
+    clock = _FakeClock(T0)
+    monkeypatch.setattr(cli, "datetime", clock)
+
+    fast = T0 + timedelta(seconds=5)  # read 4s ahead of the present: inside the horizon
+    healthy = [T0, T0 + timedelta(seconds=2), T0 + timedelta(seconds=3)]
+    events = [
+        (healthy[0], [_Detection(healthy[0], node_id="node-a")]),
+        (fast, [_Detection(fast, node_id="node-fast")]),
+        (healthy[1], [_Detection(healthy[1], node_id="node-a")]),
+        (healthy[2], [_Detection(healthy[2], node_id="node-b")]),
+    ]
+
+    tracker = _EchoTracker("fast-track-0001")
+    monkeypatch.setattr(cli, "NetworkSapientStream", lambda port, **_: _EventsOnceSource(events))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: tracker)
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+    monkeypatch.setattr(
+        "sys.argv", ["fusion", "--config", "sensors.json", "--enable-sapient", "--log-to-file"]
+    )
+
+    with caplog.at_level("WARNING"), pytest.raises(SystemExit):
+        cli.fusion_main()
+
+    # Every event is fused, each with its own timestamp; nothing is dropped.
+    assert tracker.seen == [healthy[0], fast, healthy[1], healthy[2]]
+    assert not [r for r in caplog.records if "out of step" in r.message]
+
+
+def test_the_drop_warning_names_the_sensor_that_set_the_watermark(monkeypatch, caplog, tmp_path):
+    """Naming only the dropped event's sensor blames the victim: in a mixed-clock
+    network the sensor that set the mark is the one to go and look at."""
+    monkeypatch.chdir(tmp_path)
+    clock = _FakeClock(T0)
+    monkeypatch.setattr(cli, "datetime", clock)
+
+    fast = T0 + timedelta(seconds=5)
+    # Beyond the lateness tolerance, so these are a disagreeing clock rather than
+    # the ordinary arrival delay the gate has to let through.
+    late = T0 - timedelta(seconds=30)
+    later = T0 - timedelta(seconds=29)
+    events = [
+        (T0, [_Detection(T0, node_id="node-a")]),
+        (fast, [_Detection(fast, node_id="node-fast")]),
+        (late, [_Detection(late, node_id="node-late")]),
+        (later, [_Detection(later, node_id="node-late")]),
+    ]
+
+    monkeypatch.setattr(cli, "NetworkSapientStream", lambda port, **_: _EventsOnceSource(events))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _EchoTracker("mark-track-0001"))
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+    monkeypatch.setattr(
+        "sys.argv", ["fusion", "--config", "sensors.json", "--enable-sapient", "--log-to-file"]
+    )
+
+    with caplog.at_level("WARNING"), pytest.raises(SystemExit):
+        cli.fusion_main()
+
+    # Two drops, one report: the warning is rate-limited, not one line per packet.
+    (report,) = [r for r in caplog.records if "behind the newest event" in r.message]
+    assert "node-late" in report.message  # the event that was dropped
+    assert "node-fast" in report.message  # the event that set the mark it fell behind
+
+
+def test_the_drop_warning_reports_an_unset_watermark(monkeypatch, caplog, tmp_path):
+    """The first event of a run can itself be the one dropped, leaving no sensor
+    to name as having set the mark."""
+    monkeypatch.chdir(tmp_path)
+    clock = _FakeClock(T0)
+    monkeypatch.setattr(cli, "datetime", clock)
+
+    far = T0 + timedelta(minutes=5)
+    events = [(far, [_Detection(far, node_id="node-fast")])]
+
+    monkeypatch.setattr(cli, "NetworkSapientStream", lambda port, **_: _EventsOnceSource(events))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _EchoTracker("none-track-0001"))
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+    monkeypatch.setattr(
+        "sys.argv", ["fusion", "--config", "sensors.json", "--enable-sapient", "--log-to-file"]
+    )
+
+    with caplog.at_level("WARNING"), pytest.raises(SystemExit):
+        cli.fusion_main()
+
+    (report,) = [r for r in caplog.records if "ahead of the present" in r.message]
+    assert "no event accepted yet" in report.message
 
 
 def test_a_replay_running_ahead_of_the_wall_clock_is_not_gated(monkeypatch, caplog, tmp_path):
@@ -1081,3 +1204,243 @@ def test_a_replay_running_ahead_of_the_wall_clock_is_not_gated(monkeypatch, capl
 
     assert tracker.seen == [ahead]
     assert not [r for r in caplog.records if "out of step" in r.message]
+
+
+def _run_replay_events(monkeypatch, tmp_path, events, tracker, extra_argv=()):
+    """Drive one unpaced replay pass over `events` with a file sink."""
+    monkeypatch.chdir(tmp_path)
+    replay_path = tmp_path / "scenario.json"
+    replay_path.write_text("[]", encoding="utf-8")
+
+    monkeypatch.setattr(cli, "JsonSapientSource", lambda path: _EventsOnceSource(events))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: tracker)
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "fusion",
+            "--config",
+            "sensors.json",
+            "--replay-file",
+            str(replay_path),
+            "--use-scenario-timestamps",
+            "--realtime-factor",
+            "0",
+            "--log-to-file",
+            *extra_argv,
+        ],
+    )
+    cli.fusion_main()
+
+
+def test_one_info_line_per_event_replaces_the_per_track_broadcast_lines(
+    monkeypatch, caplog, tmp_path
+):
+    """A line per track per event is ~20 a second on a busy picture, which buries
+    the once-a-minute drop warnings in it."""
+    tracks = [_fake_track("summary-track-0001", T0), _fake_track("summary-track-0002", T0)]
+    events = [(T0, [_Detection(T0), _Detection(T0)])]
+
+    with caplog.at_level("DEBUG"):
+        _run_replay_events(monkeypatch, tmp_path, events, _FakeTracker([tracks]))
+
+    per_track = [r for r in caplog.records if "Broadcast Update for Track" in r.message]
+    assert len(per_track) == 2
+    assert {r.levelname for r in per_track} == {"DEBUG"}
+
+    (per_event,) = [r for r in caplog.records if "Fused event at" in r.message]
+    assert per_event.levelname == "INFO"
+    assert "2 detection(s) in, 2 track(s) broadcast" in per_event.message
+
+
+def test_the_counters_track_what_the_engine_actually_did(monkeypatch, caplog, tmp_path):
+    """An engine that is up but fusing nothing logs the same startup lines as a
+    healthy one; the counters are what separate them, so they have to be right."""
+    events = [
+        (T0 + timedelta(seconds=i), [_Detection(T0 + timedelta(seconds=i))]) for i in range(3)
+    ]
+
+    with caplog.at_level("INFO"):
+        _run_replay_events(monkeypatch, tmp_path, events, _EchoTracker("periodic-track-0001"))
+
+    (final,) = [r for r in caplog.records if "Fusion totals at shutdown" in r.message]
+    assert "3 event(s) fused" in final.message
+    assert "3 detection(s) ingested" in final.message
+    assert "3 CoT message(s) sent" in final.message
+    assert "0 event(s) dropped out of step" in final.message
+
+
+def test_summary_is_rate_limited_and_flushed_on_shutdown(monkeypatch, caplog, tmp_path):
+    events = [
+        (T0 + timedelta(seconds=i), [_Detection(T0 + timedelta(seconds=i))]) for i in range(3)
+    ]
+
+    with caplog.at_level("INFO"):
+        _run_replay_events(monkeypatch, tmp_path, events, _EchoTracker("shutdown-track-0001"))
+
+    # Default interval: nothing periodic in a run this short.
+    assert not [r for r in caplog.records if "Fusion summary" in r.message]
+
+    (final,) = [r for r in caplog.records if "Fusion totals at shutdown" in r.message]
+    assert final.levelname == "INFO"
+    assert "3 event(s) fused" in final.message
+    assert "3 detection(s) ingested" in final.message
+    assert "3 CoT message(s) sent" in final.message
+    assert "0 event(s) dropped out of step" in final.message
+
+
+def test_shutdown_summary_counts_dropped_events(monkeypatch, caplog, tmp_path):
+    """Arriving-and-dropped has to read differently from nothing-arriving."""
+    late = T0 - timedelta(seconds=5)
+    events = [(T0, [_Detection(T0)]), (late, [_Detection(late, node_id="node-late")])]
+
+    with caplog.at_level("INFO"):
+        _run_replay_events(monkeypatch, tmp_path, events, _EchoTracker("dropped-track-0001"))
+
+    (final,) = [r for r in caplog.records if "Fusion totals at shutdown" in r.message]
+    assert "1 event(s) fused" in final.message
+    assert "1 event(s) dropped out of step" in final.message
+
+
+def test_the_summary_is_reported_even_when_nothing_arrives(monkeypatch, caplog):
+    """An ingress that has gone quiet is the state most worth reporting, and a
+    loop-driven report is silent exactly then."""
+    monkeypatch.setattr(cli, "SUMMARY_REPORT_SECONDS", 0.02)
+    counters = {"events": 0, "detections": 0, "cot": 0, "dropped": 0}
+
+    with caplog.at_level("INFO"):
+        stop = cli._start_summary_reporter(counters)
+        time.sleep(0.12)
+        stop.set()
+
+    summaries = [r for r in caplog.records if "Fusion summary" in r.message]
+    assert len(summaries) >= 2
+    assert "0 event(s) fused" in summaries[0].message
+
+
+def test_the_summary_reporter_stops_when_told(monkeypatch, caplog):
+    monkeypatch.setattr(cli, "SUMMARY_REPORT_SECONDS", 0.02)
+    stop = cli._start_summary_reporter({"events": 0, "detections": 0, "cot": 0, "dropped": 0})
+    stop.set()
+    time.sleep(0.08)
+
+    with caplog.at_level("INFO"):
+        time.sleep(0.08)
+
+    assert not [r for r in caplog.records if "Fusion summary" in r.message]
+    assert not [t for t in threading.enumerate() if t.name == "summary-reporter"]
+
+
+def test_the_frame_window_reaches_both_live_sources(monkeypatch):
+    """A sweep spread over more than the window splits into single-detection
+    events, so an operator whose sensors are jittery has to be able to raise it."""
+    windows = {}
+    monkeypatch.setattr(
+        cli,
+        "NetworkSapientStream",
+        lambda port, frame_window_seconds: (
+            windows.setdefault("sapient", frame_window_seconds) or _EventsOnceSource([])
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "CotNetworkStream",
+        lambda port, frame_window_seconds: (
+            windows.setdefault("cot", frame_window_seconds) or _EventsOnceSource([])
+        ),
+    )
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "fusion",
+            "--config",
+            "sensors.json",
+            "--enable-sapient",
+            "--enable-cot",
+            "--log-to-file",
+            "--frame-window-seconds",
+            "0.4",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        cli.fusion_main()
+
+    assert windows == {"sapient": 0.4, "cot": 0.4}
+
+
+def test_the_tak_ws_trust_and_token_timeout_flags_reach_the_sink(monkeypatch, tmp_path):
+    """verify_tls cannot verify a TAK server dialled by a name its cert does not
+    carry, so the CA is the only usable prod setting -- it has to arrive."""
+    replay_path = tmp_path / "scenario.json"
+    replay_path.write_text("[]", encoding="utf-8")
+    built = {}
+
+    class _FakeTakWsSink:
+        def __init__(self, host, port, **kwargs):
+            built.update(kwargs)
+
+        def send(self, payload):  # pragma: no cover  -- no event is emitted
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cli, "TakWsSink", _FakeTakWsSink)
+    monkeypatch.setattr(cli, "JsonSapientSource", lambda path: _EventsOnceSource([]))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "fusion",
+            "--config",
+            "sensors.json",
+            "--replay-file",
+            str(replay_path),
+            "--tak-ws-host",
+            "tak-server.tak.svc.cluster.local",
+            "--tak-ws-ca",
+            "/etc/context-foundry-tak-ca/ca.crt",
+            "--tak-ws-token-timeout",
+            "3",
+        ],
+    )
+
+    cli.fusion_main()
+
+    assert built["ca"] == "/etc/context-foundry-tak-ca/ca.crt"
+    assert built["token_timeout"] == 3.0
+
+
+def test_an_event_within_the_lateness_tolerance_is_still_fused(monkeypatch, caplog, tmp_path):
+    """A sensor stamps before it transmits, so every event arrives a little in the
+    past while the mark is pinned to the present. With no tolerance a sender whose
+    clock runs ahead pulls the mark up to now and every healthy sensor behind it
+    is refused -- measured as a total blackout from one datagram per second."""
+    monkeypatch.chdir(tmp_path)
+    clock = _FakeClock(T0)
+    monkeypatch.setattr(cli, "datetime", clock)
+
+    ahead = T0 + timedelta(seconds=9)  # inside the future horizon, so it sets the mark
+    healthy = T0 - timedelta(milliseconds=300)  # ordinary flight + assembly delay
+    tracker = _EchoTracker("tolerance-track-0001")
+    events = [
+        (ahead, [_Detection(ahead, node_id="node-ahead")]),
+        (healthy, [_Detection(healthy, node_id="node-healthy")]),
+    ]
+
+    monkeypatch.setattr(cli, "NetworkSapientStream", lambda port, **_: _EventsOnceSource(events))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: tracker)
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+    monkeypatch.setattr(
+        "sys.argv", ["fusion", "--config", "sensors.json", "--enable-sapient", "--log-to-file"]
+    )
+
+    with caplog.at_level("WARNING"), pytest.raises(SystemExit):
+        cli.fusion_main()
+
+    assert tracker.seen == [ahead, healthy]
+    assert not [r for r in caplog.records if "behind the newest event" in r.message]
