@@ -3,6 +3,7 @@
 
 import logging
 import math
+import time
 from datetime import timezone
 from typing import Any
 
@@ -18,9 +19,52 @@ from sapient_msg.bsi_flex_335_v2_0.sapient_message_pb2 import SapientMessage
 
 logger = logging.getLogger(__name__)
 
-# Node IDs already reported as unregistered, so the explanation is logged once per node
-# instead of once per datagram.
+# Node ids already reported as unregistered, so the explanation is logged once per
+# node instead of once per datagram. Bounded, and the reporting rate-limited with
+# it: the id comes off an unauthenticated socket, so an unbounded set is a node id
+# per spoofed datagram in memory and a warning per datagram in the log.
 _UNREGISTERED_NODES_SEEN: set[str] = set()
+MAX_UNREGISTERED_NODES_TRACKED = 64
+UNREGISTERED_REPORT_SECONDS = 60.0
+_unregistered_seen_count = 0
+_next_unregistered_report = 0.0
+
+
+def _report_unregistered_node(node_id: str) -> None:
+    """Name an unregistered node once, without letting the wire size the bookkeeping.
+
+    A handful of misconfigured sensors is the ordinary case and each is worth
+    naming, so ids are remembered and reported individually while there is room.
+    Past that the sender is inventing ids rather than misconfigured, and both the
+    set and the log switch to a rate-limited count -- otherwise an unauthenticated
+    socket sizes both.
+    """
+    global _unregistered_seen_count, _next_unregistered_report
+
+    if node_id in _UNREGISTERED_NODES_SEEN:
+        return
+    _unregistered_seen_count += 1
+
+    if len(_UNREGISTERED_NODES_SEEN) < MAX_UNREGISTERED_NODES_TRACKED:
+        _UNREGISTERED_NODES_SEEN.add(node_id)
+        logger.warning(
+            f"Node '{node_id}' is not in the sensor registry; its range/bearing "
+            "detections cannot be geolocated and will be dropped. Add it to the "
+            "sensor manifest to ingest them."
+        )
+        return
+
+    if time.monotonic() < _next_unregistered_report:
+        return
+    _next_unregistered_report = time.monotonic() + UNREGISTERED_REPORT_SECONDS
+    logger.warning(
+        "More than %d unregistered node ids seen (%d so far), most recently '%s'. Something is "
+        "sending under ids that are not in the sensor manifest; their range/bearing detections "
+        "are dropped.",
+        MAX_UNREGISTERED_NODES_TRACKED,
+        _unregistered_seen_count,
+        node_id,
+    )
 
 
 class SapientValidator(ProtocolValidator):
@@ -59,13 +103,7 @@ class SapientValidator(ProtocolValidator):
         """
         sensor = config.get_sensor(node_id)
         if sensor is None:
-            if node_id not in _UNREGISTERED_NODES_SEEN:
-                _UNREGISTERED_NODES_SEEN.add(node_id)
-                logger.warning(
-                    f"Node '{node_id}' is not in the sensor registry; its range/bearing "
-                    "detections cannot be geolocated and will be dropped. Add it to the "
-                    "sensor manifest to ingest them."
-                )
+            _report_unregistered_node(node_id)
             raise ValueError(f"range_bearing detection from unregistered node '{node_id}'.")
 
         # Azimuth is clockwise from the node's north; elevation is above its horizon,

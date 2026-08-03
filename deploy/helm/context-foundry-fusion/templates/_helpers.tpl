@@ -78,10 +78,57 @@ In-container path to the mounted --config JSON.
 {{- end }}
 
 {{/*
-Does a live UDP source require a Service?
+Directory the TAK CA bundle Secret is mounted at. Deliberately NOT under
+/etc/context-foundry, which is already a configMap mount.
+*/}}
+{{- define "context-foundry-fusion.caDir" -}}
+/etc/context-foundry-tak-ca
+{{- end }}
+
+{{/*
+In-container path to the mounted TAK CA bundle (dir + the Secret's key).
+*/}}
+{{- define "context-foundry-fusion.caPath" -}}
+{{- printf "%s/%s" (include "context-foundry-fusion.caDir" .) .Values.sinks.takWs.caSecret.key }}
+{{- end }}
+
+{{/*
+Is a TAK CA bundle Secret configured?
+*/}}
+{{- define "context-foundry-fusion.caEnabled" -}}
+{{- if .Values.sinks.takWs.caSecret.name }}true{{- end }}
+{{- end }}
+
+{{/*
+Is a live UDP source enabled (i.e. does the pod listen on a socket)?
+*/}}
+{{- define "context-foundry-fusion.liveSource" -}}
+{{- if or .Values.sources.sapient.enabled .Values.sources.cot.enabled }}true{{- end }}
+{{- end }}
+
+{{/*
+Does a live UDP source require a Service? A host-level ingress path (hostPorts /
+hostNetwork) already delivers the datagrams, so no Service is rendered for it
+unless service.enabled asks for one explicitly.
 */}}
 {{- define "context-foundry-fusion.needsService" -}}
-{{- if or .Values.service.enabled .Values.sources.sapient.enabled .Values.sources.cot.enabled }}true{{- end }}
+{{- $hostIngress := or .Values.hostPorts.enabled .Values.hostNetwork.enabled }}
+{{- if or .Values.service.enabled (and (include "context-foundry-fusion.liveSource" .) (not $hostIngress)) }}true{{- end }}
+{{- end }}
+
+{{/*
+Pod dnsPolicy: explicit value wins, else ClusterFirstWithHostNet whenever
+hostNetwork is on (without it the pod resolves against the node's resolv.conf
+and the in-cluster TAK service name does not resolve).
+*/}}
+{{- define "context-foundry-fusion.dnsPolicy" -}}
+{{- if .Values.dnsPolicy }}
+{{- .Values.dnsPolicy }}
+{{- else if .Values.hostNetwork.enabled }}
+{{- "ClusterFirstWithHostNet" }}
+{{- else }}
+{{- "ClusterFirst" }}
+{{- end }}
 {{- end }}
 
 {{/*
@@ -126,6 +173,16 @@ Does the chart need to render its own Secret (an inline value with no existing S
 {{- end }}
 
 {{/*
+One tracker bound as a string, empty when unset (null, or no tracker map at all)
+so callers can treat "unset" and "leave the app's default" as the same thing.
+Args: dict "values" .Values.tracker "key" <name>.
+*/}}
+{{- define "context-foundry-fusion.trackerBound" -}}
+{{- $v := get (default dict .values) .key }}
+{{- if not (kindIs "invalid" $v) }}{{ $v }}{{ end }}
+{{- end }}
+
+{{/*
 Source/sink contract validation. Fails template rendering with a clear message
 if there are zero sources or zero sinks configured.
 */}}
@@ -142,6 +199,53 @@ if there are zero sources or zero sinks configured.
 {{- end }}
 {{- if not .Values.sinks.takWs.enabled }}
 {{- fail "context-foundry-fusion: no SINK configured. Enable sinks.takWs.enabled (the WebTAK WebSocket sink)." }}
+{{- end }}
+{{- /* --- sink auth: the WS sink refuses to connect unauthenticated --- */}}
+{{- if .Values.sinks.takWs.enabled }}
+{{- $auth := .Values.sinks.takWs.auth }}
+{{- if and $auth.keycloakTokenUrl (not $auth.oidcClientId) }}
+{{- fail "context-foundry-fusion: sinks.takWs.auth.keycloakTokenUrl is set but sinks.takWs.auth.oidcClientId is empty -- the chart would render `--oidc-client-id ''`, which the WS sink treats as no client id at all and rejects at startup. Set sinks.takWs.auth.oidcClientId to the Keycloak client (per-group cf-<group>)." }}
+{{- end }}
+{{- if not (or (and $auth.keycloakTokenUrl $auth.oidcClientId) (include "context-foundry-fusion.bearerEnabled" .)) }}
+{{- fail "context-foundry-fusion: the WebTAK-WS sink has no AUTH configured, and it cannot connect without one -- the container would exit at startup, so the chart refuses to render. Set EITHER the Keycloak client_credentials trio: sinks.takWs.auth.keycloakTokenUrl, sinks.takWs.auth.oidcClientId, sinks.takWs.auth.oidcClientSecret.secretName (or .value for dev) -- OR a static bearer token: sinks.takWs.auth.bearerToken.secretName (or .value)." }}
+{{- end }}
+{{- end }}
+{{- /* --- tracker bounds: counts, and 0 would silently stop all tracking --- */}}
+{{- range $k := list "maxLiveTracks" "maxTrackHistory" "maxEventDetections" }}
+{{- $v := include "context-foundry-fusion.trackerBound" (dict "values" $.Values.tracker "key" $k) }}
+{{- if and $v (le (int $v) 0) }}
+{{- fail (printf "context-foundry-fusion: tracker.%s must be a positive count (got %v) -- 0 or less leaves the tracker with nothing to keep or nothing to associate, and the picture is silently empty. Leave it null to take the app's own default." $k $v) }}
+{{- end }}
+{{- end }}
+{{- /* --- the coast horizon is seconds, not a count: compare as a float so a sub-second value survives --- */}}
+{{- $coast := include "context-foundry-fusion.trackerBound" (dict "values" .Values.tracker "key" "maxCoastSeconds") }}
+{{- if and $coast (le (float64 $coast) 0.0) }}
+{{- fail (printf "context-foundry-fusion: tracker.maxCoastSeconds must be > 0 (got %v) -- a track that cannot coast at all is dropped as soon as the sweep that made it ends, so every sweep re-initiates the whole picture and nothing is fused across sensors. It has to exceed the sensors' revisit interval. Leave it null to take the app's own default." $coast) }}
+{{- end }}
+{{- /* --- sensor ingress --- */}}
+{{- $live := include "context-foundry-fusion.liveSource" . }}
+{{- if and .Values.hostNetwork.enabled .Values.hostPorts.enabled }}
+{{- fail "context-foundry-fusion: hostNetwork.enabled and hostPorts.enabled are mutually exclusive -- with hostNetwork the container already binds the node's ports directly, so a hostPort mapping has nothing to map. Pick one." }}
+{{- end }}
+{{- if and .Values.service.enabled (not $live) }}
+{{- fail "context-foundry-fusion: service.enabled is true but no live source is enabled -- the only Service ports are the sensor listeners (UDP 5000 sapient, UDP 6969 cot), so the Service would have no ports and the API server would reject it. The WS sink is outbound and needs no Service." }}
+{{- end }}
+{{- if and (or .Values.hostNetwork.enabled .Values.hostPorts.enabled) (not $live) }}
+{{- fail "context-foundry-fusion: hostNetwork/hostPorts claim node ports for the sensor listeners, but no live source is enabled. Enable sources.sapient.enabled and/or sources.cot.enabled, or turn them off." }}
+{{- end }}
+{{- if eq .Values.service.type "ClusterIP" }}
+{{- if or .Values.service.nodePorts.sapient .Values.service.nodePorts.cot }}
+{{- fail "context-foundry-fusion: service.nodePorts is set but service.type is ClusterIP, which has no node ports -- the pinned port would be silently ignored and sensors would still have nowhere to send. Set service.type=NodePort (or use hostPorts/hostNetwork)." }}
+{{- end }}
+{{- end }}
+{{- if and .Values.service.nodePorts.sapient (not .Values.sources.sapient.enabled) }}
+{{- fail "context-foundry-fusion: service.nodePorts.sapient is set but sources.sapient.enabled is false -- no SAPIENT port is published, so the pin does nothing." }}
+{{- end }}
+{{- if and .Values.service.nodePorts.cot (not .Values.sources.cot.enabled) }}
+{{- fail "context-foundry-fusion: service.nodePorts.cot is set but sources.cot.enabled is false -- no CoT port is published, so the pin does nothing." }}
+{{- end }}
+{{- if and .Values.sources.cot.enabled (ne .Values.service.type "ClusterIP") (eq .Values.service.externalTrafficPolicy "Cluster") }}
+{{- fail "context-foundry-fusion: sources.cot.enabled with service.externalTrafficPolicy=Cluster silently corrupts the fused picture. kube-proxy masquerades the source address to the node IP, and the CoT source keys frame assembly on the sender's peer address (a CoT event's uid names the object observed, not the sender), so every external emitter collapses to one key, their reports merge into single events and the associator initiates duplicate tracks from them. Set service.externalTrafficPolicy=Local, or take the sensor traffic in via hostPorts/hostNetwork." }}
 {{- end }}
 {{- end }}
 
@@ -173,12 +277,42 @@ Secrets are referenced as $(VAR) — the literal is NEVER placed in args.
 {{- if .Values.sources.cot.enabled }}
 - --enable-cot
 {{- end }}
+{{- /* kindIs, not truthiness: an explicit 0 must reach the app, not be dropped. */}}
+{{- if and (include "context-foundry-fusion.liveSource" .) (not (kindIs "invalid" .Values.sources.frameWindowSeconds)) }}
+- --frame-window-seconds
+- {{ .Values.sources.frameWindowSeconds | quote }}
+{{- end }}
+{{- /* --- tracker bounds (both sources; null keeps the app's own default) --- */}}
+{{- $maxLiveTracks := include "context-foundry-fusion.trackerBound" (dict "values" .Values.tracker "key" "maxLiveTracks") }}
+{{- if $maxLiveTracks }}
+- --max-live-tracks
+- {{ $maxLiveTracks | quote }}
+{{- end }}
+{{- $maxTrackHistory := include "context-foundry-fusion.trackerBound" (dict "values" .Values.tracker "key" "maxTrackHistory") }}
+{{- if $maxTrackHistory }}
+- --max-track-history
+- {{ $maxTrackHistory | quote }}
+{{- end }}
+{{- $maxCoastSeconds := include "context-foundry-fusion.trackerBound" (dict "values" .Values.tracker "key" "maxCoastSeconds") }}
+{{- if $maxCoastSeconds }}
+- --max-coast-seconds
+- {{ $maxCoastSeconds | quote }}
+{{- end }}
+{{- $maxEventDetections := include "context-foundry-fusion.trackerBound" (dict "values" .Values.tracker "key" "maxEventDetections") }}
+{{- if $maxEventDetections }}
+- --max-event-detections
+- {{ $maxEventDetections | quote }}
+{{- end }}
 {{- /* --- sink: WebTAK WebSocket --- */}}
 {{- if .Values.sinks.takWs.enabled }}
 - --tak-ws-host
 - {{ .Values.sinks.takWs.host | quote }}
 - --tak-ws-port
 - {{ .Values.sinks.takWs.port | quote }}
+{{- if include "context-foundry-fusion.caEnabled" . }}
+- --tak-ws-ca
+- {{ include "context-foundry-fusion.caPath" . | quote }}
+{{- end }}
 {{- if .Values.sinks.takWs.verifyTls }}
 - --tak-ws-verify-tls
 {{- end }}
@@ -187,6 +321,10 @@ Secrets are referenced as $(VAR) — the literal is NEVER placed in args.
 - {{ .Values.sinks.takWs.auth.keycloakTokenUrl | quote }}
 - --oidc-client-id
 - {{ .Values.sinks.takWs.auth.oidcClientId | quote }}
+{{- if not (kindIs "invalid" .Values.sinks.takWs.auth.tokenTimeoutSeconds) }}
+- --tak-ws-token-timeout
+- {{ .Values.sinks.takWs.auth.tokenTimeoutSeconds | quote }}
+{{- end }}
 {{- if include "context-foundry-fusion.oidcSecretEnabled" . }}
 - --oidc-client-secret
 - $(OIDC_CLIENT_SECRET)

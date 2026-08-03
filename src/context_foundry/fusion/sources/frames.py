@@ -56,8 +56,8 @@ class FrameAssembler:
     may carry several detections: JsonSapientSource groups the replay file by
     (timestamp, sensor) and yields a sweep as one multi-detection event. A UDP
     socket sees one datagram at a time, and yielding each on its own changes the
-    fusion result -- JPDA associates a single hit per event and coasts every
-    other track in between -- and emits one CoT per detection instead of one per
+    fusion result -- the associator matches a single hit per track per event and
+    coasts every other track in between -- and emits one CoT per detection instead of one per
     sweep.
 
     Several frames are open at once, one per key. Closing on a key change instead

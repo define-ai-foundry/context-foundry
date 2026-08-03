@@ -194,7 +194,9 @@ def test_replay_file_log_to_file_broadcasts_only_matching_timestamp(monkeypatch,
     monkeypatch.setattr(
         cli, "JsonSapientSource", lambda path: _EventsOnceSource([(T0, [_Detection()])])
     )
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[fresh, stale]]))
+    monkeypatch.setattr(
+        cli, "SapientAsynchronousTracker", lambda **_: _FakeTracker([[fresh, stale]])
+    )
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
 
     monkeypatch.setattr(
@@ -227,7 +229,7 @@ def test_no_sink_configured_errors_with_guidance(monkeypatch, caplog, tmp_path):
     replay_path.write_text("[]", encoding="utf-8")
 
     monkeypatch.setattr(cli, "JsonSapientSource", lambda path: _EventsOnceSource([]))
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: _FakeTracker([[]]))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
 
     monkeypatch.setattr(
@@ -266,7 +268,7 @@ def test_enable_sapient_and_cot_reads_both_sources_concurrently(monkeypatch, cap
 
     monkeypatch.setattr(cli, "NetworkSapientStream", fake_sapient_stream)
     monkeypatch.setattr(cli, "CotNetworkStream", fake_cot_stream)
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[], []]))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: _FakeTracker([[], []]))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
 
     monkeypatch.setattr(
@@ -295,7 +297,7 @@ def test_tak_tls_host_constructs_sink_streams_payload_and_closes(monkeypatch, ca
     monkeypatch.setattr(
         cli, "JsonSapientSource", lambda path: _EventsOnceSource([(T0, [_Detection()])])
     )
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[track]]))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: _FakeTracker([[track]]))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
 
     created = {}
@@ -360,7 +362,7 @@ def test_tak_ws_host_constructs_sink_streams_payload_and_closes(monkeypatch, cap
     monkeypatch.setattr(
         cli, "JsonSapientSource", lambda path: _EventsOnceSource([(T0, [_Detection()])])
     )
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[track]]))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: _FakeTracker([[track]]))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
 
     created = {}
@@ -449,7 +451,7 @@ def _run_looping_replay(monkeypatch, tmp_path, extra_argv):
     track = _fake_track("loop-track-01", T0)
     tracker_count = {"n": 0}
 
-    def _make_tracker():
+    def _make_tracker(**_):
         tracker_count["n"] += 1
         return _FakeTracker([[track]])
 
@@ -500,7 +502,7 @@ def test_loop_continues_to_a_second_iteration(monkeypatch, tmp_path):
     source = _ResettableEventsSource([(T0, [_Detection()])])
     track = _fake_track("loop-track-02", T0)
     monkeypatch.setattr(cli, "JsonSapientSource", lambda path: source)
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[track]]))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: _FakeTracker([[track]]))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
 
     sleeps = []
@@ -549,7 +551,7 @@ def test_loop_without_replay_file_warns_and_is_noop(monkeypatch, caplog):
     monkeypatch.setattr(
         cli, "NetworkSapientStream", lambda port, **_: _EventsThenStopSource([(T0, [_Detection()])])
     )
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: _FakeTracker([[]]))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
     monkeypatch.setattr(
         "sys.argv",
@@ -567,7 +569,7 @@ def test_no_sink_message_names_the_ws_sink(monkeypatch, caplog, tmp_path):
     replay_path.write_text("[]", encoding="utf-8")
 
     monkeypatch.setattr(cli, "JsonSapientSource", lambda path: _EventsOnceSource([]))
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: _FakeTracker([[]]))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
     monkeypatch.setattr(
         "sys.argv", ["fusion", "--config", "sensors.json", "--replay-file", str(replay_path)]
@@ -617,7 +619,7 @@ def test_default_wraps_replay_source_in_realtime_replay_source_at_factor_one(mon
     inner = _EventsOnceSource([(T0, [_Detection()])])
     monkeypatch.setattr(cli, "JsonSapientSource", lambda path: inner)
     built = _patch_realtime_wrapper(monkeypatch)
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: _FakeTracker([[]]))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
 
     monkeypatch.setattr(
@@ -643,7 +645,7 @@ def test_realtime_factor_flag_sets_factor_on_the_wrapper(monkeypatch, tmp_path):
     inner = _EventsOnceSource([(T0, [_Detection()])])
     monkeypatch.setattr(cli, "JsonSapientSource", lambda path: inner)
     built = _patch_realtime_wrapper(monkeypatch)
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: _FakeTracker([[]]))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
 
     monkeypatch.setattr(
@@ -673,7 +675,7 @@ def test_realtime_factor_zero_does_not_wrap_and_logs_unpaced(monkeypatch, caplog
     inner = _EventsOnceSource([(T0, [_Detection()])])
     monkeypatch.setattr(cli, "JsonSapientSource", lambda path: inner)
     built = _patch_realtime_wrapper(monkeypatch)
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: _FakeTracker([[]]))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
 
     monkeypatch.setattr(
@@ -729,7 +731,7 @@ def test_file_and_tak_tls_sinks_are_both_active(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cli, "JsonSapientSource", lambda path: _EventsOnceSource([(T0, [_Detection()])])
     )
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[track]]))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: _FakeTracker([[track]]))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
 
     tls_sent = []
@@ -802,7 +804,7 @@ def test_default_offsets_replay_timestamps_and_still_broadcasts(monkeypatch, cap
         "JsonSapientSource",
         lambda path: _EventsOnceSource([(scenario_time, [_Detection(scenario_time)])]),
     )
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: tracker)
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: tracker)
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
 
     monkeypatch.setattr(
@@ -838,7 +840,7 @@ def test_use_scenario_timestamps_keeps_the_file_clock_and_skips_the_wrapper(
         "JsonSapientSource",
         lambda path: _EventsOnceSource([(scenario_time, [_Detection(scenario_time)])]),
     )
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: tracker)
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: tracker)
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
     built = _patch_realtime_wrapper(monkeypatch)
 
@@ -885,7 +887,7 @@ def test_cot_stale_seconds_flag_reaches_the_serializer(monkeypatch, tmp_path):
         lambda stale_seconds: built.append(stale_seconds) or _FakeAugmentor(),
     )
     monkeypatch.setattr(cli, "JsonSapientSource", lambda path: _EventsOnceSource([]))
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: _FakeTracker([[]]))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
 
     monkeypatch.setattr(
@@ -918,7 +920,7 @@ def test_cot_stale_seconds_defaults_to_the_serializer_default(monkeypatch, tmp_p
         lambda stale_seconds: built.append(stale_seconds) or _FakeAugmentor(),
     )
     monkeypatch.setattr(cli, "JsonSapientSource", lambda path: _EventsOnceSource([]))
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: _FakeTracker([[]]))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
 
     monkeypatch.setattr(
@@ -952,7 +954,7 @@ def test_sigterm_handler_is_installed_and_stops_the_run(monkeypatch):
             yield  # pragma: no cover  -- the handler raises first
 
     monkeypatch.setattr(cli, "NetworkSapientStream", lambda port, **_: _SignalOnFirstEvent())
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: _FakeTracker([[]]))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
 
     closed = []
@@ -1008,7 +1010,7 @@ def test_events_older_than_the_last_processed_are_dropped(monkeypatch, caplog):
             ]
         ),
     )
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: tracker)
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: tracker)
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
     monkeypatch.setattr(
         "sys.argv", ["fusion", "--config", "sensors.json", "--enable-sapient", "--log-to-file"]
@@ -1031,7 +1033,7 @@ def test_late_events_are_reported_periodically_not_once(monkeypatch, caplog):
     events = [(T0, [_Detection(T0)])] + [(late, [_Detection(late)]) for _ in range(4)]
 
     monkeypatch.setattr(cli, "NetworkSapientStream", lambda port, **_: _EventsOnceSource(events))
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _EchoTracker("t-0001"))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: _EchoTracker("t-0001"))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
     monkeypatch.setattr(cli, "LATE_EVENT_REPORT_SECONDS", 0.0)  # report every drop
     monkeypatch.setattr(
@@ -1055,14 +1057,17 @@ def test_a_future_stamped_live_event_does_not_become_the_watermark(monkeypatch, 
     the engine for the rest of the run."""
     now = datetime.now(timezone.utc)
     far_future = now + timedelta(hours=6)
+    # Stamped just behind the present, the way a healthy sensor does: the live
+    # run's clamp then leaves these timestamps exactly as they are.
     good = [
-        (now + timedelta(seconds=i), [_Detection(now + timedelta(seconds=i))]) for i in range(3)
+        (now - timedelta(seconds=3 - i), [_Detection(now - timedelta(seconds=3 - i))])
+        for i in range(3)
     ]
     events = [good[0], (far_future, [_Detection(far_future, node_id="node-fast")]), *good[1:]]
 
     tracker = _EchoTracker("future-track-0001")
     monkeypatch.setattr(cli, "NetworkSapientStream", lambda port, **_: _EventsOnceSource(events))
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: tracker)
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: tracker)
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
     monkeypatch.setattr(
         "sys.argv", ["fusion", "--config", "sensors.json", "--enable-sapient", "--log-to-file"]
@@ -1101,7 +1106,7 @@ def test_a_slightly_fast_sensor_does_not_drag_the_watermark_past_the_present(
 
     tracker = _EchoTracker("fast-track-0001")
     monkeypatch.setattr(cli, "NetworkSapientStream", lambda port, **_: _EventsOnceSource(events))
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: tracker)
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: tracker)
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
     monkeypatch.setattr(
         "sys.argv", ["fusion", "--config", "sensors.json", "--enable-sapient", "--log-to-file"]
@@ -1110,8 +1115,10 @@ def test_a_slightly_fast_sensor_does_not_drag_the_watermark_past_the_present(
     with caplog.at_level("WARNING"), pytest.raises(SystemExit):
         cli.fusion_main()
 
-    # Every event is fused, each with its own timestamp; nothing is dropped.
-    assert tracker.seen == [healthy[0], fast, healthy[1], healthy[2]]
+    # Every event is fused and nothing is dropped. The fast one is fused at the
+    # present the gate read for it (T0 + 1s, the clock's second reading) rather
+    # than at its own timestamp, so it cannot push the tracks into the future.
+    assert tracker.seen == [healthy[0], T0 + timedelta(seconds=1), healthy[1], healthy[2]]
     assert not [r for r in caplog.records if "out of step" in r.message]
 
 
@@ -1135,7 +1142,9 @@ def test_the_drop_warning_names_the_sensor_that_set_the_watermark(monkeypatch, c
     ]
 
     monkeypatch.setattr(cli, "NetworkSapientStream", lambda port, **_: _EventsOnceSource(events))
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _EchoTracker("mark-track-0001"))
+    monkeypatch.setattr(
+        cli, "SapientAsynchronousTracker", lambda **_: _EchoTracker("mark-track-0001")
+    )
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
     monkeypatch.setattr(
         "sys.argv", ["fusion", "--config", "sensors.json", "--enable-sapient", "--log-to-file"]
@@ -1161,7 +1170,9 @@ def test_the_drop_warning_reports_an_unset_watermark(monkeypatch, caplog, tmp_pa
     events = [(far, [_Detection(far, node_id="node-fast")])]
 
     monkeypatch.setattr(cli, "NetworkSapientStream", lambda port, **_: _EventsOnceSource(events))
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _EchoTracker("none-track-0001"))
+    monkeypatch.setattr(
+        cli, "SapientAsynchronousTracker", lambda **_: _EchoTracker("none-track-0001")
+    )
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
     monkeypatch.setattr(
         "sys.argv", ["fusion", "--config", "sensors.json", "--enable-sapient", "--log-to-file"]
@@ -1185,7 +1196,7 @@ def test_a_replay_running_ahead_of_the_wall_clock_is_not_gated(monkeypatch, capl
     monkeypatch.setattr(
         cli, "JsonSapientSource", lambda path: _EventsOnceSource([(ahead, [_Detection(ahead)])])
     )
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: tracker)
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: tracker)
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
     monkeypatch.setattr(
         "sys.argv",
@@ -1213,7 +1224,7 @@ def _run_replay_events(monkeypatch, tmp_path, events, tracker, extra_argv=()):
     replay_path.write_text("[]", encoding="utf-8")
 
     monkeypatch.setattr(cli, "JsonSapientSource", lambda path: _EventsOnceSource(events))
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: tracker)
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: tracker)
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
     monkeypatch.setattr(
         "sys.argv",
@@ -1349,7 +1360,7 @@ def test_the_frame_window_reaches_both_live_sources(monkeypatch):
             windows.setdefault("cot", frame_window_seconds) or _EventsOnceSource([])
         ),
     )
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: _FakeTracker([[]]))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
     monkeypatch.setattr(
         "sys.argv",
@@ -1390,7 +1401,7 @@ def test_the_tak_ws_trust_and_token_timeout_flags_reach_the_sink(monkeypatch, tm
 
     monkeypatch.setattr(cli, "TakWsSink", _FakeTakWsSink)
     monkeypatch.setattr(cli, "JsonSapientSource", lambda path: _EventsOnceSource([]))
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _FakeTracker([[]]))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: _FakeTracker([[]]))
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
     monkeypatch.setattr(
         "sys.argv",
@@ -1433,7 +1444,7 @@ def test_an_event_within_the_lateness_tolerance_is_still_fused(monkeypatch, capl
     ]
 
     monkeypatch.setattr(cli, "NetworkSapientStream", lambda port, **_: _EventsOnceSource(events))
-    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: tracker)
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: tracker)
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
     monkeypatch.setattr(
         "sys.argv", ["fusion", "--config", "sensors.json", "--enable-sapient", "--log-to-file"]
@@ -1442,5 +1453,539 @@ def test_an_event_within_the_lateness_tolerance_is_still_fused(monkeypatch, capl
     with caplog.at_level("WARNING"), pytest.raises(SystemExit):
         cli.fusion_main()
 
-    assert tracker.seen == [ahead, healthy]
+    # The ahead event is fused at the present (T0, the clock's first reading), the
+    # healthy one at its own timestamp, and neither is refused.
+    assert tracker.seen == [T0, healthy]
     assert not [r for r in caplog.records if "behind the newest event" in r.message]
+
+
+# --- the live-track bounds are operator-settable ---------------------------------
+
+
+def _capture_tracker_kwargs(monkeypatch, tracker):
+    """Patch cli.SapientAsynchronousTracker; returns the kwargs dict it is built with."""
+    built = {}
+
+    def _build(**kwargs):
+        built.update(kwargs)
+        return tracker
+
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", _build)
+    return built
+
+
+def test_the_track_bounds_default_to_the_trackers_documented_defaults(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    replay_path = tmp_path / "scenario.json"
+    replay_path.write_text("[]", encoding="utf-8")
+
+    built = _capture_tracker_kwargs(monkeypatch, _FakeTracker([[]]))
+    monkeypatch.setattr(cli, "JsonSapientSource", lambda path: _EventsOnceSource([]))
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["fusion", "--config", "sensors.json", "--replay-file", str(replay_path), "--log-to-file"],
+    )
+
+    cli.fusion_main()
+
+    assert built == {
+        "max_live_tracks": cli.MAX_LIVE_TRACKS,
+        "max_track_history": cli.MAX_TRACK_HISTORY,
+        "max_coast_seconds": cli.MAX_COAST_SECONDS,
+        "max_event_detections": cli.MAX_EVENT_DETECTIONS,
+    }
+
+
+def test_the_track_bound_flags_reach_the_tracker(monkeypatch, tmp_path):
+    """Every bound on a fusion pass is sized against the site: the live limit and
+    the per-event detection cap are what keep one pass inside the frame window,
+    history depth is the memory that limit is paid for, and the coast horizon is
+    the sensors' revisit interval. An operator has to be able to trade them
+    without a rebuild."""
+    monkeypatch.chdir(tmp_path)
+    replay_path = tmp_path / "scenario.json"
+    replay_path.write_text("[]", encoding="utf-8")
+
+    built = _capture_tracker_kwargs(monkeypatch, _FakeTracker([[]]))
+    monkeypatch.setattr(cli, "JsonSapientSource", lambda path: _EventsOnceSource([]))
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "fusion",
+            "--config",
+            "sensors.json",
+            "--replay-file",
+            str(replay_path),
+            "--log-to-file",
+            "--max-live-tracks",
+            "60",
+            "--max-track-history",
+            "5",
+            "--max-coast-seconds",
+            "20",
+            "--max-event-detections",
+            "150",
+        ],
+    )
+
+    cli.fusion_main()
+
+    assert built == {
+        "max_live_tracks": 60,
+        "max_track_history": 5,
+        "max_coast_seconds": 20.0,
+        "max_event_detections": 150,
+    }
+
+
+def test_the_track_bounds_survive_a_loop_restart(monkeypatch, tmp_path):
+    """A looping replay rebuilds the tracker, which must not silently revert to
+    the defaults halfway through a run."""
+    monkeypatch.chdir(tmp_path)
+    replay_path = tmp_path / "scenario.json"
+    replay_path.write_text("[]", encoding="utf-8")
+
+    built = []
+
+    def _build(**kwargs):
+        built.append(kwargs)
+        return _FakeTracker([[]])
+
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", _build)
+    monkeypatch.setattr(
+        cli, "JsonSapientSource", lambda path: _ResettableEventsSource([(T0, [_Detection()])])
+    )
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+
+    def _sleep_stop(seconds):
+        raise _Stop
+
+    monkeypatch.setattr(cli.time, "sleep", _sleep_stop)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "fusion",
+            "--config",
+            "sensors.json",
+            "--replay-file",
+            str(replay_path),
+            "--log-to-file",
+            "--loop",
+            "--max-live-tracks",
+            "42",
+            "--max-coast-seconds",
+            "24",
+        ],
+    )
+
+    with pytest.raises(_Stop):
+        cli.fusion_main()
+
+    assert len(built) == 2
+    assert [kwargs["max_live_tracks"] for kwargs in built] == [42, 42]
+    assert [kwargs["max_coast_seconds"] for kwargs in built] == [24.0, 24.0]
+
+
+# --- argument validation ---------------------------------------------------------
+
+
+@pytest.mark.parametrize("window", ["0", "-1"])
+def test_a_non_positive_frame_window_is_refused(monkeypatch, capsys, window):
+    """A window of zero or less expires every frame as it opens, so every datagram
+    becomes its own single-detection event -- measured 112 of 113 events carrying
+    exactly one detection, with nothing logged to say so."""
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "fusion",
+            "--config",
+            "sensors.json",
+            "--enable-sapient",
+            "--frame-window-seconds",
+            window,
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        cli.fusion_main()
+
+    assert "--frame-window-seconds must be > 0" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("flag", ["--max-live-tracks", "--max-track-history"])
+@pytest.mark.parametrize("value", ["0", "-5"])
+def test_a_non_positive_track_bound_is_refused(monkeypatch, capsys, flag, value):
+    """Zero live tracks fuses nothing; zero retained states leaves a track with no
+    current state for the augmentor to read."""
+    monkeypatch.setattr(
+        "sys.argv", ["fusion", "--config", "sensors.json", "--enable-sapient", flag, value]
+    )
+
+    with pytest.raises(SystemExit):
+        cli.fusion_main()
+
+    assert f"{flag} must be >= 1" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["0", "-5"])
+def test_a_non_positive_coast_horizon_is_refused(monkeypatch, capsys, value):
+    """A track that cannot coast at all is dropped as soon as the sweep that made
+    it ends, so every sweep re-initiates the whole picture and nothing is fused
+    across sensors."""
+    monkeypatch.setattr(
+        "sys.argv",
+        ["fusion", "--config", "sensors.json", "--enable-sapient", "--max-coast-seconds", value],
+    )
+
+    with pytest.raises(SystemExit):
+        cli.fusion_main()
+
+    assert "--max-coast-seconds must be > 0" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["0", "-5"])
+def test_a_non_positive_event_detection_cap_is_refused(monkeypatch, capsys, value):
+    """A cap of zero sheds every sweep in full, which fuses nothing and reports it
+    as an over-wide event."""
+    monkeypatch.setattr(
+        "sys.argv",
+        ["fusion", "--config", "sensors.json", "--enable-sapient", "--max-event-detections", value],
+    )
+
+    with pytest.raises(SystemExit):
+        cli.fusion_main()
+
+    assert "--max-event-detections must be >= 1" in capsys.readouterr().err
+
+
+# --- kernel socket drop counters ------------------------------------------------
+
+PROC_UDP_HEADER = (
+    "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   "
+    "uid  timeout inode ref pointer drops"
+)
+
+
+def _proc_udp_row(port, drops, local_ip="00000000"):
+    """One row in the kernel's own /proc/net/udp layout.
+
+    tx_queue:rx_queue and tr:tm->when are each printed as a single colon-joined
+    field, so the row has fewer fields than the header has names and a parser that
+    counts header columns reads the wrong ones.
+    """
+    return (
+        f"12068: {local_ip}:{port:04X} 00000000:0000 07 00000000:00000000 "
+        f"00:00000000 00000000  1000        0 27102 2 0000000000000000 {drops}"
+    )
+
+
+def _fake_proc_udp(monkeypatch, tmp_path, *tables):
+    """Point cli.PROC_UDP_FILES at one file per table of rows."""
+    paths = []
+    for index, rows in enumerate(tables):
+        path = tmp_path / f"proc_udp_{index}"
+        path.write_text("\n".join([PROC_UDP_HEADER, *rows]) + "\n", encoding="utf-8")
+        paths.append(str(path))
+    monkeypatch.setattr(cli, "PROC_UDP_FILES", tuple(paths))
+
+
+def test_the_drop_count_is_read_for_the_bound_port_only(monkeypatch, tmp_path):
+    _fake_proc_udp(
+        monkeypatch,
+        tmp_path,
+        [_proc_udp_row(5000, 2047), _proc_udp_row(6969, 3), _proc_udp_row(1234, 999)],
+    )
+
+    assert cli._kernel_udp_drops([5000, 6969]) == {5000: 2047, 6969: 3}
+
+
+def test_the_drop_counts_of_several_sockets_on_one_port_are_summed(monkeypatch, tmp_path):
+    """A port can appear more than once -- one row per bound socket, and one table
+    per address family -- and the loss is the total."""
+    _fake_proc_udp(
+        monkeypatch,
+        tmp_path,
+        [_proc_udp_row(5000, 10), _proc_udp_row(5000, 5, local_ip="0100007F")],
+        [_proc_udp_row(5000, 1)],
+    )
+
+    assert cli._kernel_udp_drops([5000]) == {5000: 16}
+
+
+def test_an_absent_proc_table_yields_no_counts(monkeypatch, tmp_path):
+    """Not Linux, or /proc not mounted: the summary loses this clause and nothing
+    else."""
+    monkeypatch.setattr(cli, "PROC_UDP_FILES", (str(tmp_path / "nope"),))
+
+    assert cli._kernel_udp_drops([5000]) == {}
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "",  # empty file
+        "sl local_address rem_address st drops\n",  # header only
+        "totally unexpected\n" + _proc_udp_row(5000, 7) + "\n",  # unrecognised header
+        PROC_UDP_HEADER + "\n5000 7\n",  # too few fields for a row
+        PROC_UDP_HEADER + "\n" + _proc_udp_row(5000, 7).replace("2047", "x") + "\nnot: a row\n",
+    ],
+)
+def test_an_unreadable_proc_table_does_not_raise(monkeypatch, tmp_path, content):
+    path = tmp_path / "proc_udp"
+    path.write_text(content, encoding="utf-8")
+    monkeypatch.setattr(cli, "PROC_UDP_FILES", (str(path),))
+
+    # No exception, and nothing invented for a port it cannot account for.
+    assert 6969 not in cli._kernel_udp_drops([6969])
+
+
+def test_a_non_hex_local_port_is_skipped(monkeypatch, tmp_path):
+    _fake_proc_udp(
+        monkeypatch, tmp_path, ["12068: 00000000:zzzz 00000000:0000 07 x 00:0 0 1000 0 1 2 0 4"]
+    )
+
+    assert cli._kernel_udp_drops([5000]) == {}
+
+
+def test_a_run_with_no_live_socket_never_reads_the_table(monkeypatch):
+    """A replay has no socket to lose packets on, and the summary still runs on its
+    timer -- so it must not go looking for counters that cannot exist."""
+    # Not iterable: reading the tables at all raises instead of passing quietly.
+    monkeypatch.setattr(cli, "PROC_UDP_FILES", None)
+
+    assert cli._kernel_udp_drops([]) == {}
+
+
+def test_the_summary_reports_what_the_kernel_discarded(monkeypatch, tmp_path):
+    """In-process counters cannot see this: an overloaded engine's sockets fill and
+    the kernel discards datagrams before anything reads them, so a summary without
+    it reads perfectly healthy while most of the feed is gone."""
+    _fake_proc_udp(monkeypatch, tmp_path, [_proc_udp_row(5000, 2047), _proc_udp_row(6969, 0)])
+    counters = {"events": 113, "detections": 114, "cot": 113, "dropped": 0}
+
+    logged = []
+    monkeypatch.setattr(cli.logger, "info", lambda msg, *args: logged.append(msg % args))
+
+    cli._log_summary(counters, "Fusion summary", [5000, 6969])
+
+    (line,) = logged
+    assert "0 event(s) dropped out of step" in line  # the in-process view, unchanged
+    assert "UDP 5000: 2047" in line
+    assert "UDP 6969: 0" in line
+
+
+def test_the_summary_of_a_replay_carries_no_socket_clause(monkeypatch, tmp_path):
+    _fake_proc_udp(monkeypatch, tmp_path, [_proc_udp_row(5000, 2047)])
+    logged = []
+    monkeypatch.setattr(cli.logger, "info", lambda msg, *args: logged.append(msg % args))
+
+    cli._log_summary({"events": 1, "detections": 1, "cot": 1, "dropped": 0}, "Fusion summary")
+
+    (line,) = logged
+    assert "UDP" not in line
+
+
+def _ported(source, port):
+    """Give a fake source the port attribute a live source binds and exposes."""
+    source.port = port
+    return source
+
+
+def test_the_live_sockets_drop_counts_reach_the_summary(monkeypatch, caplog, tmp_path):
+    """End-to-end: the sources know the port they bound, and the reporting side
+    asks the kernel about it."""
+    monkeypatch.chdir(tmp_path)
+    _fake_proc_udp(monkeypatch, tmp_path, [_proc_udp_row(5000, 1234), _proc_udp_row(6969, 7)])
+
+    monkeypatch.setattr(
+        cli, "NetworkSapientStream", lambda port, **_: _ported(_EventsOnceSource([]), port)
+    )
+    monkeypatch.setattr(
+        cli, "CotNetworkStream", lambda port, **_: _ported(_EventsOnceSource([]), port)
+    )
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: _FakeTracker([[]]))
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["fusion", "--config", "sensors.json", "--enable-sapient", "--enable-cot", "--log-to-file"],
+    )
+
+    with caplog.at_level("INFO"), pytest.raises(SystemExit):
+        cli.fusion_main()
+
+    (final,) = [r for r in caplog.records if "Fusion totals at shutdown" in r.message]
+    assert "UDP 5000: 1234" in final.message
+    assert "UDP 6969: 7" in final.message
+
+
+def test_an_unavailable_drop_counter_is_reported_once_at_startup(monkeypatch, caplog, tmp_path):
+    """Absent socket counts must not read as zero loss, and saying so once at
+    startup keeps it out of every minute's summary."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "PROC_UDP_FILES", (str(tmp_path / "nope"),))
+
+    monkeypatch.setattr(
+        cli, "NetworkSapientStream", lambda port, **_: _ported(_EventsOnceSource([]), port)
+    )
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: _FakeTracker([[]]))
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+    monkeypatch.setattr(
+        "sys.argv", ["fusion", "--config", "sensors.json", "--enable-sapient", "--log-to-file"]
+    )
+
+    with caplog.at_level("INFO"), pytest.raises(SystemExit):
+        cli.fusion_main()
+
+    reports = [r for r in caplog.records if "No kernel receive-drop counter" in r.message]
+    assert len(reports) == 1
+    assert "5000" in reports[0].message
+
+    (final,) = [r for r in caplog.records if "Fusion totals at shutdown" in r.message]
+    assert "UDP" not in final.message
+
+
+# --- a fast clock cannot rewind the tracker -------------------------------------
+
+
+class _DetectionStampedTracker:
+    """Fake tracker that stamps its track with the detection's own timestamp.
+
+    That is what Stone Soup does -- each hypothesis is predicted to its
+    detection's timestamp, so an updated track ends up stamped with it -- and the
+    broadcast gate compares that against the event timestamp. A clamp applied to
+    the event but not to its detections therefore emits nothing at all.
+    """
+
+    def __init__(self, track_id):
+        self.track_id = track_id
+        self.seen = []
+
+    def process_async_event(self, timestamp, detection_group):
+        self.seen.append(timestamp)
+        stamp = next(iter(detection_group)).timestamp
+        return [_fake_track(self.track_id, stamp)]
+
+
+def test_a_fast_sensor_within_the_horizon_cannot_rewind_the_tracker(monkeypatch, caplog, tmp_path):
+    """A sensor inside the future horizon is fused, and with its raw timestamp it
+    pushed every track's state that far ahead: the next healthy event was then
+    inside the lateness tolerance, passed the gate, and rewound the tracker by the
+    whole offset -- re-broadcasting every track with a CoT time in the past and
+    inflating every covariance by the size of the step.
+    """
+    monkeypatch.chdir(tmp_path)
+    # Two events per second of the present: the gate reads the clock once per
+    # event, so this makes the fake present advance with the sensors.
+    clock = _FakeClock(T0, step_seconds=0.5)
+    monkeypatch.setattr(cli, "datetime", clock)
+
+    offset = timedelta(seconds=9.5)  # inside FUTURE_HORIZON_SECONDS
+    lag = timedelta(milliseconds=300)  # ordinary flight + assembly delay
+    events = []
+    for step in range(6):
+        present = T0 + timedelta(seconds=step)
+        events.append((present + offset, [_Detection(present + offset, node_id="node-fast")]))
+        events.append((present - lag, [_Detection(present - lag, node_id="node-healthy")]))
+
+    tracker = _DetectionStampedTracker("rewind-track-0001")
+    monkeypatch.setattr(cli, "NetworkSapientStream", lambda port, **_: _EventsOnceSource(events))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: tracker)
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+    monkeypatch.setattr(
+        "sys.argv", ["fusion", "--config", "sensors.json", "--enable-sapient", "--log-to-file"]
+    )
+
+    with caplog.at_level("DEBUG"), pytest.raises(SystemExit):
+        cli.fusion_main()
+
+    steps = [
+        (later - earlier).total_seconds()
+        for earlier, later in zip(tracker.seen, tracker.seen[1:], strict=False)
+    ]
+    backwards = [-step for step in steps if step < 0]
+    # Any rewind left is bounded by the tolerance alone, not by the future horizon
+    # stacked on top of it.
+    assert max(backwards, default=0.0) <= cli.LATE_EVENT_TOLERANCE_SECONDS
+    assert max(backwards, default=0.0) < offset.total_seconds()
+
+    # Every event is fused: the healthy ones stay inside the tolerance because the
+    # fast sensor never pulls the mark past the present.
+    assert len(tracker.seen) == len(events)
+    assert not [r for r in caplog.records if "whose timestamps are out of step" in r.message]
+
+    # And nothing is fused ahead of the present the gate read for it.
+    assert max(tracker.seen) <= clock.start + (clock.reads - 1) * clock.step
+
+    # And every event still reaches TAK: the detections were clamped with the
+    # event, so the broadcast gate keeps matching.
+    broadcasts = [r for r in caplog.records if "Broadcast Update for Track" in r.message]
+    assert len(broadcasts) == len(events)
+
+
+def test_a_clamped_events_cot_carries_the_present_not_the_sensors_clock(
+    monkeypatch, caplog, tmp_path
+):
+    """TAK draws the CoT time, so a sensor 9.5s fast put its markers in the future
+    -- and TAK hides or expires CoT whose time is not the present."""
+    monkeypatch.chdir(tmp_path)
+    clock = _FakeClock(T0)
+    monkeypatch.setattr(cli, "datetime", clock)
+
+    fast = T0 + timedelta(seconds=9.5)
+    tracker = _DetectionStampedTracker("clamp-track-0001")
+    monkeypatch.setattr(
+        cli,
+        "NetworkSapientStream",
+        lambda port, **_: _EventsOnceSource([(fast, [_Detection(fast, node_id="node-fast")])]),
+    )
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: tracker)
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+    monkeypatch.setattr(
+        "sys.argv", ["fusion", "--config", "sensors.json", "--enable-sapient", "--log-to-file"]
+    )
+
+    with caplog.at_level("INFO"), pytest.raises(SystemExit):
+        cli.fusion_main()
+
+    assert tracker.seen == [T0]
+    output = (tmp_path / "fused_tracks_debug.xml").read_text(encoding="utf-8")
+    assert 'time="2026-01-01T00:00:00' in output
+    assert "00:00:09" not in output
+
+
+# --- the WebTAK sink's auth misconfiguration ------------------------------------
+
+
+def test_a_ws_sink_with_no_credentials_reports_the_flags_and_exits(monkeypatch, caplog, tmp_path):
+    """Every other startup misconfiguration here reports and exits 1; unhandled
+    this one reaches the operator as a traceback."""
+    replay_path = tmp_path / "scenario.json"
+    replay_path.write_text("[]", encoding="utf-8")
+
+    monkeypatch.setattr(cli, "JsonSapientSource", lambda path: _EventsOnceSource([]))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: _FakeTracker([[]]))
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "fusion",
+            "--config",
+            "sensors.json",
+            "--replay-file",
+            str(replay_path),
+            "--tak-ws-host",
+            "takhost",
+        ],
+    )
+
+    with caplog.at_level("ERROR"), pytest.raises(SystemExit) as exit_info:
+        cli.fusion_main()
+
+    assert exit_info.value.code == 1
+    (report,) = [r for r in caplog.records if "Cannot authenticate" in r.message]
+    # Names the flags that fix it, not just the fact that auth is missing.
+    assert "--keycloak-token-url" in report.message
+    assert "--oidc-client-id" in report.message
+    assert "--tak-bearer-token" in report.message

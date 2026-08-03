@@ -10,17 +10,28 @@
 #   * replayFile and a live source are MUTUALLY EXCLUSIVE: a replay runs on the
 #     scenario's clock, which does not line up with live sensors, and the
 #     tracker discards whichever timeline is behind. Blank replayFile to go live.
-#   * The sink is the WebTAK WebSocket (sinks.takWs), on by default.
+#   * The sink is the WebTAK WebSocket (sinks.takWs), on by default, and it MUST
+#     be given credentials: either the Keycloak client_credentials trio or a
+#     static bearer token (sinks.takWs.auth). There is no anonymous mode.
 # Otherwise the app errors and exits. The chart's validation helper `fail`s at
-# template time if no source is set or the WS sink is disabled.
+# template time if no source is set, the WS sink is disabled, or the sink has no
+# usable auth.
 #
 # The workload is a long-running Deployment (replicas: 1, strategy: Recreate):
 # either LIVE sources (sapient/cot UDP) or a looping replay (sources.loop) feed
 # the WebTAK-WS sink. A one-shot finite replay belongs in local dev (docker run /
 # compose / `make demo`), not a cluster deploy — so there is no Job mode.
 #
-# OUT-OF-THE-BOX default render is a valid looping replay -> WebTAK-WS demo:
-#   source = replayFile (baked-in sample, sources.loop on), sink = takWs (dev).
+# NOTHING renders out of the box: sinks.takWs.auth is empty below, and the chart
+# fails rather than render a pod that exits on the first connection attempt. Fill
+# in sinks.takWs.auth (Keycloak trio or bearer token) and the stock values are a
+# complete looping replay -> WebTAK-WS demo: source = replayFile (baked-in sample,
+# sources.loop on), sink = takWs. That is the smallest working starting point.
+#
+# A LIVE source additionally needs a path from the sensor network to the pod's
+# UDP socket, which the default (a ClusterIP Service) does not give: see the
+# SENSOR INGRESS section below. Enabling sources.sapient/sources.cot without
+# choosing one of those paths deploys a listener no sensor can reach.
 # ---------------------------------------------------------------------------
 
 image:
@@ -53,53 +64,135 @@ replicaCount: 1
 config:
   # If set, mount this existing ConfigMap instead of rendering one from
   # `config.sensors`. The ConfigMap must contain a key `sensors.json`.
+  # The chart cannot see that ConfigMap's content, so it cannot hash it: editing
+  # it does NOT roll the pod, and the app reads the registry once at startup and
+  # never reloads. After such an edit, restart the workload yourself
+  # (`kubectl rollout restart deploy/<release>-context-foundry-fusion`). Keeping
+  # the registry in `config.sensors` below avoids that: a change there changes
+  # the pod's checksum/config annotation, which rolls the pod.
   existingConfigMap: ""
   # Sensor-network definition, rendered to /etc/context-foundry/sensors.json
-  # (via toJson) when existingConfigMap is empty. Default = the real Joensuu
-  # network so the chart works out-of-the-box.
+  # (via toJson) when existingConfigMap is empty.
+  #
+  # The engine indexes it by `id` and uses each entry's lat/lon/alt as that
+  # station's position; every other field is metadata it carries but does not
+  # act on. A node that reports but is NOT listed here still tracks, but its
+  # detections carry no station position — and a bearing-only (acoustic) report
+  # cannot be fused at all without one, since the bearing is resolved about the
+  # station. So the registry must list every node that reports.
+  #
+  # Default = the 9 nodes of the Joensuu reference network, kept identical to
+  # the repo's config/sensors/joensuu.json — the same ids the baked-in replay
+  # scenario (data/examples/sapient_messages.json) reports from, so the default
+  # render fuses that scenario with every node resolved. Replace it wholesale
+  # with the deployed network; ids must match what the ASMs put in their
+  # reports (SAPIENT nodeId / CoT uid's sender).
   sensors:
-    version: "1.0"
+    version: "1.1"
     name: "Joensuu Blue Team Sensor Network"
-    description: "Primary sensor deployment for the Joensuu test area"
+    description: "Primary sensor deployment for the Joensuu test area. Node ids, positions, ranges and update rates are the ones the example scenario data reports from; altitudes are each site's ground elevation."
     primary_anchor_node: "FI-MIL-RAD-KOLI-01"
     coordinate_system: "WGS84"
     sensors:
       - id: "FI-MIL-RAD-KOLI-01"
         type: "radar"
-        subtype: "long_range_surveillance"
+        subtype: "strategic_surveillance"
         lat: 62.95
         lon: 29.8
-        alt: 250.0
-        range_m: 15000
-        update_rate_sec: 2.0
+        alt: 347.0
+        range_m: 150000
+        update_rate_sec: 18.0
         capabilities: ["position_3d", "velocity", "classification"]
         status: "operational"
         notes: "Primary anchor node - establishes ENU origin"
-      - id: "acoustic_array_01"
+      - id: "FI-MIL-MRAD-HEINA-02"
+        type: "radar"
+        subtype: "tactical"
+        lat: 62.5415
+        lon: 30.146
+        alt: 210.0
+        range_m: 25000
+        update_rate_sec: 11.0
+        capabilities: ["position_3d", "velocity", "classification"]
+        status: "operational"
+      - id: "FI-MIL-RAD-ONTTOLA-01"
+        type: "radar"
+        subtype: "tactical"
+        lat: 62.66
+        lon: 29.62
+        alt: 114.0
+        range_m: 40000
+        update_rate_sec: 12.0
+        capabilities: ["position_3d", "velocity", "classification"]
+        status: "operational"
+      - id: "FI-CIV-ACU-SAVONVOIMA-01"
         type: "acoustic"
         subtype: "passive_ring_array"
         lat: 62.593
         lon: 29.836
-        alt: 180.0
-        range_m: 8000
-        update_rate_sec: 5.0
+        alt: 88.0
+        range_m: 3000
+        update_rate_sec: 9.0
         capabilities: ["bearing_only"]
         status: "operational"
-        notes: "Passive acoustic array - provides azimuth measurements"
-      - id: "eo_sensor_01"
+        notes: "Reports range/bearing, which is resolved about this position"
+      - id: "FI-CIV-EOIR-SAVONVOIMA-STACK"
         type: "electro_optical"
-        subtype: "thermal_visible"
-        lat: 62.601
-        lon: 29.763
-        alt: 195.0
-        range_m: 6000
-        update_rate_sec: 1.0
+        subtype: "thermal"
+        lat: 62.59481
+        lon: 29.832561
+        alt: 88.0
+        range_m: 4000
+        update_rate_sec: 14.0
+        capabilities: ["position_3d", "classification"]
+        status: "operational"
+      - id: "FI-MIL-MDOP-RAIL-01"
+        type: "micro_doppler"
+        subtype: "ground_surveillance"
+        lat: 62.600511
+        lon: 29.778501
+        alt: 82.0
+        range_m: 3500
+        update_rate_sec: 9.0
+        capabilities: ["velocity", "classification"]
+        status: "operational"
+      - id: "FI-MIL-MDOP-AIRPORT-WEST"
+        type: "micro_doppler"
+        subtype: "ground_surveillance"
+        lat: 62.662
+        lon: 29.611
+        alt: 114.0
+        range_m: 3500
+        update_rate_sec: 13.0
+        capabilities: ["velocity", "classification"]
+        status: "operational"
+      - id: "FI-BOR-EOIR-PEKKALABRIDGE-01"
+        type: "electro_optical"
+        subtype: "thermal"
+        lat: 62.6095
+        lon: 29.7895
+        alt: 82.0
+        range_m: 4000
+        update_rate_sec: 12.0
+        capabilities: ["position_3d", "classification"]
+        status: "operational"
+      - id: "FI-CIV-CAM-SAVONVOIMA-GATE"
+        type: "electro_optical"
+        subtype: "visible"
+        lat: 62.5941
+        lon: 29.8312
+        alt: 88.0
+        range_m: 3000
+        update_rate_sec: 14.0
         capabilities: ["position_3d", "classification"]
         status: "operational"
     metadata:
       deployment_date: "2026-06-01"
       operator: "FIN NIR LCI-X Crucible 2-26"
       theater: "Joensuu Test Range"
+      # Inert: the app never reads this file's metadata, and the coast horizon is
+      # tracker.maxCoastSeconds below. Kept only so this copy stays identical to
+      # config/sensors/joensuu.json; editing it changes nothing but the checksum.
       default_max_coastal_seconds: 45.0
 
 # ---------------------------------------------------------------------------
@@ -124,12 +217,96 @@ sources:
   loop:
     enabled: true
     delaySeconds: 60
-  # Live SAPIENT protobuf over UDP :5000 (binds 0.0.0.0). Needs a Service.
+  # Live SAPIENT protobuf over UDP :5000 (binds 0.0.0.0). Reaching it from
+  # outside the cluster needs one of the SENSOR INGRESS paths below.
   sapient:
     enabled: false
-  # Live CoT over UDP :6969 (binds 0.0.0.0). Needs a Service.
+  # Live CoT over UDP :6969 (binds 0.0.0.0). Same ingress requirement, plus a
+  # source-address one: frames are keyed on the sender's peer address, so the
+  # ingress path must not masquerade it (see SENSOR INGRESS).
   cot:
     enabled: false
+  # How long the engine holds a sensor-instant open, from its first datagram, to
+  # collect the rest of that instant's datagrams before fusing them as ONE event
+  # (live sources only; a replay file's events are already grouped). A sensor
+  # that sees five objects at once sends five datagrams, and the associator can
+  # only assign them to five different tracks if they arrive in one event.
+  # Size it above how spread out one sweep's datagrams arrive (sensor emit spacing
+  # + network jitter). Too small and each sweep splits into single-detection
+  # events, silently — the picture just degrades into duplicate tracks.
+  # It does NOT have to exceed one fusion pass: measured on one core at the
+  # reference density a pass costs 0.44 s against this 0.25 window, and every
+  # sweep of that run was still fused whole — zero splits, zero datagrams
+  # discarded by the kernel — because a sweep's datagrams arrive in a tight burst
+  # and it is that burst's spread this window bounds, not the pass. A pass slower
+  # than the window is paid as latency and backlog, not as split sweeps.
+  # It is paid as latency by every live detection, so do not inflate it either.
+  # null leaves the app's own default (0.25); 0 is passed through as 0.
+  frameWindowSeconds: 0.25
+
+# ---------------------------------------------------------------------------
+# TRACKER BOUNDS — what the engine holds in memory, and what one pass costs.
+#
+# Association is one Mahalanobis validation gate per track/detection pair plus one
+# 2D assignment over that matrix, so per-event work is maxLiveTracks x
+# maxEventDetections gate evaluations plus one assignment of that size: polynomial
+# in both terms, and bounded by these values whatever the offered density. Nothing
+# below is a throughput ceiling to shave — they are what keeps a pass finite.
+#
+# MEASURED on one core at the reference density (9 nodes, ~80 objects, 18 s
+# revisit): 0.44 s per pass at ~81 live tracks and 80 detections in the event,
+# 1.27 s at the 300-detection cap. On that run all 54 events were fused, peak RSS
+# 137 MiB, zero datagrams discarded by the kernel; at twice the object count all
+# events still fused at 143 MiB. One process holds all track state, so there is
+# no scaling out of it — size the sensor network, not the replica count.
+#
+# Neither bound announces itself in the picture, so watch two things: events
+# carrying only part of a sweep (a split sweep initiates duplicate tracks), and
+# the kernel discard counts in the fusion summary ("Discarded by the kernel before
+# ingest"), which is the loss no in-process counter can see.
+# ---------------------------------------------------------------------------
+tracker:
+  # Hard cap on live tracks; past it new detections do not start tracks, which
+  # sheds clutter and keeps the objects already being followed. With
+  # maxEventDetections it is one of the two factors in a pass's cost, so raising it
+  # scales every pass in proportion. The default is generous against a real
+  # population: a whole reference replay produces 88 distinct fused tracks against
+  # 31 real object ids, and the 80-object load ran at ~81 live tracks at once.
+  # Raising it WITHOUT giving the pod more guaranteed CPU
+  # (resources.requests.cpu) makes things strictly worse — the extra tracks slow
+  # every pass, the backlog grows, and datagrams are lost in the kernel before
+  # ingest. null leaves the app's own default (120).
+  maxLiveTracks: null
+  # States retained per live track. Every fused event appends one state (~7.6 KiB)
+  # to every live track, so this times maxLiveTracks is the memory the tracker
+  # holds and must fit resources.limits.memory. Nothing downstream reads history —
+  # the serializers use each track's current state — so it only has to be deep
+  # enough to inspect a track's recent past; 20 against 200 measured 2 MiB apart.
+  # Raise it only for diagnostics. null leaves the app's own default (20).
+  maxTrackHistory: null
+  # How long a track may coast on prediction alone, with no real detection, before
+  # it is dropped. It MUST exceed the interval at which the sensors that see a
+  # track re-detect it, with room for sweeps that miss, or tracks expire between
+  # revisits and each revisit re-initiates them: measured on the reference replay,
+  # 20 s produces 274 distinct fused tracks over the run against 88 at 45 s. The
+  # Joensuu network reports each object about every 18s, so 45 covers two revisits.
+  # Setting it long is safe but wasteful — the engine also drops a coasting track
+  # once its position uncertainty grows past a bound, so a too-long horizon is
+  # caught geometrically instead; until then it pays gate evaluations for tracks
+  # that no longer say where their target is. null leaves the app's own default
+  # (45); anything <= 0 is refused, here and by the app.
+  maxCoastSeconds: null
+  # Detections one event is associated with. Past it the surplus is shed in a
+  # deterministic order with a rate-limited warning, so the same flood fuses the
+  # same way twice. This is the cost term a SENDER controls: without it one frame
+  # carrying thousands of hits — a mis-set sensor reporting more than its sweep, an
+  # injected feed — makes a single pass arbitrarily long, which is the one failure
+  # the engine cannot report because it never returns from the pass. Cost scales
+  # with it: measured on one core, 0.44 s per pass at 80 detections against 1.27 s
+  # at 300. The default is nearly four times the densest instant the reference
+  # network produces, so hitting it is a sensor to investigate before it is a value
+  # to raise. null leaves the app's own default (300).
+  maxEventDetections: null
 
 # ---------------------------------------------------------------------------
 # SINK — WebTAK streaming over WSS: wss://<host>:<port>/takproto/1
@@ -143,15 +320,45 @@ sinks:
     enabled: true
     host: "tak-server.tak.svc.cluster.local"
     port: 8446
-    # present => verify server TLS. Off (dev) => skip verification.
+    # CA bundle the TAK server's certificate chain is verified against, mounted
+    # read-only from a Secret. THIS is the production trust setting, not
+    # verifyTls: TAK is reached at its in-cluster service name, which is not in
+    # its certificate's SANs, so verifyTls (system trust store, hostname
+    # included) fails the hostname check. A CA bundle verifies the chain without
+    # requiring the name to match. Takes precedence over verifyTls.
+    #   name: Secret holding the PEM bundle ("" disables the flag)
+    #   key:  key within it; also the filename it is mounted under
+    caSecret:
+      name: ""
+      key: "ca.crt"
+    # Verify against the system trust store, hostname included. Only correct
+    # when the sink connects to TAK by a name its certificate actually carries
+    # (e.g. the public ingress); use caSecret for the in-cluster service name.
+    # Leaving both unset verifies nothing about the TAK server and is for a
+    # self-signed dev stack only. It does NOT weaken the Keycloak token
+    # exchange: the token endpoint carries the client secret and is always
+    # verified against the system trust store, with no knob to disable that.
     verifyTls: false
-    # Auth is OPTIONAL (anonymous/dev when all empty). Provide EITHER the
-    # Keycloak client_credentials trio (prod, per-group cf-<group>) OR a static
-    # bearer token (handy for quick tests — mint one and pass it).
+    # Auth is REQUIRED — there is no anonymous mode. The sink authenticates every
+    # WS connection, so with all of these empty the container exits at startup;
+    # the chart therefore refuses to render. Provide EITHER the Keycloak
+    # client_credentials trio (prod, per-group cf-<group>) OR a static bearer
+    # token (handy for quick tests — mint one and pass it). A keycloakTokenUrl
+    # with an empty oidcClientId is rejected too: it renders --oidc-client-id ''
+    # and fails exactly as if no auth were set.
     auth:
       # Keycloak .../protocol/openid-connect/token
       keycloakTokenUrl: ""
       oidcClientId: ""
+      # Seconds to wait on the Keycloak token endpoint (initial fetch, refresh
+      # before expiry, and re-fetch after a 401). The fetch runs on the fusion
+      # loop, so for its whole duration nothing reads the sensor sockets and
+      # datagrams pile up in the kernel receive buffer — keep it a few seconds,
+      # short enough that an unreachable Keycloak costs a small ingest gap per
+      # attempt rather than a stall. Raise it only if the token endpoint is
+      # genuinely slow (public ingress, cold start), and expect that gap.
+      # null leaves the app's own default (5.0).
+      tokenTimeoutSeconds: 5.0
       # SECRET MATERIAL — never rendered into args as a literal. Sourced as an
       # env var (secretKeyRef) and referenced in args as $(OIDC_CLIENT_SECRET).
       #   secretName: reference an existing Secret's key (preferred in prod).
@@ -187,13 +394,88 @@ cot:
 extraArgs: []
 
 # ---------------------------------------------------------------------------
-# Service — rendered only when service.enabled OR a live UDP source is on.
-# The WS sink is OUTBOUND, so it needs no Service. UDP 5000 = sapient,
-# UDP 6969 = cot.
+# SENSOR INGRESS — how the ASMs' datagrams reach the pod's socket.
+# Only relevant with a live source: the WS sink is OUTBOUND and needs nothing
+# here, and a replay reads a file. Ports are fixed by the app: UDP 5000
+# (sapient), UDP 6969 (cot).
+#
+# Sensors are OUTSIDE the cluster, and they send to a fixed address:port they
+# were configured with. Three paths, all off by default:
+#
+#   1. hostPorts (recommended on a single-node edge box). The node's own
+#      5000/6969 are mapped straight to the pod, so the ASMs keep sending to the
+#      node's address on the port they already use. The pod keeps its own network
+#      namespace and normal cluster DNS. Needs the CNI's portmap plugin (present
+#      in RKE2's default Canal/flannel config) and exclusive use of those ports
+#      on the node.
+#   2. hostNetwork. The container binds the node's interfaces directly: no NAT of
+#      any kind, so the CoT source sees each sender's real address. Use it when
+#      the CNI has no portmap plugin, or when peer addresses must be exact. Costs
+#      network-namespace isolation — the pod sees every interface and every
+#      node-local service — and the same port exclusivity.
+#   3. service.type=NodePort/LoadBalancer with the ports pinned below. NOTE the
+#      default node-port range is 30000-32767, so pinning 5000/6969 requires the
+#      API server's --service-node-port-range to include them; otherwise the
+#      sensors have to be reconfigured to a port in that range. LoadBalancer
+#      needs an implementation that handles UDP.
+#
+# With none of them, a live source still gets a ClusterIP Service (useful only
+# for in-cluster senders, e.g. a test feeder pod) — an external sensor cannot
+# reach it. hostPorts/hostNetwork already deliver the datagrams, so they render
+# no Service unless service.enabled asks for one.
+#
+# Both host paths need the namespace's Pod Security admission to allow them: the
+# baseline and restricted profiles forbid host ports and host namespaces, so a
+# namespace labelled with either rejects the pod. The container itself stays
+# non-root with no added capabilities (the ports are above 1024).
 # ---------------------------------------------------------------------------
-service:
+hostPorts:
+  # Map the node's 5000/6969 to the pod's. Mutually exclusive with hostNetwork.
+  # Traffic arriving from off-box keeps its source address; a sender running on
+  # the node itself is masqueraded by portmap and appears as the node — which for
+  # sources.cot merges every such sender into one frame key.
   enabled: false
+
+hostNetwork:
+  # Share the node's network namespace. Implies the pod's DNS policy becomes
+  # ClusterFirstWithHostNet (see dnsPolicy) so the in-cluster TAK service name
+  # still resolves.
+  enabled: false
+
+# Pod dnsPolicy. Empty = the chart picks: ClusterFirstWithHostNet when
+# hostNetwork is on, ClusterFirst otherwise. Only set this to override; with
+# hostNetwork and a plain ClusterFirst the pod resolves against the node's
+# resolv.conf and sinks.takWs.host (a .svc.cluster.local name) will not resolve.
+dnsPolicy: ""
+
+service:
+  # Force the Service on. A live source already gets one unless hostPorts/
+  # hostNetwork takes over the ingress, so this is for keeping a ClusterIP
+  # alongside those (in-cluster senders). It cannot be used without a live
+  # source: the only ports are the sensor listeners, so the Service would have
+  # no ports at all and the chart fails rather than render that.
+  enabled: false
+  # ClusterIP | NodePort | LoadBalancer.
   type: ClusterIP
+  # NodePort/LoadBalancer only. NOT cosmetic: with Cluster, kube-proxy
+  # masquerades the source address to the node IP. The CoT source keys frame
+  # assembly on the sender's peer address — a CoT event's uid names the object
+  # observed, not the sender — so under that masquerade EVERY external CoT
+  # emitter collapses to one key, their reports merge into single events, and the
+  # associator initiates duplicate tracks from the merged detections. Cluster
+  # together with sources.cot.enabled is a known-bad combination and the chart
+  # refuses to render it. Local preserves the source address (traffic must then arrive on
+  # the node running the pod — a given on a single-node cluster). SAPIENT is
+  # unaffected either way: its frames key on the nodeId inside the payload.
+  externalTrafficPolicy: Local
+  # Pin the published node ports so the ASMs' configured port is the one that
+  # answers, instead of a random one from the node-port range. Null = let
+  # Kubernetes allocate. Only valid with type NodePort/LoadBalancer, and only for
+  # a source that is enabled — the chart fails on either mismatch rather than
+  # letting the pin be silently ignored.
+  nodePorts:
+    sapient: null
+    cot: null
   annotations: {}
 
 # ---------------------------------------------------------------------------
@@ -229,14 +511,43 @@ securityContext:
 tmpDir:
   sizeLimit: 64Mi
 
+# Sized from measurements at the OPERATING POINT the chart targets (1 replica, no
+# horizontal scaling, all track state in memory): 9 nodes, ~80 objects, 18 s
+# revisit, on ONE core. Per fused event 0.44 s of core time there, 1.27 s at the
+# tracker.maxEventDetections cap. Peak RSS 137 MiB on that run, 143 MiB at twice
+# the object count and 133 MiB with wider measurement noise: the working set barely
+# moves with load, because the tracker bounds cap track state and what remains is
+# the import baseline (numpy/scipy/Stone Soup, plus lxml and the CoT XSD when
+# sources.cot is on, plus the WS sink). Re-measure before changing these.
 resources:
-  # Fusion engine runs Stone Soup UKF/JPDA — give it headroom.
   requests:
-    cpu: 100m
-    memory: 256Mi
+    # The fusion loop is serial and cannot use more than one core: one pass costs
+    # 0.44 s of core time at the reference density, 1.27 s at the detection cap, and
+    # the two socket readers plus the WS sink run alongside it — so guarantee a
+    # whole core. Requests are what CFS weights contention by, and this node also
+    # runs TAK (8g heap), Keycloak, Postgres and GPU work; a fractional guarantee
+    # stretches every pass under that contention, and the backlog surfaces as
+    # datagrams discarded by the kernel before ingest rather than as an error.
+    cpu: 1000m
+    # Covers the measured peak working set (137-143 MiB across the 80-object,
+    # 160-object and wider-noise runs) with room for the CoT XSD and the WS sink.
+    # Memory requests are what the pod is protected up to under node pressure; the
+    # peak barely moves with load, so this is a steady-state figure, not headroom.
+    memory: 192Mi
   limits:
-    cpu: "1"
-    memory: 1Gi
+    # The fusion loop is serial and cannot use more than one core, but the two
+    # socket readers and the WS sink run alongside it: a 1-core quota throttles
+    # the loop mid-pass whenever a reader wants CPU, which shows up as frame
+    # latency. 2 leaves room for them without letting the pod take the box.
+    cpu: "2"
+    # A tripwire, not headroom: ~3.5x the measured 137-143 MiB peak, so ordinary
+    # excursions fit and unbounded growth OOMKills quickly and visibly instead of
+    # being absorbed for hours. That is not hypothetical — the previous associator
+    # allocated 9.8 GiB while fusing 6 of 54 events, which under this limit is an
+    # OOMKill about 20s in and a CrashLoop, i.e. a failure that is visible instead
+    # of one that evicts the node's other workloads. Raising it does not fix a
+    # leak — it hides one.
+    memory: 512Mi
 
 podAnnotations: {}
 podLabels: {}

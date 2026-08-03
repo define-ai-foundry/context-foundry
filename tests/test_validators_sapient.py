@@ -23,9 +23,11 @@ def validator():
 
 
 @pytest.fixture(autouse=True)
-def _forget_unregistered_nodes():
+def _forget_unregistered_nodes(monkeypatch):
     """The once-per-node warning is module state, so it would leak between tests."""
     sapient_module._UNREGISTERED_NODES_SEEN.clear()
+    monkeypatch.setattr(sapient_module, "_unregistered_seen_count", 0)
+    monkeypatch.setattr(sapient_module, "_next_unregistered_report", 0.0)
     yield
     sapient_module._UNREGISTERED_NODES_SEEN.clear()
 
@@ -386,3 +388,35 @@ def test_normalize_keeps_the_report_for_a_snake_case_envelope():
     report = det.raw_metadata["original_report"]
     assert report["objectId"] == "obj-1"
     assert swarm_count(report) == 9
+
+
+def test_unregistered_node_bookkeeping_is_bounded(validator, registry, monkeypatch, caplog):
+    """The node id comes off an unauthenticated socket, so remembering every one
+    is a set entry per spoofed datagram in memory and a warning per datagram in
+    the log."""
+    monkeypatch.setattr(sapient_module, "MAX_UNREGISTERED_NODES_TRACKED", 8)
+    monkeypatch.setattr(sapient_module, "UNREGISTERED_REPORT_SECONDS", 3600.0)
+
+    with caplog.at_level("WARNING"):
+        for i in range(500):
+            payload = _range_bearing_message(node_id=f"spoofed-{i}", azimuth=0.0, rng=2000.0)
+            assert validator.process_message(payload) is None
+
+    assert len(sapient_module._UNREGISTERED_NODES_SEEN) <= 8
+    named = [r for r in caplog.records if "is not in the sensor registry" in r.message]
+    flood = [r for r in caplog.records if "unregistered node ids seen" in r.message]
+    # The first few are named individually; the rest collapse into one rate-limited
+    # line carrying the count, which is what says "flood" rather than "stray node".
+    assert len(named) == 8
+    assert len(flood) == 1
+    assert "9 so far" in flood[0].message  # fired on the first id past the bound
+
+
+def test_a_known_unregistered_node_is_reported_once(validator, registry, caplog):
+    """One misconfigured sensor should say so once, not once per datagram."""
+    with caplog.at_level("WARNING"):
+        for _ in range(20):
+            payload = _range_bearing_message(node_id="not-in-manifest", azimuth=0.0, rng=2000.0)
+            assert validator.process_message(payload) is None
+
+    assert len([r for r in caplog.records if "not in the sensor registry" in r.message]) == 1

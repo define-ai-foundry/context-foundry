@@ -1,19 +1,28 @@
 """Tests for context_foundry.fusion.tracker.SapientAsynchronousTracker.
 
-process_async_event selects the most probable JPDA hypothesis per track (not
-the missed-detection hypothesis that stonesoup's associate() always lists
-first), so a detection that gates to an existing track updates it instead of
-spawning a new one. The association-update branch is exercised with a
+Association gates each track against each detection and then takes the single
+best assignment of detections to tracks, so a detection that gates to an
+existing track updates it instead of spawning a new one, and no two tracks are
+updated from the same hit. The association-update branch is exercised with a
 monkeypatched fake data_associator for the two sensor_geodetic sub-branches;
-bootstrap/coasting/unassociated-hit paths use genuine tiny JPDA runs.
+bootstrap/coasting/unassociated-hit paths use genuine tiny association runs.
+
+Per-event cost has to be bounded by the tracker's own limits and nothing else:
+the tests below drive it with the geometry that made the previous joint
+associator hang inside one call -- many tracks coasting with kilometre-scale
+covariance, so their gates overlap into one cluster -- and with events wider
+than the per-event detection cap.
 
 Stale-track pruning is measured from each track's last real detection, not from
 track.state.timestamp -- coasting appends a prediction that advances the latter
 every event, so a purely coasting track would otherwise never expire. That last
 detection comes from the tracker's own per-track bookkeeping, because history is
-capped and the Update it would be read from is eventually truncated away.
+capped and the Update it would be read from is eventually truncated away. A
+track is dropped on its uncertainty as well as on its age, which is the same
+horizon measured in metres.
 """
 
+import threading
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
@@ -22,7 +31,6 @@ import pytest
 from stonesoup.models.measurement.linear import LinearGaussian
 from stonesoup.types.array import StateVector
 from stonesoup.types.detection import Detection
-from stonesoup.types.numeric import Probability
 from stonesoup.types.state import GaussianState
 from stonesoup.types.track import Track
 from stonesoup.types.update import GaussianStateUpdate
@@ -44,6 +52,43 @@ class _FakeBearingOnlyDetection:
         self.state_vector = state_vector
         self.metadata = metadata
         self.timestamp = timestamp
+
+
+def _wide_track(east, north, sigma, timestamp=T0):
+    """A track carrying `sigma` metres of position uncertainty, as coasting builds."""
+    covar = np.diag([sigma**2, 50.0, 25.0, sigma**2, 50.0, 25.0, (sigma / 2.0) ** 2, 25.0, 12.5])
+    return Track(
+        [
+            GaussianState(
+                state_vector=StateVector([east, 0.0, 0.0, north, 0.0, 0.0, 500.0, 0.0, 0.0]),
+                covar=covar,
+                timestamp=timestamp,
+            )
+        ]
+    )
+
+
+def _completes_within(call, seconds):
+    """Whether call() returns inside `seconds`, without hanging the whole suite if not.
+
+    A daemon thread rather than a wall-clock assertion afterwards: the failure
+    being guarded against is a call that never returns at all, which no
+    measurement taken after it can report.
+    """
+    raised = []
+
+    def _work():
+        try:
+            call()
+        except Exception as exc:
+            raised.append(exc)
+
+    thread = threading.Thread(target=_work, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    if raised:
+        raise raised[0]
+    return not thread.is_alive()
 
 
 def _det(e, n, u, timestamp, metadata=None):
@@ -75,7 +120,7 @@ def test_bootstrap_creates_one_track_per_det(tracker):
         assert track.state.timestamp == T0
 
 
-# --- coasting (real, tiny JPDA: 1 track, 0 detections) ---------------------------
+# --- coasting (real, tiny association run: 1 track, 0 detections) ----------------
 
 
 def test_process_async_event_coasts_track_when_no_detections(tracker):
@@ -91,7 +136,7 @@ def test_process_async_event_coasts_track_when_no_detections(tracker):
     assert len(track.states) == 2
 
 
-# --- unassociated hit becomes a new track (real, tiny JPDA: 1 track, 1 detection) -
+# --- unassociated hit becomes a new track (real run: 1 track, 1 detection) -------
 
 
 def test_process_async_event_unassociated_detection_spawns_new_track(tracker):
@@ -102,21 +147,20 @@ def test_process_async_event_unassociated_detection_spawns_new_track(tracker):
     d2 = _det(5000.0, 5000.0, 0.0, t1)
     tracker.process_async_event(t1, {d2})
 
-    # The pre-existing track always coasts (see module docstring / bug), and the
-    # new detection is unassociated -> a second track is spawned.
+    # The pre-existing track has nothing inside its gate and coasts; the new
+    # detection is unassociated -> a second track is spawned.
     assert len(tracker.tracks) == 2
     lengths = sorted(len(t.states) for t in tracker.tracks)
     assert lengths == [1, 2]
 
 
-# --- nearby detection associates instead of spawning (real JPDA) ----------------
+# --- nearby detection associates instead of spawning (real association run) ------
 
 
 def test_process_async_event_associates_nearby_det(tracker):
-    """Regression: a detection close to an existing track updates it rather than
-    spawning a second track. Fails on the old code, where hypotheses[0] always
-    returned the missed-detection hypothesis and clutter_spatial_density=1e-6
-    made real hits lose to clutter, so every detection started a new track."""
+    """A detection close to an existing track updates it rather than spawning a
+    second one. This is the whole point of association, and the property that
+    breaks first when a gate is mis-sized in either direction."""
     tracker.process_async_event(T0, {_det(0.0, 0.0, 0.0, T0)})
 
     t1 = T0 + timedelta(seconds=2)
@@ -131,8 +175,11 @@ def test_process_async_event_associates_nearby_det(tracker):
 
 
 def _fake_truthy_associator(track, measurement):
+    """An associator that assigns `measurement` to `track`, as a 2D assignment does:
+    one hypothesis per track, not a list of them."""
+
     class FakeHypothesis:
-        probability = Probability(0.99)
+        distance = 0.5
 
         def __bool__(self):
             return True
@@ -142,7 +189,7 @@ def _fake_truthy_associator(track, measurement):
 
     class FakeAssociator:
         def associate(self, tracks, detections, timestamp, **kwargs):
-            return {track: [hyp]}
+            return {track: hyp}
 
     return FakeAssociator()
 
@@ -205,14 +252,14 @@ def test_process_async_event_skips_bearing_only_ndim1_det(tracker, monkeypatch):
     t1 = T0 + timedelta(seconds=2)
 
     class AllMissedHypothesis:
-        probability = Probability(1.0)
+        distance = float("inf")
 
         def __bool__(self):
             return False
 
     class AllMissedAssociator:
         def associate(self, tracks, detections, timestamp, **kwargs):
-            return {t: [AllMissedHypothesis()] for t in tracks}
+            return {t: AllMissedHypothesis() for t in tracks}
 
     monkeypatch.setattr(tracker, "data_associator", AllMissedAssociator())
 
@@ -248,7 +295,7 @@ def test_prune_stale_tracks_drops_tracks_beyond_timeout(tracker):
     stale = Track([_gaussian_state(T0 - timedelta(seconds=100))])
     tracker.tracks = {fresh, stale}
 
-    tracker._prune_stale_tracks(T0, max_coastal_seconds=45.0)
+    tracker._prune_stale_tracks(T0)
 
     assert tracker.tracks == {fresh}
 
@@ -258,7 +305,7 @@ def test_prune_stale_tracks_keeps_tracks_within_timeout(tracker):
     almost_stale = Track([_gaussian_state(T0 - timedelta(seconds=30))])
     tracker.tracks = {fresh, almost_stale}
 
-    tracker._prune_stale_tracks(T0, max_coastal_seconds=45.0)
+    tracker._prune_stale_tracks(T0)
 
     assert tracker.tracks == {fresh, almost_stale}
 
@@ -276,7 +323,7 @@ def test_prune_stale_tracks_uses_last_detection_not_last_coast(tracker):
     )
     tracker.tracks = {track}
 
-    tracker._prune_stale_tracks(T0, max_coastal_seconds=45.0)
+    tracker._prune_stale_tracks(T0)
 
     assert tracker.tracks == set()
 
@@ -292,7 +339,7 @@ def test_prune_stale_tracks_keeps_recently_detected_track(tracker):
     tracker.tracks = {track}
     tracker._last_update_time[track.id] = T0 - timedelta(seconds=10)
 
-    tracker._prune_stale_tracks(T0, max_coastal_seconds=45.0)
+    tracker._prune_stale_tracks(T0)
 
     assert tracker.tracks == {track}
 
@@ -305,7 +352,7 @@ def test_prune_stale_tracks_forgets_the_pruned_tracks_last_update(tracker):
     tracker.tracks = {fresh, stale}
     tracker._last_update_time = {fresh.id: T0, stale.id: T0 - timedelta(seconds=100)}
 
-    tracker._prune_stale_tracks(T0, max_coastal_seconds=45.0)
+    tracker._prune_stale_tracks(T0)
 
     assert tracker._last_update_time == {fresh.id: T0}
 
@@ -313,10 +360,10 @@ def test_prune_stale_tracks_forgets_the_pruned_tracks_last_update(tracker):
 # --- bounded per-track history ---------------------------------------------------
 
 
-def test_track_history_stays_bounded_over_many_events(tracker, monkeypatch):
+def test_track_history_stays_bounded_over_many_events():
     """Every event appends a state (and a metadata copy) to every live track, so
     an uncapped run grows for as long as the process stays up."""
-    monkeypatch.setattr(tracker_module, "MAX_TRACK_HISTORY", 10)
+    tracker = SapientAsynchronousTracker(max_track_history=10)
     positions = [(0.0, 0.0, 0.0), (2000.0, 2000.0, 0.0), (-2000.0, 1500.0, 0.0)]
 
     tracker.process_async_event(T0, {_det(*p, T0) for p in positions})
@@ -333,11 +380,11 @@ def test_track_history_stays_bounded_over_many_events(tracker, monkeypatch):
         assert len(track.metadatas) == len(track.states)
 
 
-def test_truncated_history_keeps_metadata_aligned_with_the_current_state(tracker, monkeypatch):
+def test_truncated_history_keeps_metadata_aligned_with_the_current_state():
     """states and metadatas are index-aligned and track.metadata is the last
     entry, so truncating one without the other misreports every track's
     classification and swarm count."""
-    monkeypatch.setattr(tracker_module, "MAX_TRACK_HISTORY", 3)
+    tracker = SapientAsynchronousTracker(max_track_history=3)
     meta = {"classification": "Quadcopter", "swarm_count": 7}
 
     tracker.process_async_event(T0, {_det(0.0, 0.0, 0.0, T0, metadata=dict(meta))})
@@ -354,11 +401,11 @@ def test_truncated_history_keeps_metadata_aligned_with_the_current_state(tracker
     assert track.metadata["swarm_count"] == 7
 
 
-def test_coasting_track_still_expires_after_history_is_truncated(tracker, monkeypatch):
+def test_coasting_track_still_expires_after_history_is_truncated():
     """A track whose last real detection has been truncated out of history must
     still expire. Recovering that timestamp by scanning the retained states finds
     no Update at all once the cap is passed, and the track becomes immortal."""
-    monkeypatch.setattr(tracker_module, "MAX_TRACK_HISTORY", 3)
+    tracker = SapientAsynchronousTracker(max_track_history=3)
     tracker.process_async_event(T0, {_det(0.0, 0.0, 0.0, T0)})
 
     for step in range(1, 41):
@@ -371,6 +418,45 @@ def test_coasting_track_still_expires_after_history_is_truncated(tracker, monkey
 
     assert tracker.tracks == set()
     assert tracker._last_update_time == {}
+
+
+# --- the population bounds are per-tracker, with the constants as defaults --------
+
+
+def test_the_bounds_default_to_the_module_constants():
+    """The constants are the documented defaults, so a tracker built without
+    arguments has to be the one the documentation describes."""
+    tracker = SapientAsynchronousTracker()
+
+    assert tracker.max_live_tracks == tracker_module.MAX_LIVE_TRACKS
+    assert tracker.max_track_history == tracker_module.MAX_TRACK_HISTORY
+
+
+def test_the_default_live_track_bound_keeps_a_pass_inside_the_frame_window():
+    """One fusion pass has to finish inside a live source's frame window.
+
+    Measured on one core, per-event cost reaches the 250 ms default window at
+    ~120 tracks (247 ms at 112, 421 ms at 140). A bound above that lets the
+    population reach a point where a pass outlasts the window, sweeps split into
+    single-detection events, association degrades and the population grows
+    further -- from which the engine does not recover on its own.
+    """
+    assert tracker_module.MAX_LIVE_TRACKS <= 120
+
+
+def test_the_history_bound_is_per_tracker():
+    """Two engines on one node may be sized differently; the depth cannot be a
+    process-wide constant."""
+    shallow = SapientAsynchronousTracker(max_track_history=2)
+    deep = SapientAsynchronousTracker(max_track_history=6)
+
+    for step in range(10):
+        timestamp = T0 + timedelta(seconds=step)
+        for engine in (shallow, deep):
+            engine.process_async_event(timestamp, {_det(0.0, 0.0, 0.0, timestamp)})
+
+    assert max(len(t.states) for t in shallow.tracks) == 2
+    assert max(len(t.states) for t in deep.tracks) == 6
 
 
 # --- _initialize_new_track (direct, white-box) -----------------------------------
@@ -390,12 +476,11 @@ def test_initialize_new_track_seeds_state_from_det(tracker):
     assert track.state.timestamp == T0
 
 
-def test_the_live_track_population_is_bounded(monkeypatch, caplog):
+def test_the_live_track_population_is_bounded(caplog):
     """Detections that associate with nothing each start a track, so clutter or an
     injected feed grows the population until per-event cost passes the event rate
     -- and once fusion is behind, the backlog keeps it there."""
-    monkeypatch.setattr(tracker_module, "MAX_LIVE_TRACKS", 8)
-    tracker = SapientAsynchronousTracker()
+    tracker = SapientAsynchronousTracker(max_live_tracks=8)
 
     # Scattered hits, far enough apart that none of them associate.
     with caplog.at_level("WARNING"):
@@ -408,12 +493,13 @@ def test_the_live_track_population_is_bounded(monkeypatch, caplog):
     reports = [r for r in caplog.records if "live-track limit" in r.message]
     assert len(reports) == 1  # rate-limited, not one line per refused detection
     assert "detection(s) have not started a track" in reports[0].message
+    # The bound this tracker was built with, not whatever the default happens to be.
+    assert "At the 8 live-track limit" in reports[0].message
 
 
-def test_the_bound_keeps_the_tracks_already_being_followed(monkeypatch):
+def test_the_bound_keeps_the_tracks_already_being_followed():
     """Shedding the clutter must not shed the targets already under track."""
-    monkeypatch.setattr(tracker_module, "MAX_LIVE_TRACKS", 3)
-    tracker = SapientAsynchronousTracker()
+    tracker = SapientAsynchronousTracker(max_live_tracks=3)
 
     established = None
     for i in range(3):
@@ -429,3 +515,219 @@ def test_the_bound_keeps_the_tracks_already_being_followed(monkeypatch):
     assert len(tracker.tracks) <= 3
     # The originally-followed track is still there, not evicted for a newcomer.
     assert established & {t.id for t in tracker.tracks}
+
+
+# --- one pass is bounded by the tracker's own limits, at any input density -------
+
+# Generous enough that a slow machine does not fail it, short enough that a pass
+# which never returns is reported as a failure rather than as a hung suite.
+BOUNDED_PASS_SECONDS = 30.0
+
+
+def _coasting_picture(tracker, count, sigma, spacing=400.0):
+    """Seeds `count` tracks whose gates all overlap, as a long coast produces."""
+    for index in range(count):
+        track = _wide_track(spacing * (index % 8), spacing * (index // 8), sigma)
+        tracker.tracks.add(track)
+        tracker._last_update_time[track.id] = T0
+    return tracker
+
+
+def test_a_dense_frame_against_coasting_tracks_returns_in_bounded_time():
+    """The load that has to stay bounded: a sweep's worth of detections arriving
+    while many tracks are coasting with kilometre-scale uncertainty.
+
+    Their validation gates then overlap into a single cluster, which is the input
+    that makes exact joint association exponential -- measured hanging inside one
+    call and allocating to 9.8 GiB against a live 9-node, 80-object feed. Gating
+    plus one assignment is polynomial in both terms, so this returns.
+    """
+    tracker = SapientAsynchronousTracker()
+    _coasting_picture(tracker, count=40, sigma=1000.0)
+    t1 = T0 + timedelta(seconds=2)
+    detections = {
+        _det(400.0 * (i % 8) + 50.0, 400.0 * (i // 8) + 50.0, 500.0, t1) for i in range(40)
+    }
+
+    assert _completes_within(
+        lambda: tracker.process_async_event(t1, detections), BOUNDED_PASS_SECONDS
+    )
+    assert len(tracker.tracks) <= tracker.max_live_tracks
+
+
+def test_repeated_dense_frames_leave_the_population_bounded():
+    """The population cannot grow its way back into the same wall: each event's
+    unassociated hits start tracks, so a dense feed has to end each pass inside
+    the live bound rather than a little above it."""
+    tracker = SapientAsynchronousTracker(max_live_tracks=30)
+    _coasting_picture(tracker, count=30, sigma=1000.0)
+
+    def _sweeps():
+        for step in range(1, 6):
+            timestamp = T0 + timedelta(seconds=2 * step)
+            tracker.process_async_event(
+                timestamp,
+                {
+                    _det(400.0 * (i % 8) + 50.0, 400.0 * (i // 8) + 50.0, 500.0, timestamp)
+                    for i in range(40)
+                },
+            )
+
+    assert _completes_within(_sweeps, BOUNDED_PASS_SECONDS)
+    assert len(tracker.tracks) <= 30
+
+
+def test_no_two_tracks_are_updated_from_one_detection():
+    """A detection is evidence of one object, so exactly one track may take it:
+    the assignment gives it to the nearest and leaves the rest to coast. Scored
+    per track independently the same hit can update several tracks at once, and
+    on two overlapping tracks it was measured updating neither."""
+    tracker = SapientAsynchronousTracker()
+    # Two tracks metres apart, so a single detection gates to both.
+    for east in (0.0, 5.0):
+        track = _wide_track(east, 0.0, 20.0)
+        tracker.tracks.add(track)
+        tracker._last_update_time[track.id] = T0
+
+    t1 = T0 + timedelta(seconds=2)
+    tracker.process_async_event(t1, {_det(2.0, 0.0, 500.0, t1)})
+
+    # Coasting appends a prediction stamped with the event too, so it is the state
+    # type that says which track was actually updated.
+    updated = [t for t in tracker.tracks if isinstance(t.state, GaussianStateUpdate)]
+    assert len(updated) == 1
+    # The other coasted, and the hit did not also start a third track.
+    assert len(tracker.tracks) == 2
+
+
+# --- the per-event detection cap -------------------------------------------------
+
+
+def test_an_event_at_the_detection_cap_is_fused_whole():
+    tracker = SapientAsynchronousTracker(max_event_detections=5)
+
+    tracker.process_async_event(T0, {_det(1000.0 * i, 0.0, 500.0, T0) for i in range(5)})
+
+    assert len(tracker.tracks) == 5
+
+
+def test_an_event_past_the_detection_cap_is_shed_and_reported(caplog):
+    """Gating is (tracks x detections), so an event wider than the cap is the one
+    term of a pass's cost a sender still controls. Shedding it is deliberate; a
+    pass that never returns could not report anything at all."""
+    tracker = SapientAsynchronousTracker(max_event_detections=5)
+
+    with caplog.at_level("WARNING"):
+        for step in range(3):
+            timestamp = T0 + timedelta(seconds=2 * step)
+            tracker.process_async_event(
+                timestamp, {_det(1000.0 * i, 0.0, 500.0, timestamp) for i in range(20)}
+            )
+
+    assert len(tracker.tracks) == 5
+    reports = [r for r in caplog.records if "past the 5 a single event" in r.message]
+    assert len(reports) == 1  # rate-limited, not one line per event
+    assert "An event carried 20 detections" in reports[0].message
+    assert "15 detection(s) have been shed so far" in reports[0].message
+
+
+def test_the_detections_kept_at_the_cap_do_not_depend_on_set_ordering():
+    """A flood has to fuse the same way twice, or nothing about a run past the cap
+    can be reproduced."""
+    detections = [_det(1000.0 * i, 0.0, 500.0, T0) for i in range(20)]
+
+    kept = []
+    for order in (detections, list(reversed(detections))):
+        tracker = SapientAsynchronousTracker(max_event_detections=5)
+        tracker.process_async_event(T0, set(order))
+        kept.append(sorted(track.state.state_vector[0, 0] for track in tracker.tracks))
+
+    assert kept[0] == kept[1]
+
+
+def test_the_detection_cap_defaults_to_the_module_constant():
+    assert SapientAsynchronousTracker().max_event_detections == tracker_module.MAX_EVENT_DETECTIONS
+
+
+# --- the coast horizon, in seconds and in metres ---------------------------------
+
+
+def test_the_coast_horizon_defaults_to_the_module_constant():
+    tracker = SapientAsynchronousTracker()
+
+    assert tracker.max_coast_seconds == tracker_module.MAX_COAST_SECONDS
+    assert tracker.max_coast_position_sigma == tracker_module.MAX_COAST_POSITION_SIGMA_M
+
+
+@pytest.mark.parametrize(
+    ("coasted", "survives"),
+    [(19, True), (21, False)],
+)
+def test_the_coast_horizon_is_per_tracker(coasted, survives):
+    """A network's revisit interval decides how long a track has to coast, so the
+    horizon cannot be a process-wide constant."""
+    tracker = SapientAsynchronousTracker(max_coast_seconds=20.0)
+    track = Track([_gaussian_state(T0 - timedelta(seconds=coasted))])
+    tracker.tracks = {track}
+
+    tracker._prune_stale_tracks(T0)
+
+    assert (tracker.tracks == {track}) is survives
+
+
+@pytest.mark.parametrize(
+    ("sigma", "survives"),
+    [(999.0, True), (1001.0, False)],
+)
+def test_a_track_is_dropped_once_its_uncertainty_outgrows_the_gate(sigma, survives):
+    """The horizon in metres, which is what holds when the one in seconds is set
+    too long: a gate is measured in the track's own sigmas, so a track coasting
+    with kilometre covariance accepts most of the picture -- at a smaller distance
+    than the track actually following a target reports -- and takes its
+    detections away."""
+    tracker = SapientAsynchronousTracker(
+        max_coast_seconds=10_000.0, max_coast_position_sigma=1000.0
+    )
+    track = _wide_track(0.0, 0.0, sigma)
+    tracker.tracks = {track}
+    tracker._last_update_time[track.id] = T0
+
+    tracker._prune_stale_tracks(T0)
+
+    assert (tracker.tracks == {track}) is survives
+    # Dropped on geometry alone: the time horizon here is hours away.
+    assert (tracker._last_update_time == {}) is not survives
+
+
+def test_dropping_over_uncertain_tracks_is_reported(caplog):
+    """Silently shedding tracks the operator can still see on the feed reads as a
+    sensor problem; the warning says which bound did it and what to size."""
+    tracker = SapientAsynchronousTracker(
+        max_coast_seconds=10_000.0, max_coast_position_sigma=1000.0
+    )
+    with caplog.at_level("WARNING"):
+        for step in range(3):
+            track = _wide_track(0.0, 0.0, 4000.0)
+            tracker.tracks = {track}
+            tracker._last_update_time[track.id] = T0
+            tracker._prune_stale_tracks(T0 + timedelta(seconds=step))
+
+    reports = [r for r in caplog.records if "position uncertainty passed" in r.message]
+    assert len(reports) == 1  # rate-limited, not one line per pruned track
+    assert "Dropped 1 track(s) whose position uncertainty passed 1000 m, 1 so far" in (
+        reports[0].message
+    )
+    assert "--max-coast-seconds (10000 s)" in reports[0].message
+
+
+def test_a_coasting_track_survives_inside_both_coast_bounds():
+    """The default horizon has to remain usable: a track that misses a revisit
+    keeps coasting, and only the tracker's bounds end it."""
+    tracker = SapientAsynchronousTracker()
+    tracker.process_async_event(T0, {_det(0.0, 0.0, 500.0, T0)})
+
+    for step in range(1, 21):
+        tracker.process_async_event(T0 + timedelta(seconds=2 * step), set())
+
+    # 40s of coasting under the 45s default, and still inside the metre bound.
+    assert len(tracker.tracks) == 1

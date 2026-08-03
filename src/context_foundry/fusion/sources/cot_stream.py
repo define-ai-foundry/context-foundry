@@ -43,8 +43,8 @@ class CotNetworkStream(SapientSource):
         # the object it describes, not the sender, so keying on it would put every
         # object of one instant in a frame of its own and batch nothing; keying on
         # the timestamp alone would merge two senders reporting the same object at
-        # the same instant into one event, where JPDA associates one of the two
-        # hits and initiates a duplicate track from the other. The peer address
+        # the same instant into one event, where the associator takes one of the
+        # two hits and initiates a duplicate track from the other. The peer address
         # names the sending host, which is the closest the base CoT event schema
         # gets to sender identity -- so emitters behind one NAT address, or
         # forwarded by one relay, do still merge.
