@@ -7,6 +7,9 @@
 # ---------------------------------------------------------------------------
 # THE SOURCE/SINK CONTRACT (enforced by the app; the chart also fails fast):
 #   * You MUST enable AT LEAST ONE source: {replayFile, sapient, cot}
+#   * replayFile and a live source are MUTUALLY EXCLUSIVE: a replay runs on the
+#     scenario's clock, which does not line up with live sensors, and the
+#     tracker discards whichever timeline is behind. Blank replayFile to go live.
 #   * The sink is the WebTAK WebSocket (sinks.takWs), on by default.
 # Otherwise the app errors and exits. The chart's validation helper `fail`s at
 # template time if no source is set or the WS sink is disabled.
@@ -104,7 +107,8 @@ config:
 # ---------------------------------------------------------------------------
 sources:
   # Replay a finite JSON scenario. Path is inside the image (baked-in sample
-  # shown) or a mounted file. Empty string = disabled.
+  # shown) or a mounted file. Empty string = disabled -- which is what going
+  # live requires: this and sapient/cot cannot both be set.
   replayFile: "data/examples/sapient_messages.json"
   # Speed to emit replayFile events at, relative to the scenario's own
   # timeline (only applies with replayFile): 1.0 (default) replays at real
@@ -115,8 +119,8 @@ sources:
   # Continuously re-run the replay when it finishes (only applies with
   # replayFile). Turns a one-shot replay into a long-running feed so the pod
   # stays Running/healthy (vs the exit-then-restart CrashLoopBackOff you'd get
-  # otherwise). The engine rebuilds its tracker each pass. Set false only if the
-  # source is actually live (sapient/cot) rather than a replay file.
+  # otherwise). The engine rebuilds its tracker each pass. Ignored when
+  # replayFile is blank; a live source never terminates, so it never loops.
   loop:
     enabled: true
     delaySeconds: 60

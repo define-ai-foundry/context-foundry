@@ -62,7 +62,12 @@ class TacticalContextAugmentor:
         # accumulates detection metadata on the Track, not on its states, so
         # reading the state yields nothing and every track looks unclassified.
         metadata = getattr(track, "metadata", None) or {}
-        classification = metadata.get("classification", "Unknown")
+        # SAPIENT sources write the literal "Unknown" when the sensor gave no
+        # classification, so treat it as absent: a CoT hit's 2525 type code is
+        # the only label such a track has.
+        classification = metadata.get("classification")
+        if not classification or classification == "Unknown":
+            classification = metadata.get("cot_type") or "Unknown"
         swarm_count = metadata.get("swarm_count", 1)
 
         # Core Rules Engine: Threat Assessment Logic

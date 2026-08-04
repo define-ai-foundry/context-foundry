@@ -140,7 +140,11 @@ make tak-tail TAK_DEMO_GROUP=bravo       # ...and confirm 'bravo' receives none
 make live-down                           # stop the engine (leaves TAK up)
 ```
 
-`make live-demo` starts the engine detached and runs the feeder in the foreground, so the run lasts as long as the feed. Both live sources are read concurrently, so `--enable-sapient --enable-cot` together work: each source gets its own reader thread, and events are fused in arrival order.
+`make live-demo` starts the engine detached and runs the feeder in the foreground, so the run lasts as long as the feed. Both live sources are read concurrently, so `--enable-sapient --enable-cot` together work: each source gets its own reader thread, and events are fused in arrival order. An event stamped **earlier than the last one processed** is dropped, because the tracker cannot predict backwards and letting one through rewinds *every* track's timestamp and redraws its TAK marker in the past. UDP reordering produces the odd one; a sensor whose clock is behind produces nothing but, and is then absent from the fusion picture until its clock is fixed — so the drop is re-reported once a minute, with a running count and the sensor's node id, rather than once per run. **Keep the sensors' clocks in step.** If fusion falls behind the incoming rate the readers stall rather than discard, so nothing is lost in-process; sustained overload then overruns the kernel's socket receive buffer (visible as the drop counter for the socket in `/proc/net/udp`).
+
+A replay file and a live source cannot be combined — the engine refuses the pair. A scenario runs on its own clock, minutes or hours away from the sensors', and the gate above would silently discard whichever is behind.
+
+The feeder's CoT mode emits a fixed hostile type for every track and carries no classification or swarm count (a CoT `<event>` has nowhere standard to put them), so `LIVE_PROTOCOL=cot` exercises the ingest path, not the classification carry-through that SAPIENT reports drive.
 
 `make tak-tail` is the scriptable stand-in for a WebTAK browser session: it subscribes to `wss://…:8446/takproto/1` as a group's File user and prints the CoT that user is allowed to see, exiting non-zero if nothing arrives. Run it (or open WebTAK) **before** the feed starts — TAK does not backfill to a late subscriber.
 
@@ -155,19 +159,19 @@ A live run only ends when it is signalled; SIGTERM (`docker stop`, a pod deletio
 
 ## CLI Reference
 
-The installation exposes the `context-foundry-fusion` command globally. `--config` is always required, and at least one source (`--replay-file`, `--enable-sapient`, or `--enable-cot`) must be provided. At least one output sink is also required — `--log-to-file`, `--tak-ws-host`, `--tak-tls-host`, or any combination.
+The installation exposes the `context-foundry-fusion` command globally. `--config` is always required, and at least one source (`--replay-file`, `--enable-sapient`, or `--enable-cot`) must be provided. `--replay-file` and the live sources are **mutually exclusive** — a scenario's clock does not line up with a sensor's, and the engine refuses the pair rather than silently discarding whichever is behind. The two live sources can be used together, provided their sensors agree on the time. At least one output sink is also required — `--log-to-file`, `--tak-ws-host`, `--tak-tls-host`, or any combination.
 
 | Flag / Argument | Type | Description | Default / Required |
 | :--- | :--- | :--- | :--- |
 | `--config` | `String` | Path to the sensor network config JSON. | *Required* |
-| `--replay-file` | `String` | Path to a JSON scenario file to replay. | *One source required* |
+| `--replay-file` | `String` | Path to a JSON scenario file to replay. Cannot be combined with a live source. | *One source required* |
 | `--loop` | `Flag` | With `--replay-file`, restart the replay continuously instead of exiting — turns a one-shot replay into a continuous feed (ideal as a long-running Deployment demo streaming into TAK). No effect without `--replay-file`. | `False` |
 | `--loop-delay` | `Float` | Seconds to wait between replay iterations when `--loop` is set. | `60` |
 | `--realtime-factor` | `Float` | With `--replay-file`, the speed to emit events at relative to the scenario's own timeline: `1.0` replays at real time, `5` replays five times faster, `0` disables pacing and drains as fast as events can be fused. No effect without `--replay-file`. Must be `>= 0`. | `1.0` |
 | `--use-scenario-timestamps` | `Flag` | With `--replay-file`, stamp events with the timestamps in the file instead of shifting the scenario to start now. TAK may treat the result as too old or too far ahead to display. No effect without `--replay-file`. | `False` |
 | `--cot-stale-seconds` | `Float` | How long a CoT marker stays live in TAK after the event it was built from. | `15` |
-| `--enable-sapient` | `Flag` | Enable the live SAPIENT UDP stream (port 5000). | `False` |
-| `--enable-cot` | `Flag` | Enable the live CoT UDP stream (port 6969). | `False` |
+| `--enable-sapient` | `Flag` | Enable the live SAPIENT UDP stream (port 5000). Cannot be combined with `--replay-file`. | `False` |
+| `--enable-cot` | `Flag` | Enable the live CoT UDP stream (port 6969). Cannot be combined with `--replay-file`. | `False` |
 | `--log-to-file` | `Flag` | Write fused CoT to `fused_tracks_debug.xml` for offline validation. | *One sink required* |
 | `--tak-ws-host` | `String` | TAK host for the WebTAK WebSocket sink (bearer-auth; CoT tagged with the token's Keycloak groups). Enables the sink. | *One sink required* |
 | `--tak-ws-port` | `Integer` | WebTAK WebSocket port. | `8446` |

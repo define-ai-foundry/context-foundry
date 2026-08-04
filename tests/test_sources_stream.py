@@ -53,8 +53,19 @@ def _missing_location_oneof_payload():
 
 
 def _make_stream(monkeypatch, recvfrom_side_effect):
+    scripted = iter(recvfrom_side_effect)
+
+    def recvfrom(bufsize):
+        item = next(scripted)
+        if isinstance(item, BaseException):
+            raise item
+        payload, addr = item
+        # A real socket truncates to the buffer the caller asked for, and the
+        # mock has to as well or an undersized read looks fine in a test.
+        return payload[:bufsize], addr
+
     mock_sock = MagicMock()
-    mock_sock.recvfrom.side_effect = recvfrom_side_effect
+    mock_sock.recvfrom.side_effect = recvfrom
     monkeypatch.setattr(
         "context_foundry.fusion.sources.stream.socket.socket", lambda *a, **kw: mock_sock
     )

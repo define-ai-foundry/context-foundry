@@ -52,7 +52,7 @@ def test_iter_events_yields_detection_for_valid_packet(monkeypatch):
     assert det.metadata == {
         "nodeId": "COT-SENSOR-1",
         "type": "CoT",
-        "classification": "a-f-A-M-F",
+        "cot_type": "a-f-A-M-F",
     }
     assert timestamp.year == 2026
 

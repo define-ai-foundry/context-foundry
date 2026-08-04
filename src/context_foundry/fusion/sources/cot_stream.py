@@ -56,12 +56,14 @@ class CotNetworkStream(SapientSource):
                     timestamp=clean_det.timestamp,
                 )
 
-                # The CoT event type is the sender's own classification; pass it
-                # through so fused tracks are labelled rather than "Unknown".
+                # The CoT event type is the sender's own label. Keep it under its
+                # own key: Stone Soup merges a hit's metadata into the track, so
+                # putting a 2525 type code in "classification" would overwrite the
+                # real classification a SAPIENT sensor gave the same track.
                 detection.metadata = {
                     "nodeId": clean_det.sensor_id,
                     "type": "CoT",
-                    "classification": clean_det.classification or "Unknown",
+                    "cot_type": clean_det.classification,
                 }
 
                 yield clean_det.timestamp, [detection]

@@ -137,6 +137,9 @@ if there are zero sources or zero sinks configured.
 {{- if eq $srcCount 0 }}
 {{- fail "context-foundry-fusion: no SOURCE configured. Enable at least one of sources.replayFile, sources.sapient.enabled, sources.cot.enabled." }}
 {{- end }}
+{{- if and .Values.sources.replayFile (or .Values.sources.sapient.enabled .Values.sources.cot.enabled) }}
+{{- fail "context-foundry-fusion: sources.replayFile cannot be combined with a live source (sources.sapient/sources.cot) -- a replay does not share a timeline with live sensors, and the app refuses the combination. Blank sources.replayFile to go live." }}
+{{- end }}
 {{- if not .Values.sinks.takWs.enabled }}
 {{- fail "context-foundry-fusion: no SINK configured. Enable sinks.takWs.enabled (the WebTAK WebSocket sink)." }}
 {{- end }}

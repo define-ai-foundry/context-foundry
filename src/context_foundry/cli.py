@@ -28,6 +28,16 @@ from context_foundry.fusion.tracker import SapientAsynchronousTracker
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("FusionEngine")
 
+# How often to report events dropped for arriving out of order. A skewed sensor
+# clock produces one per packet, so this is a rate limit, not a one-shot.
+LATE_EVENT_REPORT_SECONDS = 60.0
+
+
+def _sensor_ids(detections):
+    """The sensors an event came from, for reporting which one is misbehaving."""
+    ids = {getattr(det, "metadata", {}).get("nodeId") for det in detections}
+    return ", ".join(sorted(str(node_id) for node_id in ids if node_id)) or "an unnamed sensor"
+
 
 def _install_shutdown_handler():
     """Make SIGTERM end the run instead of being ignored.
@@ -131,6 +141,19 @@ def fusion_main():
 
     if args.loop and not args.replay_file:
         logger.warning("--loop has no effect without --replay-file; live sources never terminate.")
+
+    if args.replay_file and (args.enable_sapient or args.enable_cot):
+        # A replay runs on the scenario's clock -- shifted to start now and then
+        # running minutes or hours ahead of it, or (with
+        # --use-scenario-timestamps) on whatever date the file was recorded.
+        # Either way it does not share a timeline with a live sensor, and the
+        # tracker cannot fuse two timelines: whichever is behind is discarded.
+        # --loop is a further casualty, since the replay only restarts once
+        # every source has run dry and a live one never does.
+        parser.error(
+            "--replay-file cannot be combined with --enable-sapient/--enable-cot: a replay "
+            "does not share a timeline with live sensors. Run one or the other."
+        )
 
     if args.realtime_factor < 0:
         parser.error("--realtime-factor must be >= 0 (0 disables pacing)")
@@ -244,12 +267,39 @@ def fusion_main():
     logger.info("Fusion loop started. Listening for targets...")
 
     # 4. The Main Loop
+    latest_timestamp = None
+    late_events = 0
+    next_late_report = 0.0
     try:
         while True:
             processed_any_events = False
             for source in sources:
                 for timestamp, detections in source.iter_events():
                     processed_any_events = True
+
+                    # Stone Soup cannot predict backwards: feeding it an event
+                    # older than the last one rewinds every track's timestamp and
+                    # re-broadcasts the lot with a CoT time that moves back, which
+                    # TAK draws as markers jumping into the past -- for every
+                    # track, not just the late sensor's. UDP reordering produces
+                    # the odd one; a sensor whose clock is behind produces nothing
+                    # but, and is effectively out of the fusion picture until its
+                    # clock is fixed, so keep saying so.
+                    if latest_timestamp is not None and timestamp < latest_timestamp:
+                        late_events += 1
+                        if time.monotonic() >= next_late_report:
+                            next_late_report = time.monotonic() + LATE_EVENT_REPORT_SECONDS
+                            logger.warning(
+                                "Dropped %d event(s) stamped before the last one processed; "
+                                "the latest is %.1fs behind, from %s. Its sensor's clock is "
+                                "out of step and its detections are not being fused.",
+                                late_events,
+                                (latest_timestamp - timestamp).total_seconds(),
+                                _sensor_ids(detections),
+                            )
+                        continue
+                    latest_timestamp = timestamp
+
                     active_tracks = tracker.process_async_event(timestamp, set(detections))
 
                     # Serialization / Output
@@ -270,11 +320,14 @@ def fusion_main():
             if processed_any_events:
                 continue
 
-            # Every source ran dry on this pass. A live source only does that if
-            # its read loop gave up, and re-polling it would spin at full tilt.
+            # Every source ran dry on this pass. A live source's read loop
+            # swallows its own errors and never returns, so reaching this means
+            # something unforeseen took the ingress down; re-polling would spin.
+            # Failing loudly beats a container that looks healthy and reads
+            # nothing.
             if args.enable_sapient or args.enable_cot:
                 logger.error("Every live source ended; nothing left to read. Exiting.")
-                break
+                raise SystemExit(1)
 
             # Exit logic for replay files
             if args.replay_file:
@@ -287,6 +340,9 @@ def fusion_main():
                     # timestamps jump backwards there and Stone Soup cannot predict
                     # backwards.
                     tracker = SapientAsynchronousTracker()
+                    # The new iteration re-anchors the clock, so the previous
+                    # one's timestamps must not gate it.
+                    latest_timestamp = None
                     time.sleep(loop_delay)
                     continue
                 logger.info("Replay file processing complete. Exiting.")

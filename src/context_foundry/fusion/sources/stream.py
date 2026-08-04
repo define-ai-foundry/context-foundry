@@ -17,7 +17,7 @@ from sapient_msg.bsi_flex_335_v2_0.sapient_message_pb2 import SapientMessage
 
 from .. import config
 from ..validators.sapient import SapientValidator
-from .base import SapientSource
+from .base import SapientSource, swarm_count
 
 logger = logging.getLogger(__name__)
 
@@ -72,14 +72,7 @@ class NetworkSapientStream(SapientSource):
                 alt = clean_det.altitude if clean_det.altitude is not None else 0.0
                 e, n, u = config.wgs84_to_enu(clean_det.latitude, clean_det.longitude, alt)
 
-                # Same swarm extraction logic as the replay source
                 original_report = clean_det.raw_metadata.get("original_report", {})
-
-                swarm_count = 1
-                for info in original_report.get("objectInfo", []):
-                    if info.get("type") == "estimatedSwarmCount":
-                        swarm_count = int(info.get("value", 1))
-
                 sensor_meta = config.get_sensor(clean_det.sensor_id)
 
                 detection = Detection(
@@ -92,7 +85,7 @@ class NetworkSapientStream(SapientSource):
                     "nodeId": clean_det.sensor_id,
                     "objectId": original_report.get("objectId"),
                     "classification": clean_det.classification or "Unknown",
-                    "swarm_count": swarm_count,
+                    "swarm_count": swarm_count(original_report),
                     "sensor_geodetic": {
                         "latitude": sensor_meta["lat"],
                         "longitude": sensor_meta["lon"],

@@ -6,7 +6,7 @@ import math
 from datetime import timezone
 from typing import Any
 
-from google.protobuf.json_format import ParseDict, ParseError
+from google.protobuf.json_format import MessageToDict, ParseDict, ParseError
 
 from context_foundry.fusion import config
 from context_foundry.fusion.schemas import InternalDetection
@@ -91,8 +91,10 @@ class SapientValidator(ProtocolValidator):
             else None,
             # Sources read the detection report out of "original_report" for the
             # fields the universal schema does not carry (objectId, swarm count).
+            # Rendered back from the parsed message rather than picked out of the
+            # raw dict, which ParseDict also accepts in snake_case.
             raw_metadata={
                 "original_envelope": raw_payload,
-                "original_report": raw_payload["sapientMessage"].get("detectionReport", {}),
+                "original_report": MessageToDict(report, preserving_proto_field_name=False),
             },
         )
