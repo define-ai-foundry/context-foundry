@@ -151,6 +151,77 @@ def test_normalize_classification_defaults_to_unknown(validator, sapient_detecti
     assert det.classification == "Unknown"
 
 
+# --- normalize(): classification flattening --------------------------------------
+
+
+def _with_classification(message, classification):
+    payload = copy.deepcopy(message)
+    payload["sapientMessage"]["detectionReport"]["classification"] = classification
+    return payload
+
+
+def test_normalize_classification_single_level(validator, sapient_detection_report_message):
+    payload = _with_classification(
+        sapient_detection_report_message, [{"type": "Air vehicle", "confidence": 0.62}]
+    )
+    det = validator.normalize(payload)
+    assert det.classification == "Air vehicle"
+
+
+def test_normalize_classification_flattens_nested_sub_class_chain(
+    validator, sapient_detection_report_message
+):
+    payload = _with_classification(
+        sapient_detection_report_message,
+        [
+            {
+                "type": "Air vehicle",
+                "confidence": 0.62,
+                "subClass": [
+                    {
+                        "type": "UAV fixed wing",
+                        "level": 1,
+                        "subClass": [{"type": "Military", "level": 2, "subClass": []}],
+                    }
+                ],
+            }
+        ],
+    )
+    det = validator.normalize(payload)
+    assert det.classification == "Air vehicle > UAV fixed wing > Military"
+
+
+def test_normalize_classification_stops_at_empty_sub_class_list(
+    validator, sapient_detection_report_message
+):
+    payload = _with_classification(
+        sapient_detection_report_message,
+        [{"type": "Air vehicle", "subClass": [{"type": "UAV rotary wing", "level": 1}]}],
+    )
+    det = validator.normalize(payload)
+    assert det.classification == "Air vehicle > UAV rotary wing"
+
+
+def test_normalize_classification_follows_first_branch_when_alternatives_exist(
+    validator, sapient_detection_report_message
+):
+    payload = _with_classification(
+        sapient_detection_report_message,
+        [
+            {
+                "type": "Air vehicle",
+                "subClass": [
+                    {"type": "UAV fixed wing", "level": 1},
+                    {"type": "UAV rotary wing", "level": 1},
+                ],
+            },
+            {"type": "Ground vehicle"},
+        ],
+    )
+    det = validator.normalize(payload)
+    assert det.classification == "Air vehicle > UAV fixed wing"
+
+
 def test_normalize_detection_confidence_present(validator, sapient_detection_report_message):
     payload = copy.deepcopy(sapient_detection_report_message)
     payload["sapientMessage"]["detectionReport"]["detectionConfidence"] = 0.75

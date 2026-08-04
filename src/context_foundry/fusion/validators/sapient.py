@@ -67,6 +67,30 @@ def _report_unregistered_node(node_id: str) -> None:
     )
 
 
+# Separator between taxonomy levels of a flattened classification path.
+CLASS_PATH_SEPARATOR = " > "
+
+
+def flatten_classification(classification) -> str:
+    """Join a DetectionReportClassification's type and its nested SubClass chain into one path.
+
+    BSI Flex 335 carries only the top-level taxonomy class in `type`; every finer level
+    hangs off a recursively nested `sub_class`. Both `classification` and `sub_class` are
+    repeated, i.e. alternative hypotheses; the internal schema holds a single string, so
+    the first (primary) entry is followed at every level, matching how the reports are built.
+    """
+    if not classification:
+        return "Unknown"
+
+    node = classification[0]
+    parts = [node.type]
+    while node.sub_class:
+        node = node.sub_class[0]
+        parts.append(node.type)
+
+    return CLASS_PATH_SEPARATOR.join(part for part in parts if part)
+
+
 class SapientValidator(ProtocolValidator):
     def validate(self, raw_payload: dict[str, Any]) -> tuple[bool, str]:
         if "sapientMessage" not in raw_payload:
@@ -146,9 +170,7 @@ class SapientValidator(ProtocolValidator):
             raise ValueError("Detection missing both 'location' and 'range_bearing' fields.")
 
         # --- Classification and Return ---
-        primary_class = (
-            report.classification[0].type if len(report.classification) > 0 else "Unknown"
-        )
+        primary_class = flatten_classification(report.classification)
 
         return InternalDetection(
             sensor_id=msg.node_id,
