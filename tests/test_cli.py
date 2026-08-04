@@ -26,8 +26,9 @@ class _Detection:
     """Fake Stone Soup Detection. Only .timestamp is touched by the code under
     test -- OffsetReplaySource rewrites it, so it must be assignable."""
 
-    def __init__(self, timestamp=T0):
+    def __init__(self, timestamp=T0, node_id=None):
         self.timestamp = timestamp
+        self.metadata = {"nodeId": node_id} if node_id else {}
 
 
 class _Stop(BaseException):
@@ -249,8 +250,11 @@ def test_enable_sapient_and_cot_reads_both_sources_concurrently(monkeypatch, cap
     )
 
     # Both fakes run dry, so the loop exits instead of re-polling dead sources.
-    with caplog.at_level("ERROR"):
+    with caplog.at_level("ERROR"), pytest.raises(SystemExit) as exit_info:
         cli.fusion_main()
+
+    # Non-zero: an ingress that has stopped reading must not look healthy.
+    assert exit_info.value.code == 1
 
     assert created == {"sapient_port": 5000, "cot_port": 6969}
     assert sapient.calls >= 1
@@ -943,3 +947,74 @@ def test_sigterm_handler_is_installed_and_stops_the_run(monkeypatch):
 
     # Sinks are flushed and closed on the way out, which a SIGKILL would skip.
     assert closed == [True]
+
+
+def test_replay_file_with_a_live_source_is_refused(monkeypatch, capsys):
+    """The two run on clocks that do not line up, so the tracker would discard
+    whichever timeline is behind -- silently, and for the whole run."""
+    monkeypatch.setattr(
+        "sys.argv",
+        ["fusion", "--config", "sensors.json", "--replay-file", "x.json", "--enable-sapient"],
+    )
+
+    with pytest.raises(SystemExit):
+        cli.fusion_main()
+
+    assert "cannot be combined with" in capsys.readouterr().err
+
+
+def test_events_older_than_the_last_processed_are_dropped(monkeypatch, caplog):
+    """Stone Soup cannot predict backwards: a late event rewinds every track's
+    timestamp and re-broadcasts the lot with a CoT time that moves into the past.
+    """
+    late = T0 - timedelta(seconds=5)
+    tracker = _EchoTracker("late-track-0001")
+
+    monkeypatch.setattr(
+        cli,
+        "NetworkSapientStream",
+        lambda port: _EventsOnceSource(
+            [
+                (T0, [_Detection(T0)]),
+                (late, [_Detection(late, node_id="node-late")]),
+                (T0, [_Detection(T0)]),
+            ]
+        ),
+    )
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: tracker)
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+    monkeypatch.setattr(
+        "sys.argv", ["fusion", "--config", "sensors.json", "--enable-sapient", "--log-to-file"]
+    )
+
+    with caplog.at_level("WARNING"), pytest.raises(SystemExit):
+        cli.fusion_main()
+
+    assert tracker.seen == [T0, T0]
+    warnings = [r for r in caplog.records if "5.0s behind" in r.message]
+    assert len(warnings) == 1
+    # Names the sensor whose clock is out of step, not just the fact of a drop.
+    assert "node-late" in warnings[0].message
+
+
+def test_late_events_are_reported_periodically_not_once(monkeypatch, caplog):
+    """A skewed sensor clock drops every packet it sends; one line for the whole
+    run leaves an operator with a permanently degraded picture and no signal."""
+    late = T0 - timedelta(seconds=5)
+    events = [(T0, [_Detection(T0)])] + [(late, [_Detection(late)]) for _ in range(4)]
+
+    monkeypatch.setattr(cli, "NetworkSapientStream", lambda port: _EventsOnceSource(events))
+    monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda: _EchoTracker("t-0001"))
+    monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
+    monkeypatch.setattr(cli, "LATE_EVENT_REPORT_SECONDS", 0.0)  # report every drop
+    monkeypatch.setattr(
+        "sys.argv", ["fusion", "--config", "sensors.json", "--enable-sapient", "--log-to-file"]
+    )
+
+    with caplog.at_level("WARNING"), pytest.raises(SystemExit):
+        cli.fusion_main()
+
+    reports = [r for r in caplog.records if "behind" in r.message]
+    assert len(reports) == 4
+    # Each report carries the running total, so the scale of the loss is visible.
+    assert "Dropped 4 event(s)" in reports[-1].message

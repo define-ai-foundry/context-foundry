@@ -6,10 +6,12 @@ returns; assertions have to hold while it is still blocked.
 """
 
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from context_foundry.fusion.sources import multiplex
 from context_foundry.fusion.sources.multiplex import MultiplexedSource
 
 T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -105,15 +107,57 @@ def test_a_source_that_raises_is_logged_and_does_not_stop_the_rest(caplog):
     assert any("stopped with an error" in r.message for r in caplog.records)
 
 
-def test_events_beyond_the_queue_size_are_dropped_with_a_warning(caplog):
-    source = _ListSource([_event(i) for i in range(5)])
+def test_a_full_queue_back_pressures_instead_of_losing_events(caplog):
+    """A slow consumer must not silently truncate a source."""
+    source = _ListSource([_event(i) for i in range(50)])
 
     with caplog.at_level("WARNING"):
         events = list(MultiplexedSource([source], queue_size=1).iter_events())
 
-    # A full queue drops rather than blocking every other source behind a slow one.
-    assert len(events) < 5
-    assert any("Event queue full" in r.message for r in caplog.records)
+    assert len(events) == 50
+    assert sorted(timestamp for timestamp, _ in events) == [_event(i)[0] for i in range(50)]
+
+
+def test_a_stalled_reader_reports_once_and_stops_with_the_consumer(caplog):
+    source = _ListSource([_event(i) for i in range(3)])
+    stream = MultiplexedSource([source], queue_size=1).iter_events()
+
+    with caplog.at_level("WARNING"):
+        next(stream)  # leave the rest queued/blocked behind a consumer that stops
+        # Long enough for the reader to fill the queue and block on the next put.
+        time.sleep(multiplex.PUT_TIMEOUT_SECONDS * 3)
+        stream.close()
+        time.sleep(multiplex.PUT_TIMEOUT_SECONDS * 3)
+
+    stalls = [r for r in caplog.records if "Event queue full" in r.message]
+    # One line per stall, not one per event: at packet rate the latter floods.
+    # (A scheduler hiccup longer than the put timeout could produce a second.)
+    assert len(stalls) <= 2
+    assert stalls
+    assert not [t for t in threading.enumerate() if t.name.startswith("source-")]
+
+
+def test_a_reader_stops_between_events_once_the_consumer_is_gone(caplog):
+    """A live socket wakes on its next packet, which must not be fused into a
+    stream nobody is reading."""
+    handed_on = []
+
+    class _CountingSource:
+        def iter_events(self):
+            for i in range(10):
+                handed_on.append(i)
+                yield _event(i)
+
+        def reset(self):
+            pass
+
+    stream = MultiplexedSource([_CountingSource()], queue_size=1).iter_events()
+    next(stream)
+    stream.close()
+    time.sleep(multiplex.PUT_TIMEOUT_SECONDS * 3)
+
+    # Stopped at the queue rather than running the source to exhaustion.
+    assert len(handed_on) < 10
 
 
 def test_reset_is_forwarded_to_every_source():

@@ -7,6 +7,7 @@ import pytest
 
 from context_foundry.fusion import config
 from context_foundry.fusion.schemas import InternalDetection
+from context_foundry.fusion.sources.base import swarm_count
 from context_foundry.fusion.validators.sapient import SapientValidator
 
 
@@ -188,3 +189,32 @@ def test_process_message_full_pipeline_success(sapient_detection_report_message)
     det = SapientValidator().process_message(sapient_detection_report_message)
     assert det is not None
     assert det.sensor_id == "FI-MIL-RAD-KOLI-01"
+
+
+def test_normalize_keeps_the_report_for_a_snake_case_envelope():
+    """ParseDict accepts either spelling, so picking the report out of the raw
+    dict by camelCase key silently lost objectId and the swarm count again."""
+    validator = SapientValidator()
+    payload = {
+        "sapientMessage": {
+            "timestamp": "2026-01-01T00:00:00Z",
+            "node_id": "node-A",
+            "detection_report": {
+                "object_id": "obj-1",
+                "location": {
+                    "x": 29.8,
+                    "y": 62.9,
+                    "z": 100.0,
+                    "coordinateSystem": "LOCATION_COORDINATE_SYSTEM_LAT_LNG_DEG_M",
+                    "datum": "LOCATION_DATUM_WGS84_E",
+                },
+                "object_info": [{"type": "estimatedSwarmCount", "value": "9"}],
+            },
+        }
+    }
+
+    det = validator.normalize(payload)
+
+    report = det.raw_metadata["original_report"]
+    assert report["objectId"] == "obj-1"
+    assert swarm_count(report) == 9

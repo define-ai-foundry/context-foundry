@@ -135,3 +135,27 @@ def test_extract_tactical_track_heading_wraps_to_0_360(augmentor):
 
     result = augmentor.extract_tactical_track(track)
     assert 0.0 <= result.heading_deg < 360.0
+
+
+def test_cot_type_labels_a_track_a_sapient_sensor_left_unclassified(augmentor):
+    """SAPIENT sources write the literal "Unknown" when the sensor gave nothing,
+    so it has to be treated as absent or the CoT fallback never fires."""
+    config.set_reference_origin(62.9, 29.8, 0.0)
+    ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    track = _make_track(
+        np.zeros((9, 1)), ts, metadata={"classification": "Unknown", "cot_type": "a-h-A-M-F-Q"}
+    )
+
+    assert augmentor.extract_tactical_track(track).classification == "a-h-A-M-F-Q"
+
+
+def test_a_real_classification_outranks_a_cot_type(augmentor):
+    """Stone Soup merges every hit's metadata into the track, so a CoT hit on a
+    SAPIENT-tracked target must not downgrade its label to a 2525 code."""
+    config.set_reference_origin(62.9, 29.8, 0.0)
+    ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    track = _make_track(
+        np.zeros((9, 1)), ts, metadata={"classification": "UAV_DECOY", "cot_type": "a-h-A-M-F-Q"}
+    )
+
+    assert augmentor.extract_tactical_track(track).classification == "UAV_DECOY"

@@ -48,6 +48,8 @@ class TakWsSink(CotSink):
         verify_tls: bool = False,
         path: str = "/takproto/1",
         refresh_leeway: int = 30,
+        retry_delay: float = 5.0,
+        socket_timeout: float = 10.0,
     ):
         if not static_token and not (token_url and client_id):
             raise ValueError(
@@ -63,9 +65,13 @@ class TakWsSink(CotSink):
         self.verify_tls = verify_tls
         self.path = path
         self.refresh_leeway = refresh_leeway
+        self.retry_delay = retry_delay
+        self.socket_timeout = socket_timeout
         self.ws = None
         self._token = None
         self._token_exp = 0.0
+        self._retry_after = 0.0
+        self._suppressed = 0
 
     @staticmethod
     def _decode_exp(token: str) -> float:
@@ -116,7 +122,18 @@ class TakWsSink(CotSink):
             sslopt = {} if self.verify_tls else {"cert_reqs": ssl.CERT_NONE}
             ws = websocket.WebSocket(sslopt=sslopt)
             try:
-                ws.connect(self._url(), header=[f"Authorization: Bearer {self._token}"])
+                # The timeout belongs here, not on the constructor, which
+                # swallows unknown kwargs. Unbounded, a TAK host that blackholes
+                # (a Service with no endpoints, a packet filter that drops) parks
+                # the fusion loop for the kernel's SYN retry budget -- minutes,
+                # silently, with the sensor sockets unread behind it. It stays on
+                # the socket afterwards, so a wedged send is bounded too; both
+                # surface as the usual retry.
+                ws.connect(
+                    self._url(),
+                    header=[f"Authorization: Bearer {self._token}"],
+                    timeout=self.socket_timeout,
+                )
             except websocket.WebSocketBadStatusException as e:
                 if e.status_code == 401 and attempt == 1 and not self.static_token:
                     logger.warning("TAK WS handshake 401; refreshing token and retrying")
@@ -129,16 +146,32 @@ class TakWsSink(CotSink):
 
     def send(self, cot_payload: str) -> None:
         try:
-            # A token nearing exp forces a reconnect with a fresh one.
-            if self.ws is not None and not self._token_valid():
+            # A token nearing exp forces a reconnect with a fresh one. A static
+            # token cannot be refreshed, so reconnecting on its expiry would only
+            # buy a 401 per event; keep using the socket until it actually fails.
+            if self.ws is not None and not self.static_token and not self._token_valid():
                 self.close()
             if self.ws is None:
+                if time.monotonic() < self._retry_after:
+                    self._suppressed += 1  # still backing off from a failed connect
+                    return
                 self._connect()
+                if self._suppressed:
+                    logger.warning(
+                        "Reconnected to TAK; %d CoT event(s) were dropped while it was "
+                        "unreachable.",
+                        self._suppressed,
+                    )
+                    self._suppressed = 0
             frame = takproto.xml2proto(cot_payload, takproto.TAKProtoVer.STREAM)
             self.ws.send_binary(bytes(frame))
-        except (websocket.WebSocketException, OSError) as e:
-            logger.error("TAK WS stream error: %s", e)
-            self.close()  # drop the socket so the next send reconnects
+        except (websocket.WebSocketException, OSError, requests.RequestException) as e:
+            # A TAK Server that is down, restarting, or rejecting the token would
+            # otherwise get a full TLS handshake per event, forever.
+            self._suppressed += 1
+            self._retry_after = time.monotonic() + self.retry_delay
+            logger.error("TAK WS stream error: %s (retrying in %gs)", e, self.retry_delay)
+            self.close()  # drop the socket so a later send reconnects
 
     def close(self) -> None:
         if self.ws is not None:

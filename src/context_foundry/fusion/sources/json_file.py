@@ -16,7 +16,7 @@ from .. import config
 
 # Import the new Gatekeeper
 from ..validators.sapient import SapientValidator
-from .base import SapientSource
+from .base import SapientSource, swarm_count
 
 logger = logging.getLogger(__name__)
 
@@ -87,19 +87,12 @@ class JsonSapientSource(SapientSource):
                 # This allows us to access obscure fields without cluttering the universal schema
                 original_report = det.raw_metadata.get("original_report", {})
 
-                # Dynamic extraction of swarm attributes (from the preserved original report)
-                swarm_count = 1
-                object_info_list = original_report.get("objectInfo", [])
-                for info in object_info_list:
-                    if info.get("type") == "estimatedSwarmCount":
-                        swarm_count = int(info.get("value", 1))
-
                 # Bind complete contextual payload to Stone Soup observation
                 detection.metadata = {
                     "nodeId": node_id,
                     "objectId": original_report.get("objectId"),
                     "classification": det.classification or "Unknown",
-                    "swarm_count": swarm_count,
+                    "swarm_count": swarm_count(original_report),
                     "sensor_geodetic": {
                         "latitude": sensor_meta["lat"],
                         "longitude": sensor_meta["lon"],
