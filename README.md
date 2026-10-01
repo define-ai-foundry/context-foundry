@@ -69,7 +69,7 @@ Because all SAPIENT standard .proto files are pre-vendored and compiled within t
 Clone the repository and install the package in editable mode. This automatically configures your environment and registers the global Command Line Interface (CLI).
 
 ```bash
-git clone [https://github.com/define-ai-foundry/context-foundry.git]
+git clone https://github.com/define-ai-foundry/context-foundry.git
 cd context-foundry
 
 # Create and activate a virtual environment (Recommended)
