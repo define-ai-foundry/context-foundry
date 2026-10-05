@@ -1,0 +1,36 @@
+{
+  "version": "1.1",
+  "name": "Hamina-Kotka Port Drone Attack Scenario",
+  "description": "Generated from a scenario-foundry scenario by dev/make_sensor_config.py; altitudes are ground elevation from the scenario's terrain anchors.",
+  "primary_anchor_node": "Jyväskylä",
+  "coordinate_system": "WGS84",
+  "sensors": [
+    {
+      "id": "Jyväskylä",
+      "type": "RADAR_STRATEGIC",
+      "lat": 62.18088717369617,
+      "lon": 25.664062500000004,
+      "alt": 0.0,
+      "range_m": 400000,
+      "update_rate_sec": 2
+    },
+    {
+      "id": "Kotka Tactical",
+      "type": "RADAR_TACTICAL",
+      "lat": 60.44655119928639,
+      "lon": 26.939163208007816,
+      "alt": 0.0,
+      "range_m": 5000,
+      "update_rate_sec": 2
+    },
+    {
+      "id": "Hamina Tactical",
+      "type": "RADAR_TACTICAL",
+      "lat": 60.53731677797644,
+      "lon": 27.151165008544922,
+      "alt": 0.0,
+      "range_m": 5000,
+      "update_rate_sec": 2
+    }
+  ]
+}
