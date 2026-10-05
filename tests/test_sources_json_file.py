@@ -1,10 +1,13 @@
 """Tests for context_foundry.fusion.sources.json_file."""
 
 import json
+import math
 
+import numpy as np
 import pytest
 
 from context_foundry.fusion import config
+from context_foundry.fusion.measurement import DEFAULT_MEASUREMENT_MODEL
 from context_foundry.fusion.sources.json_file import JsonSapientSource
 
 
@@ -189,6 +192,69 @@ def test_iter_events_sensor_geodetic_none_when_unregistered(tmp_path):
     source = JsonSapientSource(path)
     ((_, dets),) = list(source.iter_events())
     assert dets[0].metadata["sensor_geodetic"] is None
+
+
+def test_iter_events_uses_the_default_noise_without_geometric_error(tmp_path):
+    config.load_sensor_network(
+        sensor_network_list=[{"id": "node-A", "lat": 62.9, "lon": 29.8, "alt": 0.0}]
+    )
+    ts = "2026-01-01T00:00:00.000000Z"
+    path = tmp_path / "scenario.json"
+    path.write_text(json.dumps([_msg("node-A", ts, "obj-1")]), encoding="utf-8")
+
+    ((_, dets),) = list(JsonSapientSource(path).iter_events())
+    assert dets[0].measurement_model is DEFAULT_MEASUREMENT_MODEL
+
+
+def test_iter_events_takes_noise_from_the_sensors_geometric_error(tmp_path):
+    config.load_sensor_network(
+        sensor_network_list=[
+            {
+                "id": "node-A",
+                "lat": 62.9,
+                "lon": 29.8,
+                "alt": 0.0,
+                "range_m": 20000.0,
+                "geometric_error": {
+                    "variation_type": "linear_with_range",
+                    "base_m": 5.0,
+                    "at_max_range_m": 35.0,
+                },
+            }
+        ]
+    )
+    ts = "2026-01-01T00:00:00.000000Z"
+    # About 11.1 km north of the sensor: a little over half its range.
+    path = tmp_path / "scenario.json"
+    path.write_text(json.dumps([_msg("node-A", ts, "obj-1", lat=63.0, alt=0.0)]), encoding="utf-8")
+
+    ((_, dets),) = list(JsonSapientSource(path).iter_events())
+    sigma = math.sqrt(dets[0].measurement_model.covar()[0, 0])
+    assert sigma == pytest.approx(5.0 + 30.0 * 11120.0 / 20000.0, rel=0.01)
+
+
+def test_iter_events_frame_origin_is_still_the_first_detection(tmp_path):
+    """The tracking frame's origin is fixed by the first point projected. Placing the
+    sensor for its geometric_error must not take that place from the first detection."""
+    config.load_sensor_network(
+        sensor_network_list=[
+            {
+                "id": "node-A",
+                "lat": 62.9,
+                "lon": 29.8,
+                "alt": 0.0,
+                "range_m": 20000.0,
+                "geometric_error": {"variation_type": "constant", "base_m": 5.0},
+            }
+        ]
+    )
+    ts = "2026-01-01T00:00:00.000000Z"
+    path = tmp_path / "scenario.json"
+    path.write_text(json.dumps([_msg("node-A", ts, "obj-1", lat=63.0, alt=0.0)]), encoding="utf-8")
+
+    ((_, dets),) = list(JsonSapientSource(path).iter_events())
+    assert (config._origin_lat, config._origin_lon) == (63.0, 29.8)
+    assert np.allclose(np.ravel(dets[0].state_vector), 0.0)
 
 
 def test_iter_events_classification_defaults_to_unknown(tmp_path):
