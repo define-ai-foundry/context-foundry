@@ -267,3 +267,39 @@ def test_iter_events_classification_defaults_to_unknown(tmp_path):
     source = JsonSapientSource(path)
     ((_, dets),) = list(source.iter_events())
     assert dets[0].metadata["classification"] == "Unknown"
+
+
+@pytest.mark.parametrize(
+    ("tracking_type", "stable"),
+    [
+        (None, False),
+        ("TRACKING_TYPE_NONE", False),
+        ("TRACKING_TYPE_TRACKLET", True),
+        ("TRACKING_TYPE_TRACK", True),
+        ("TRACKING_TYPE_TRACK_WITH_RE_ID", True),
+    ],
+)
+def test_iter_events_marks_object_ids_stable_from_the_sensors_tracking_type(
+    tmp_path, tracking_type, stable
+):
+    sensor = {"id": "node-A", "lat": 62.9, "lon": 29.8, "alt": 0.0}
+    if tracking_type:
+        sensor["tracking_type"] = tracking_type
+    config.load_sensor_network(sensor_network_list=[sensor])
+    path = tmp_path / "scenario.json"
+    path.write_text(
+        json.dumps([_msg("node-A", "2026-01-01T00:00:00.000000Z", "obj-1")]), encoding="utf-8"
+    )
+
+    ((_, dets),) = list(JsonSapientSource(path).iter_events())
+    assert dets[0].metadata["stable_object_id"] is stable
+
+
+def test_iter_events_unregistered_sensor_object_ids_are_not_stable(tmp_path):
+    path = tmp_path / "scenario.json"
+    path.write_text(
+        json.dumps([_msg("node-A", "2026-01-01T00:00:00.000000Z", "obj-1")]), encoding="utf-8"
+    )
+
+    ((_, dets),) = list(JsonSapientSource(path).iter_events())
+    assert dets[0].metadata["stable_object_id"] is False

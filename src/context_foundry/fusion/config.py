@@ -167,6 +167,20 @@ def get_sensor(node_id: str) -> dict[str, Any] | None:
     return SENSOR_REGISTRY.get(node_id)
 
 
+# Registration TrackingType values under which a sensor keeps one object_id for one
+# object from detection to detection: TRACKLET persists it between detections,
+# TRACK also across broken tracks, TRACK_WITH_RE_ID by re-identifying the object.
+# NONE, or no declaration at all, mints an id per detection.
+STABLE_OBJECT_ID_TRACKING_TYPES = frozenset(
+    {"TRACKING_TYPE_TRACKLET", "TRACKING_TYPE_TRACK", "TRACKING_TYPE_TRACK_WITH_RE_ID"}
+)
+
+
+def has_stable_object_ids(sensor: dict[str, Any] | None) -> bool:
+    """Whether a sensor's tracking_type says its object_id names the same object over time."""
+    return bool(sensor) and sensor.get("tracking_type") in STABLE_OBJECT_ID_TRACKING_TYPES
+
+
 def list_sensors() -> list[str]:
     """Return list of all registered sensor IDs."""
     return list(SENSOR_REGISTRY.keys())

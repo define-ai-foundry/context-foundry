@@ -12,6 +12,7 @@ from stonesoup.hypothesiser.distance import DistanceHypothesiser
 from stonesoup.measures import Mahalanobis
 from stonesoup.predictor.kalman import UnscentedKalmanPredictor
 from stonesoup.types.array import StateVector
+from stonesoup.types.hypothesis import SingleDistanceHypothesis
 from stonesoup.types.state import GaussianState
 from stonesoup.types.track import Track
 from stonesoup.updater.kalman import UnscentedKalmanUpdater
@@ -75,6 +76,14 @@ MAX_COAST_SECONDS = 45.0
 # to nothing starts a track and a track that gates to nothing coasts.
 GATE_MAHALANOBIS_DISTANCE = 5.0
 
+# Gate, in the same units, for a detection carrying an objectId its sensor declares
+# stable (Registration tracking_type) and already bound to a live track. The sensor
+# has said which object this is, so the track it was last fused into takes it even
+# a little outside the position gate -- that is the point of following the id. It
+# is still a gate: past it the id is not trusted, since a sensor that reuses or
+# confuses ids should cost an association, not drag a track across the picture.
+OBJECT_ID_GATE_MAHALANOBIS_DISTANCE = 3 * GATE_MAHALANOBIS_DISTANCE
+
 # Position uncertainty (1-sigma, metres, worst axis) a track may carry before it
 # is dropped, and the default for the tracker's max_coast_position_sigma. This is
 # the coast horizon expressed as geometry instead of time, and it is the bound
@@ -91,6 +100,15 @@ MAX_COAST_POSITION_SIGMA_M = 6000.0
 # conditions that persist, so these are rate limits rather than one-shots, and
 # each bound keeps its own deadline so a busy one cannot mask a quiet one.
 LIMIT_REPORT_SECONDS = 60.0
+
+
+def _object_key(detection):
+    """(nodeId, objectId) of a detection whose sensor keeps stable ids, else None."""
+    metadata = detection.metadata or {}
+    object_id = metadata.get("objectId")
+    if not metadata.get("stable_object_id") or not object_id:
+        return None
+    return metadata.get("nodeId"), object_id
 
 
 def _position_sigma(state):
@@ -199,6 +217,9 @@ class SapientAsynchronousTracker:
         # capped, so it cannot be recovered by scanning states; see
         # _prune_stale_tracks.
         self._last_update_time = {}
+        # (nodeId, objectId) -> id of the track that sensor's object was last fused
+        # into, for sensors whose objectId is stable. Pruned with the tracks.
+        self._object_tracks = {}
         self._refused_tracks = 0
         self._next_track_limit_report = 0.0
         self._shed_detections = 0
@@ -220,10 +241,21 @@ class SapientAsynchronousTracker:
                 self._initialize_new_track(det)
             return self.tracks
 
-        # Gate every track against every detection, then take the assignment with
-        # the lowest total distance. Each track dynamically calculates its own
-        # unique Delta-t prediction internally.
-        associations = self.data_associator.associate(self.tracks, detection_group, timestamp)
+        # A detection whose sensor's stable objectId is already bound to a live
+        # track goes back to that track; only what is left competes on position.
+        associations = self._associate_by_object_id(detection_group)
+        bound_detections = {hypothesis.measurement for hypothesis in associations.values()}
+        remaining_tracks = self.tracks - associations.keys()
+
+        # Gate every remaining track against every remaining detection, then take the
+        # assignment with the lowest total distance. Each track dynamically
+        # calculates its own unique Delta-t prediction internally.
+        if remaining_tracks:
+            associations.update(
+                self.data_associator.associate(
+                    remaining_tracks, detection_group - bound_detections, timestamp
+                )
+            )
 
         associated_detections = set()
 
@@ -253,6 +285,7 @@ class SapientAsynchronousTracker:
                 updated_state = self.updater.update(joint_hypothesis, **update_context)
                 track.append(updated_state)
                 self._last_update_time[track.id] = timestamp
+                self._bind_object_id(det, track)
 
         # This event appended a state to every track above; cap what is retained.
         for live_track in self.tracks:
@@ -270,6 +303,43 @@ class SapientAsynchronousTracker:
         self._prune_stale_tracks(timestamp)
 
         return self.tracks
+
+    def _associate_by_object_id(self, detection_group):
+        """Binds detections to the tracks their sensor's stable objectId already names.
+
+        Returns track -> hypothesis, built the way the DistanceHypothesiser builds
+        one, so the update path cannot tell the two kinds of association apart. A
+        detection is bound only if its sensor declares stable ids, its id is
+        bound to a live track that no other detection of this event has claimed,
+        and it falls inside OBJECT_ID_GATE_MAHALANOBIS_DISTANCE of that track.
+        Everything else is left to position-based association.
+        """
+        tracks_by_id = {track.id: track for track in self.tracks}
+        bound = {}
+        for det in detection_group:
+            key = _object_key(det)
+            if key is None:
+                continue
+            track = tracks_by_id.get(self._object_tracks.get(key))
+            if track is None or track in bound:
+                continue
+            prediction = self.predictor.predict(track, timestamp=det.timestamp)
+            measurement_prediction = self.updater.predict_measurement(
+                prediction, det.measurement_model
+            )
+            distance = self.hypothesiser.measure(measurement_prediction, det)
+            if distance > OBJECT_ID_GATE_MAHALANOBIS_DISTANCE:
+                continue
+            bound[track] = SingleDistanceHypothesis(
+                prediction, det, distance, measurement_prediction
+            )
+        return bound
+
+    def _bind_object_id(self, detection, track):
+        """Remembers which track a stable objectId was fused into."""
+        key = _object_key(detection)
+        if key is not None:
+            self._object_tracks[key] = track.id
 
     def _limit_detections(self, detection_group):
         """Caps how many detections one event is associated with.
@@ -336,6 +406,7 @@ class SapientAsynchronousTracker:
         self.tracks.add(track)
         # The seeding hit is a real detection, so it anchors staleness.
         self._last_update_time[track.id] = detection.timestamp
+        self._bind_object_id(detection, track)
 
     def _report_track_limit(self) -> None:
         self._refused_tracks += 1
@@ -431,4 +502,7 @@ class SapientAsynchronousTracker:
             track_id: seen
             for track_id, seen in self._last_update_time.items()
             if track_id in active_ids
+        }
+        self._object_tracks = {
+            key: track_id for key, track_id in self._object_tracks.items() if track_id in active_ids
         }

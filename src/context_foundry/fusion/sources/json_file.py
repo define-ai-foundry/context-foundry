@@ -100,6 +100,8 @@ class JsonSapientSource(SapientSource):
                 detection.metadata = {
                     "nodeId": node_id,
                     "objectId": original_report.get("objectId"),
+                    # Whether the tracker may follow this objectId from report to report.
+                    "stable_object_id": config.has_stable_object_ids(sensor_meta),
                     "classification": det.classification or "Unknown",
                     "swarm_count": swarm_count(original_report),
                     "sensor_geodetic": {

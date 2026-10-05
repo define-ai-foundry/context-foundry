@@ -731,3 +731,109 @@ def test_a_coasting_track_survives_inside_both_coast_bounds():
 
     # 40s of coasting under the 45s default, and still inside the metre bound.
     assert len(tracker.tracks) == 1
+
+
+# --- association by a sensor's stable objectId (Registration tracking_type) -------
+
+
+def _id_det(e, n, timestamp, object_id, stable=True, node_id="node-A"):
+    return _det(
+        e,
+        n,
+        0.0,
+        timestamp,
+        metadata={
+            "classification": "UAS",
+            "swarm_count": 1,
+            "nodeId": node_id,
+            "objectId": object_id,
+            "stable_object_id": stable,
+        },
+    )
+
+
+def _two_tracks(tracker, stable=True):
+    """Tracks A at the origin and B 60 m east, each seeded from its own objectId."""
+    tracker.process_async_event(
+        T0, {_id_det(0.0, 0.0, T0, "X", stable), _id_det(60.0, 0.0, T0, "Y", stable)}
+    )
+    a = next(t for t in tracker.tracks if abs(t.state.state_vector[0, 0]) < 1.0)
+    b = next(t for t in tracker.tracks if t is not a)
+    return a, b
+
+
+def test_a_stable_object_id_keeps_its_track_over_a_nearer_one(tracker):
+    """X's report lands 5 m from track B, yet the sensor says it is X, which it
+    last fused into A: A takes it, and B, with nothing, coasts."""
+    a, b = _two_tracks(tracker)
+
+    t1 = T0 + timedelta(seconds=2)
+    tracker.process_async_event(t1, {_id_det(55.0, 0.0, t1, "X")})
+
+    assert isinstance(a.state, GaussianStateUpdate)
+    assert not isinstance(b.state, GaussianStateUpdate)
+    assert len(tracker.tracks) == 2
+
+
+def test_without_a_stable_object_id_the_nearest_track_takes_the_report(tracker):
+    a, b = _two_tracks(tracker, stable=False)
+
+    t1 = T0 + timedelta(seconds=2)
+    tracker.process_async_event(t1, {_id_det(55.0, 0.0, t1, "X", stable=False)})
+
+    assert isinstance(b.state, GaussianStateUpdate)
+    assert not isinstance(a.state, GaussianStateUpdate)
+
+
+def test_an_object_id_is_followed_per_sensor(tracker):
+    """Another sensor's object called X is a different object."""
+    a, b = _two_tracks(tracker)
+
+    t1 = T0 + timedelta(seconds=2)
+    tracker.process_async_event(t1, {_id_det(55.0, 0.0, t1, "X", node_id="node-B")})
+
+    assert isinstance(b.state, GaussianStateUpdate)
+    assert not isinstance(a.state, GaussianStateUpdate)
+
+
+def test_a_stable_object_id_far_outside_its_gate_is_not_trusted(tracker):
+    a, b = _two_tracks(tracker)
+
+    t1 = T0 + timedelta(seconds=2)
+    tracker.process_async_event(t1, {_id_det(5000.0, 0.0, t1, "X")})
+
+    assert not isinstance(a.state, GaussianStateUpdate)
+    # The report started a track of its own, and X now names that one, not A.
+    (new,) = tracker.tracks - {a, b}
+    assert tracker._object_tracks[("node-A", "X")] == new.id
+
+
+def test_a_new_track_is_bound_to_the_object_id_that_started_it(tracker):
+    a, b = _two_tracks(tracker)
+    assert tracker._object_tracks == {("node-A", "X"): a.id, ("node-A", "Y"): b.id}
+
+
+def test_reports_without_an_object_id_are_never_bound(tracker):
+    tracker.process_async_event(T0, {_id_det(0.0, 0.0, T0, None)})
+    assert tracker._object_tracks == {}
+
+
+def test_a_pruned_track_forgets_its_object_id(tracker):
+    _two_tracks(tracker)
+    tracker._prune_stale_tracks(T0 + timedelta(seconds=tracker.max_coast_seconds + 1))
+
+    assert tracker.tracks == set()
+    assert tracker._object_tracks == {}
+
+
+def test_position_association_is_skipped_when_every_track_is_bound_by_id(tracker):
+    tracker.process_async_event(T0, {_id_det(0.0, 0.0, T0, "X")})
+    (track,) = tuple(tracker.tracks)
+    tracker.data_associator = MagicMock()
+
+    t1 = T0 + timedelta(seconds=2)
+    tracker.process_async_event(t1, {_id_det(3.0, 0.0, t1, "X")})
+
+    tracker.data_associator.associate.assert_not_called()
+    assert isinstance(track.state, GaussianStateUpdate)
+    assert len(tracker.tracks) == 1
