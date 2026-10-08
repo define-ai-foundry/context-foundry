@@ -1,0 +1,99 @@
+{
+  "version": "1.1",
+  "name": "Porvoo Oil Refinery Combined UAV and USV Attack Scenario",
+  "description": "Generated from a scenario-foundry scenario by dev/make_sensor_config.py; altitudes are ground elevation from the scenario's terrain anchors.",
+  "primary_anchor_node": "Söderskär Radar Balloon",
+  "coordinate_system": "WGS84",
+  "sensors": [
+    {
+      "id": "Pirttisaari Radar",
+      "type": "RADAR_TACTICAL",
+      "lat": 60.162383191686466,
+      "lon": 25.453573465347294,
+      "alt": 0.0,
+      "range_m": 15000,
+      "update_rate_sec": 8
+    },
+    {
+      "id": "Söderskär Radar Balloon",
+      "type": "RADAR_STRATEGIC",
+      "lat": 60.10935484449545,
+      "lon": 25.41000366210938,
+      "alt": 1000.0,
+      "range_m": 110000,
+      "update_rate_sec": 10
+    },
+    {
+      "id": "Kalvö Radar",
+      "type": "RADAR_TACTICAL",
+      "lat": 60.23461308736451,
+      "lon": 25.537462234497074,
+      "alt": 0.0,
+      "range_m": 5995,
+      "update_rate_sec": 12
+    },
+    {
+      "id": "Svartbäck Camera",
+      "type": "THERMAL_CAM",
+      "lat": 60.27514797044103,
+      "lon": 25.51154136657715,
+      "alt": 0.0,
+      "range_m": 3000,
+      "update_rate_sec": 8
+    },
+    {
+      "id": "Orskär Camera",
+      "type": "THERMAL_CAM",
+      "lat": 60.166941581690665,
+      "lon": 25.61749935150147,
+      "alt": 0.0,
+      "range_m": 4000,
+      "update_rate_sec": 10
+    },
+    {
+      "id": "Eestiluoto Camera",
+      "type": "THERMAL_CAM",
+      "lat": 60.12355255092907,
+      "lon": 25.223579406738285,
+      "alt": 0.0,
+      "range_m": 4000,
+      "update_rate_sec": 9
+    },
+    {
+      "id": "Micro Dopler 1",
+      "type": "MICRO_DOPPLER",
+      "lat": 60.31186013428563,
+      "lon": 25.550937652587894,
+      "alt": 0.0,
+      "range_m": 1500,
+      "update_rate_sec": 8
+    },
+    {
+      "id": "Micro Dopler 2",
+      "type": "MICRO_DOPPLER",
+      "lat": 60.31581333666688,
+      "lon": 25.511026382446293,
+      "alt": 0.0,
+      "range_m": 1500,
+      "update_rate_sec": 9
+    },
+    {
+      "id": "Micro Dopler 3",
+      "type": "MICRO_DOPPLER",
+      "lat": 60.294809125749715,
+      "lon": 25.544672012329105,
+      "alt": 0.0,
+      "range_m": 1500,
+      "update_rate_sec": 7
+    },
+    {
+      "id": "Micro Dopler 4",
+      "type": "MICRO_DOPPLER",
+      "lat": 60.29582988532326,
+      "lon": 25.493946075439457,
+      "alt": 0.0,
+      "range_m": 1500,
+      "update_rate_sec": 10
+    }
+  ]
+}

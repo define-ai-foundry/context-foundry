@@ -1,0 +1,54 @@
+{
+  "version": "1.1",
+  "name": "Alakurtti-Lapland Multi-Vector Simulation Scenario",
+  "description": "Generated from a scenario-foundry scenario by dev/make_sensor_config.py; altitudes are ground elevation from the scenario's terrain anchors.",
+  "primary_anchor_node": "FI-MIL-RAD-LUOSTO-01",
+  "coordinate_system": "WGS84",
+  "sensors": [
+    {
+      "id": "FI-MIL-RAD-LUOSTO-01",
+      "type": "RADAR_STRATEGIC",
+      "lat": 67.1333,
+      "lon": 26.8833,
+      "alt": 514.0,
+      "range_m": 180000,
+      "update_rate_sec": 15.0
+    },
+    {
+      "id": "FI-MIL-RAD-KAAMANEN-02",
+      "type": "RADAR_STRATEGIC",
+      "lat": 69.1333,
+      "lon": 27.0333,
+      "alt": 316.7,
+      "range_m": 200000,
+      "update_rate_sec": 20.0
+    },
+    {
+      "id": "FI-MIL-MRAD-SALLA-01",
+      "type": "RADAR_TACTICAL",
+      "lat": 67.05,
+      "lon": 28.5,
+      "alt": 371.8,
+      "range_m": 60000,
+      "update_rate_sec": 5.0
+    },
+    {
+      "id": "FI-BOR-EOIR-SALLABORDER-01",
+      "type": "THERMAL_CAM",
+      "lat": 66.7618,
+      "lon": 28.7847,
+      "alt": 413.9,
+      "range_m": 4000,
+      "update_rate_sec": 10.0
+    },
+    {
+      "id": "FI-METEO-RADAR-SODANKYLA",
+      "type": "RADAR_STRATEGIC",
+      "lat": 67.358,
+      "lon": 26.633,
+      "alt": 450.8,
+      "range_m": 120000,
+      "update_rate_sec": 30.0
+    }
+  ]
+}

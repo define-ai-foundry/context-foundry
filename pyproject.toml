@@ -19,7 +19,9 @@ dependencies = [
     "lxml",
     "takproto>=3.0.0",
     "websocket-client>=1.7.0",
-    "requests>=2.31.0"
+    "requests>=2.31.0",
+    # The pipeline's Kafka topics (--kafka-topic, --kafka-output-topic).
+    "confluent-kafka>=2.6"
 ]
 
 [project.optional-dependencies]

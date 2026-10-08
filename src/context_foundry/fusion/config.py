@@ -167,6 +167,52 @@ def get_sensor(node_id: str) -> dict[str, Any] | None:
     return SENSOR_REGISTRY.get(node_id)
 
 
+# Registration TrackingType values under which a sensor keeps one object_id for one
+# object from detection to detection: TRACKLET persists it between detections,
+# TRACK also across broken tracks, TRACK_WITH_RE_ID by re-identifying the object.
+# NONE, or no declaration at all, mints an id per detection.
+STABLE_OBJECT_ID_TRACKING_TYPES = frozenset(
+    {"TRACKING_TYPE_TRACKLET", "TRACKING_TYPE_TRACK", "TRACKING_TYPE_TRACK_WITH_RE_ID"}
+)
+
+
+def has_stable_object_ids(sensor: dict[str, Any] | None) -> bool:
+    """Whether a sensor's tracking_type says its object_id names the same object over time."""
+    return bool(sensor) and sensor.get("tracking_type") in STABLE_OBJECT_ID_TRACKING_TYPES
+
+
+# What sensors declared about themselves in their SAPIENT Registration
+# (tracking_type, geometric_error), by node id. Kept apart from the operator's
+# manifest so that a sensor which registers without being in it gains its
+# accuracy and tracking type but no made-up position.
+REGISTRATION_CAPABILITIES: dict[str, dict[str, Any]] = {}
+
+
+def apply_registration(node_id: str, capabilities: dict[str, Any]) -> None:
+    """Records what a sensor's Registration declared; later registrations win."""
+    if not node_id or not capabilities:
+        return
+    previous = REGISTRATION_CAPABILITIES.get(node_id)
+    merged = {**(previous or {}), **capabilities}
+    if merged != previous:
+        REGISTRATION_CAPABILITIES[node_id] = merged
+        logger.info("Sensor %s registered: %s", node_id, ", ".join(sorted(capabilities)))
+
+
+def sensor_profile(node_id: str) -> dict[str, Any] | None:
+    """A sensor's manifest entry with what its Registration declared on top.
+
+    The Registration wins where both say something: it is the sensor speaking for
+    itself, and the manifest is the operator's earlier guess. None for a sensor
+    that is in neither.
+    """
+    entry = SENSOR_REGISTRY.get(node_id)
+    declared = REGISTRATION_CAPABILITIES.get(node_id)
+    if entry is None and declared is None:
+        return None
+    return {**(entry or {}), **(declared or {})}
+
+
 def list_sensors() -> list[str]:
     """Return list of all registered sensor IDs."""
     return list(SENSOR_REGISTRY.keys())
@@ -181,6 +227,7 @@ def reset_registry() -> None:
     """Clear registry and origin (mainly for testing)."""
     global ENU_ORIGIN_LAT, ENU_ORIGIN_LON, ENU_ORIGIN_ALT, ENU_ORIGIN_NODE_ID
     SENSOR_REGISTRY.clear()
+    REGISTRATION_CAPABILITIES.clear()
     ENU_ORIGIN_LAT = ENU_ORIGIN_LON = ENU_ORIGIN_ALT = None
     ENU_ORIGIN_NODE_ID = None
 

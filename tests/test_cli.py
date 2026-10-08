@@ -135,7 +135,9 @@ def _fake_track(track_id, timestamp, tactical_kwargs=None):
     if tactical_kwargs:
         kwargs.update(tactical_kwargs)
     tactical = TacticalTrack(**kwargs)
-    return SimpleNamespace(state=SimpleNamespace(timestamp=timestamp), tactical=tactical)
+    return SimpleNamespace(
+        id=tactical.track_id, state=SimpleNamespace(timestamp=timestamp), tactical=tactical
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -1268,7 +1270,9 @@ def test_the_counters_track_what_the_engine_actually_did(monkeypatch, caplog, tm
     """An engine that is up but fusing nothing logs the same startup lines as a
     healthy one; the counters are what separate them, so they have to be right."""
     events = [
-        (T0 + timedelta(seconds=i), [_Detection(T0 + timedelta(seconds=i))]) for i in range(3)
+        # 5 s apart: the default publish rule sends a track at most once per 5 s.
+        (T0 + timedelta(seconds=5 * i), [_Detection(T0 + timedelta(seconds=5 * i))])
+        for i in range(3)
     ]
 
     with caplog.at_level("INFO"):
@@ -1283,7 +1287,9 @@ def test_the_counters_track_what_the_engine_actually_did(monkeypatch, caplog, tm
 
 def test_summary_is_rate_limited_and_flushed_on_shutdown(monkeypatch, caplog, tmp_path):
     events = [
-        (T0 + timedelta(seconds=i), [_Detection(T0 + timedelta(seconds=i))]) for i in range(3)
+        # 5 s apart: the default publish rule sends a track at most once per 5 s.
+        (T0 + timedelta(seconds=5 * i), [_Detection(T0 + timedelta(seconds=5 * i))])
+        for i in range(3)
     ]
 
     with caplog.at_level("INFO"):
@@ -1494,6 +1500,7 @@ def test_the_track_bounds_default_to_the_trackers_documented_defaults(monkeypatc
         "max_track_history": cli.MAX_TRACK_HISTORY,
         "max_coast_seconds": cli.MAX_COAST_SECONDS,
         "max_event_detections": cli.MAX_EVENT_DETECTIONS,
+        "confirm_hits": cli.DEFAULT_CONFIRM_HITS,
     }
 
 
@@ -1527,6 +1534,8 @@ def test_the_track_bound_flags_reach_the_tracker(monkeypatch, tmp_path):
             "20",
             "--max-event-detections",
             "150",
+            "--confirm-hits",
+            "2",
         ],
     )
 
@@ -1537,6 +1546,7 @@ def test_the_track_bound_flags_reach_the_tracker(monkeypatch, tmp_path):
         "max_track_history": 5,
         "max_coast_seconds": 20.0,
         "max_event_detections": 150,
+        "confirm_hits": 2,
     }
 
 
@@ -1894,7 +1904,16 @@ def test_a_fast_sensor_within_the_horizon_cannot_rewind_the_tracker(monkeypatch,
     monkeypatch.setattr(cli, "SapientAsynchronousTracker", lambda **_: tracker)
     monkeypatch.setattr(cli, "TacticalContextAugmentor", _FakeAugmentor)
     monkeypatch.setattr(
-        "sys.argv", ["fusion", "--config", "sensors.json", "--enable-sapient", "--log-to-file"]
+        "sys.argv",
+        [
+            "fusion",
+            "--config",
+            "sensors.json",
+            "--enable-sapient",
+            "--log-to-file",
+            "--publish",
+            "all",
+        ],
     )
 
     with caplog.at_level("DEBUG"), pytest.raises(SystemExit):

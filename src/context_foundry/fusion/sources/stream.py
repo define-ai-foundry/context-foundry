@@ -6,16 +6,16 @@
 import logging
 import socket
 
-import numpy as np
 from google.protobuf.json_format import MessageToDict
 from google.protobuf.message import DecodeError
-from stonesoup.models.measurement.linear import LinearGaussian
 from stonesoup.types.detection import Detection
 
 # Import the root SapientMessage wrapper and our Gatekeeper
 from sapient_msg.bsi_flex_335_v2_0.sapient_message_pb2 import SapientMessage
 
 from .. import config
+from ..measurement import DEFAULT_MEASUREMENT_MODEL, position_measurement
+from ..registration import sensor_capabilities
 from ..validators.sapient import SapientValidator
 from .base import SapientSource, swarm_count
 from .frames import DEFAULT_FRAME_WINDOW_SECONDS, FrameAssembler
@@ -41,9 +41,10 @@ class NetworkSapientStream(SapientSource):
         self.ip = ip
         self.port = port
 
-        self.cartesian_meas_model = LinearGaussian(
-            ndim_state=9, mapping=(0, 3, 6), noise_covar=np.diag([25.0, 25.0, 100.0])
-        )
+        # The shared model before per-sensor accuracy; detections use position_measurement.
+        self.cartesian_meas_model = DEFAULT_MEASUREMENT_MODEL
+        # Each sensor's position in the tracking frame, for its accuracy.
+        self._sensor_enu = {}
 
         self.validator = SapientValidator()
         # A SAPIENT report names its sending node, so an instant is one node's
@@ -90,6 +91,14 @@ class NetworkSapientStream(SapientSource):
         msg = SapientMessage()
         msg.ParseFromString(payload_bytes)
 
+        if msg.WhichOneof("content") == "registration":
+            # What the sensor says about itself decides how its reports associate.
+            config.apply_registration(
+                msg.node_id,
+                sensor_capabilities(MessageToDict(msg, preserving_proto_field_name=True)),
+            )
+            return []
+
         # 3. Convert to Dictionary to pass to our unified Gatekeeper.
         # camelCase keys ('nodeId'), matching the JSON scenario spec the
         # validator parses.
@@ -104,22 +113,40 @@ class NetworkSapientStream(SapientSource):
         if clean_det is None:
             return []  # Invalid message, Heartbeat, or Status update. Ignore it.
 
-        # 5. Build Stone Soup Object
+        # 5. Build Stone Soup Object. Without a height the position is projected
+        # at 0 m, but only its east and north are used; see position_measurement.
         alt = clean_det.altitude if clean_det.altitude is not None else 0.0
         e, n, u = config.wgs84_to_enu(clean_det.latitude, clean_det.longitude, alt)
 
         original_report = clean_det.raw_metadata.get("original_report", {})
-        sensor_meta = config.get_sensor(clean_det.sensor_id)
+        sensor_meta = config.sensor_profile(clean_det.sensor_id)
 
+        # The sensor's accuracy can grow with distance from it, so the sensor is
+        # needed in the same frame -- projected only after a detection, since the
+        # frame's origin is fixed by the first point ever projected.
+        sensor_enu = None
+        if sensor_meta and "lat" in sensor_meta:
+            sensor_enu = self._sensor_enu.get(clean_det.sensor_id)
+            if sensor_enu is None:
+                sensor_enu = config.wgs84_to_enu(
+                    sensor_meta["lat"], sensor_meta["lon"], sensor_meta["alt"]
+                )
+                self._sensor_enu[clean_det.sensor_id] = sensor_enu
+
+        state_vector, model = position_measurement(
+            sensor_meta, sensor_enu, (e, n, u), clean_det.altitude is not None
+        )
         detection = Detection(
-            state_vector=np.array([[e], [n], [u]]),
-            measurement_model=self.cartesian_meas_model,
+            state_vector=state_vector,
+            measurement_model=model,
             timestamp=clean_det.timestamp,
         )
 
         detection.metadata = {
             "nodeId": clean_det.sensor_id,
             "objectId": original_report.get("objectId"),
+            # Whether the tracker may follow this objectId from report to report.
+            "stable_object_id": config.has_stable_object_ids(sensor_meta),
             "classification": clean_det.classification or "Unknown",
             "swarm_count": swarm_count(original_report),
             "sensor_geodetic": {
@@ -127,7 +154,7 @@ class NetworkSapientStream(SapientSource):
                 "longitude": sensor_meta["lon"],
                 "altitude": sensor_meta["alt"],
             }
-            if sensor_meta
+            if sensor_meta and "lat" in sensor_meta
             else None,
         }
 

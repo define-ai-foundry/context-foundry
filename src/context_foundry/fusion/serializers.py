@@ -72,35 +72,3 @@ class CotSerializer(BaseSerializer):
         )
 
         return ET.tostring(event, encoding="utf-8").decode("utf-8")
-
-
-class SapientSerializer(BaseSerializer):
-    """Formats tactical state back into a SAPIENT BSI Flex 335 message."""
-
-    def serialize(self, state: TacticalTrack, node_id: str) -> str:
-        # Construct the valid Pydantic model and output JSON
-        from .schemas import (
-            DetectionReport,
-            SapientClassification,
-            SapientLocation,
-            SapientMessage,
-            TrackObjectInfo,
-        )
-
-        report = DetectionReport(
-            objectId=f"TRK-{state.track_id}",
-            state="Active",
-            location=SapientLocation(x=state.latitude, y=state.longitude, z=state.altitude),
-            classification=[SapientClassification(type=state.classification, confidence=0.95)],
-            object_info=[
-                TrackObjectInfo(type="estimatedSwarmCount", value=str(state.swarm_count)),
-                TrackObjectInfo(type="threatLevel", value=state.threat_level),
-                TrackObjectInfo(type="speed", value=f"{state.speed_mps:.2f}"),
-                TrackObjectInfo(type="heading", value=f"{state.heading_deg:.2f}"),
-            ],
-        )
-
-        msg = SapientMessage(timestamp=state.timestamp, nodeId=node_id, detectionReport=report)
-
-        # Pydantic natively exports to standard JSON
-        return msg.model_dump_json(exclude_none=True)

@@ -11,10 +11,17 @@ from pathlib import Path
 
 from context_foundry.fusion import config
 from context_foundry.fusion.augmentor import TacticalContextAugmentor
+from context_foundry.fusion.publish import (
+    DEFAULT_COAST_SECONDS,
+    DEFAULT_WINDOW_SECONDS,
+    POLICIES,
+    PublishPolicy,
+    is_predicted,
+    recent_sources,
+)
 from context_foundry.fusion.serializers import (
     DEFAULT_STALE_SECONDS,
     CotSerializer,
-    SapientSerializer,
 )
 from context_foundry.fusion.sinks.file import FileCotSink
 from context_foundry.fusion.sinks.tak_tls import TakTlsSink
@@ -27,6 +34,8 @@ from context_foundry.fusion.sources.offset import OffsetReplaySource
 from context_foundry.fusion.sources.paced import RealtimeReplaySource
 from context_foundry.fusion.sources.stream import NetworkSapientStream
 from context_foundry.fusion.tracker import (
+    CONFIRM_WINDOW_SECONDS,
+    DEFAULT_CONFIRM_HITS,
     MAX_COAST_SECONDS,
     MAX_EVENT_DETECTIONS,
     MAX_LIVE_TRACKS,
@@ -193,6 +202,77 @@ def fusion_main():
     parser.add_argument("--enable-cot", action="store_true", help="Enable live CoT UDP stream")
     parser.add_argument("--replay-file", type=str, help="Path to JSON scenario file")
     parser.add_argument(
+        "--kafka-topic",
+        help="Read sapient-raw records from this Kafka topic (the records sapient-ingest "
+        "writes). Fused on the records' own event_time, like a replay.",
+    )
+    parser.add_argument(
+        "--kafka-bootstrap",
+        default="localhost:9092",
+        help="Kafka bootstrap servers for --kafka-topic (default: localhost:9092)",
+    )
+    parser.add_argument(
+        "--kafka-group",
+        default="context-foundry-fusion",
+        help="Kafka consumer group for --kafka-topic (default: context-foundry-fusion)",
+    )
+    parser.add_argument(
+        "--kafka-output-topic",
+        help="Publish each fused track as a sapient-raw record to this Kafka topic "
+        "(enables the sink). Uses --kafka-bootstrap and --kafka-security-protocol.",
+    )
+    parser.add_argument(
+        "--publish",
+        choices=POLICIES,
+        default="window",
+        help="Which fused tracks each event sends to every output: 'window' (the default: only "
+        "states a sensor report made, at most one per track per --publish-window-seconds, so "
+        "fewer messages go out than reports come in and no prediction is sent), 'all' (every "
+        "track the event moved, predictions included), 'updates' (every state a report made), "
+        "'coast' (updates, plus a predicted state for a track not sent for --coast-seconds) or "
+        "'predicted' (only predicted states; for research).",
+    )
+    parser.add_argument(
+        "--publish-window-seconds",
+        type=float,
+        default=DEFAULT_WINDOW_SECONDS,
+        help=f"With --publish window, the shortest time between two messages for one track "
+        f"(default: {DEFAULT_WINDOW_SECONDS:g}). Longer means fewer messages and older positions.",
+    )
+    parser.add_argument(
+        "--coast-seconds",
+        type=float,
+        default=DEFAULT_COAST_SECONDS,
+        help=f"With --publish coast, how long a track may go unpublished before a predicted "
+        f"state is sent (default: {DEFAULT_COAST_SECONDS:g}).",
+    )
+    parser.add_argument(
+        "--list-sources",
+        action="store_true",
+        help="List the sensor reports behind each published track (associated_detection): "
+        "each sensor and sensor object id in the track's retained history, newest sighting.",
+    )
+    parser.add_argument(
+        "--label-predicted",
+        action="store_true",
+        help="Mark each published track as measured or predicted (object_info fusionUpdate).",
+    )
+    parser.add_argument(
+        "--pipeline-id",
+        default="local",
+        help="pipeline_id header on published records (default: local)",
+    )
+    parser.add_argument(
+        "--producer-stage",
+        default="fusion",
+        help="producer_stage header on published records (default: fusion)",
+    )
+    parser.add_argument(
+        "--kafka-security-protocol",
+        default="PLAINTEXT",
+        help="Kafka security.protocol for --kafka-topic (default: PLAINTEXT)",
+    )
+    parser.add_argument(
         "--loop",
         action="store_true",
         help="When replaying a --replay-file, restart the replay continuously instead of "
@@ -319,6 +399,15 @@ def fusion_main():
         "reporting more than one sweep at a time -- raise it only with the frame window.",
     )
     parser.add_argument(
+        "--confirm-hits",
+        type=int,
+        default=DEFAULT_CONFIRM_HITS,
+        help=f"Detections a new track needs within {CONFIRM_WINDOW_SECONDS:g} s before it is "
+        f"confirmed and published (default: {DEFAULT_CONFIRM_HITS}). A track that does not "
+        "confirm in time is dropped, so a single stray report never becomes a track. 1 turns "
+        "confirmation off.",
+    )
+    parser.add_argument(
         "--keycloak-token-url",
         help="Keycloak token endpoint (.../protocol/openid-connect/token) for client_credentials",
     )
@@ -348,6 +437,15 @@ def fusion_main():
             "does not share a timeline with live sensors. Run one or the other."
         )
 
+    if args.kafka_topic and (args.replay_file or args.enable_sapient or args.enable_cot):
+        # Records on the topic carry the sensors' own event_time, which need not be
+        # the present (a backlog, or a replayed scenario), so they share a timeline
+        # with neither a replay file nor a live socket.
+        parser.error(
+            "--kafka-topic cannot be combined with --replay-file/--enable-sapient/--enable-cot: "
+            "they do not share a timeline. Run one or the other."
+        )
+
     if args.realtime_factor < 0:
         parser.error("--realtime-factor must be >= 0 (0 disables pacing)")
 
@@ -372,6 +470,15 @@ def fusion_main():
         parser.error("--max-coast-seconds must be > 0; a track has to survive between sweeps")
 
     # Zero detections an event may carry sheds every sweep in full.
+    if args.coast_seconds <= 0:
+        parser.error("--coast-seconds must be > 0")
+
+    if args.publish_window_seconds <= 0:
+        parser.error("--publish-window-seconds must be > 0")
+
+    if args.confirm_hits < 1:
+        parser.error("--confirm-hits must be >= 1")
+
     if args.max_event_detections < 1:
         parser.error("--max-event-detections must be >= 1")
 
@@ -418,6 +525,17 @@ def fusion_main():
         else:
             logger.info(f"Replaying {args.replay_file} unpaced, as fast as events can be fused")
         sources.append(replay_source)
+    if args.kafka_topic:
+        from context_foundry.fusion.sources.kafka import KafkaSapientSource
+
+        sources.append(
+            KafkaSapientSource(
+                args.kafka_bootstrap,
+                args.kafka_topic,
+                args.kafka_group,
+                security_protocol=args.kafka_security_protocol,
+            )
+        )
     if args.enable_sapient:
         sources.append(
             NetworkSapientStream(port=5000, frame_window_seconds=args.frame_window_seconds)
@@ -426,8 +544,12 @@ def fusion_main():
         sources.append(CotNetworkStream(port=6969, frame_window_seconds=args.frame_window_seconds))
 
     if not sources:
-        logger.error("No sources enabled! Use --enable-sapient, --enable-cot, or --replay-file")
+        logger.error(
+            "No sources enabled! Use --enable-sapient, --enable-cot, --replay-file or --kafka-topic"
+        )
         raise SystemExit(1)
+
+    kafka_source = next((s for s in sources if hasattr(s, "consumer")), None)
 
     # The sockets whose kernel drop counters the summary reports. Each live source
     # knows the port it bound; a replay source has none. Collected before the
@@ -456,11 +578,11 @@ def fusion_main():
         max_track_history=args.max_track_history,
         max_coast_seconds=args.max_coast_seconds,
         max_event_detections=args.max_event_detections,
+        confirm_hits=args.confirm_hits,
     )
     augmentor = TacticalContextAugmentor()
     serializers = {
         "TAK": CotSerializer(stale_seconds=args.cot_stale_seconds),
-        "SAPIENT": SapientSerializer(),
     }
 
     # Setup output sinks. At least one is required; file and TLS can be combined.
@@ -509,10 +631,24 @@ def fusion_main():
             "over the WebTAK WebSocket (group-tagged by token)"
         )
 
-    if not sinks:
+    kafka_sink = None
+    publish_policy = PublishPolicy(args.publish, args.coast_seconds, args.publish_window_seconds)
+    if args.kafka_output_topic:
+        from context_foundry.fusion.sinks.kafka import KafkaSapientRawSink
+
+        kafka_sink = KafkaSapientRawSink(
+            args.kafka_bootstrap,
+            args.kafka_output_topic,
+            args.pipeline_id,
+            args.producer_stage,
+            security_protocol=args.kafka_security_protocol,
+        )
+
+    if not sinks and kafka_sink is None:
         logger.error(
             "No output sink configured. Add --tak-tls-host <host> to stream CoT to a TAK Server "
             "over TLS, --tak-ws-host <host> for the group-tagged WebTAK WebSocket, "
+            "--kafka-output-topic <topic> to publish fused tracks as sapient-raw, "
             "or --log-to-file to write CoT to a file for offline validation."
         )
         raise SystemExit(1)
@@ -533,7 +669,9 @@ def fusion_main():
     # as either "no sensor is sending" or "the process is wedged".
     stop_summary = _start_summary_reporter(counters, live_ports)
     # Only a live run has a present to be measured against; see the gate below.
-    future_horizon = FUTURE_HORIZON_SECONDS if not args.replay_file else None
+    # Kafka records keep their sensors' event_time, which a backlog or a replayed
+    # scenario leaves far from the present, so they are gated like a replay.
+    future_horizon = FUTURE_HORIZON_SECONDS if not (args.replay_file or args.kafka_topic) else None
     try:
         while True:
             processed_any_events = False
@@ -618,12 +756,23 @@ def fusion_main():
                     for track in active_tracks:
                         # ONLY broadcast if this track was updated during this specific event
                         # timestamp; this prevents re-broadcasting tracks that haven't changed
-                        if track.state.timestamp == mark:
+                        # and the publish rule lets it out (by default: only a state
+                        # a sensor report made, at most once per track per window).
+                        if track.state.timestamp == mark and publish_policy.should_publish(
+                            track, mark
+                        ):
                             tactical_track = augmentor.extract_tactical_track(track)
                             cot_payload = serializers["TAK"].serialize(tactical_track)
 
                             for sink in sinks:
                                 sink.send(cot_payload)
+                            if kafka_sink is not None:
+                                kafka_sink.send_track(
+                                    tactical_track,
+                                    track.metadata,
+                                    predicted=is_predicted(track) if args.label_predicted else None,
+                                    sources=recent_sources(track) if args.list_sources else None,
+                                )
 
                             counters["cot"] += 1
                             broadcast += 1
@@ -634,6 +783,8 @@ def fusion_main():
                             logger.debug(
                                 f"Broadcast Update for Track {tactical_track.track_id[-4:]} | Threat: {tactical_track.threat_level.upper()}"
                             )
+
+                    publish_policy.forget_all_but(t.id for t in active_tracks)
 
                     logger.info(
                         "Fused event at %s: %d detection(s) in, %d track(s) broadcast.",
@@ -669,6 +820,7 @@ def fusion_main():
                         max_track_history=args.max_track_history,
                         max_coast_seconds=args.max_coast_seconds,
                         max_event_detections=args.max_event_detections,
+                        confirm_hits=args.confirm_hits,
                     )
                     # The new iteration re-anchors the clock, so the previous
                     # one's timestamps must not gate it.
@@ -689,6 +841,10 @@ def fusion_main():
         _log_summary(counters, "Fusion totals at shutdown", live_ports)
         for sink in sinks:
             sink.close()
+        if kafka_sink is not None:
+            kafka_sink.close()
+        if kafka_source is not None:
+            kafka_source.close()
 
 
 if __name__ == "__main__":
