@@ -87,4 +87,5 @@ class TacticalContextAugmentor:
             classification=classification,
             swarm_count=swarm_count,
             threat_level=threat_level,
+            velocity=[float(ve), float(vn), float(vu)],
         )

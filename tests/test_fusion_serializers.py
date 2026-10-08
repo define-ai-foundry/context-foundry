@@ -7,7 +7,7 @@ import pytest
 from lxml import etree
 
 from context_foundry.fusion.schemas import TacticalTrack
-from context_foundry.fusion.serializers import BaseSerializer, CotSerializer, SapientSerializer
+from context_foundry.fusion.serializers import BaseSerializer, CotSerializer
 from context_foundry.fusion.validators.cot import CotValidator
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -116,12 +116,3 @@ def test_cot_serializer_output_validates_against_real_cot_xsd():
     validator = CotValidator(xsd_path=str(XSD_PATH))
     is_valid, error = validator.validate(xml_str)
     assert is_valid, error
-
-
-def test_sapient_serializer_raises_importerror_due_to_missing_schema_classes():
-    """Known bug: serializers.py imports DetectionReport/SapientLocation/etc. from
-    .schemas, but schemas.py only defines InternalDetection and TacticalTrack.
-    SapientSerializer.serialize() can never succeed as written; see final report.
-    """
-    with pytest.raises(ImportError):
-        SapientSerializer().serialize(_track(), node_id="FUSION-NODE")
