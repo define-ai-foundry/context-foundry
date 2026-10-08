@@ -10,6 +10,7 @@ from context_foundry.fusion.measurement import (
     DEFAULT_NOISE_COVAR,
     MIN_SIGMA_M,
     POSITION_MAPPING,
+    default_geometric_error,
     measurement_model_for,
     noise_covariance,
 )
@@ -106,13 +107,47 @@ def test_unknown_variation_type_is_refused():
         noise_covariance(error, SENSOR, (10.0, 0.0, 0.0), 1000.0)
 
 
-def test_sensor_without_geometric_error_keeps_the_default_model():
-    sensor = {"lat": 0.0, "lon": 0.0, "alt": 0.0, "range_m": 1000.0}
-    assert measurement_model_for(sensor, SENSOR, (10.0, 0.0, 0.0)) is DEFAULT_MEASUREMENT_MODEL
+def _model_sigma(model):
+    return math.sqrt(model.noise_covar[0, 0])
 
 
-def test_unregistered_sensor_keeps_the_default_model():
-    assert measurement_model_for(None, None, (10.0, 0.0, 0.0)) is DEFAULT_MEASUREMENT_MODEL
+def test_sensor_of_unknown_kind_without_geometric_error_gets_the_cautious_default():
+    sensor = {"lat": 0.0, "lon": 0.0, "alt": 0.0, "range_m": 1000.0, "type": "lidar"}
+    model = measurement_model_for(sensor, SENSOR, (10.0, 0.0, 0.0))
+    assert _model_sigma(model) == pytest.approx(50.0)
+    assert math.sqrt(model.noise_covar[2, 2]) == pytest.approx(50.0)
+
+
+def test_unregistered_sensor_gets_the_cautious_default():
+    model = measurement_model_for(None, None, (10.0, 0.0, 0.0))
+    assert _model_sigma(model) == pytest.approx(50.0)
+
+
+@pytest.mark.parametrize(
+    "kind, sigma",
+    [("RADAR_STRATEGIC", 35.0), ("radar", 35.0), ("THERMAL_CAM", 17.0), ("electro_optical", 17.0)],
+)
+def test_radar_and_camera_defaults_are_their_cautious_far_end_everywhere(kind, sigma):
+    sensor = {"type": kind, "range_m": 1000.0}
+    near = measurement_model_for(sensor, SENSOR, (10.0, 0.0, 0.0))
+    far = measurement_model_for(sensor, SENSOR, (1000.0, 0.0, 0.0))
+    assert _model_sigma(near) == pytest.approx(sigma)
+    assert _model_sigma(far) == pytest.approx(sigma)
+
+
+def test_micro_doppler_default_is_tight_and_constant():
+    model = measurement_model_for({"type": "MICRO_DOPPLER"}, SENSOR, (900.0, 0.0, 0.0))
+    assert _model_sigma(model) == pytest.approx(5.0)
+
+
+def test_default_for_a_kind_is_found_by_substring():
+    assert default_geometric_error({"type": "RADAR_TACTICAL"})["base_m"] == 35.0
+
+
+def test_declared_geometric_error_wins_over_the_type_default():
+    sensor = {"type": "radar", "geometric_error": {"variation_type": "constant", "base_m": 8.0}}
+    model = measurement_model_for(sensor, SENSOR, (10.0, 0.0, 0.0))
+    assert _model_sigma(model) == pytest.approx(8.0)
 
 
 def test_default_model_is_the_historic_fixed_noise():
@@ -133,3 +168,21 @@ def test_sensor_with_geometric_error_gets_its_own_model():
     assert model.ndim_state == 9
     assert model.mapping == POSITION_MAPPING
     assert math.sqrt(model.covar()[0, 0]) == pytest.approx(35.0)
+
+
+def test_position_measurement_with_height_is_three_dimensional():
+    from context_foundry.fusion.measurement import POSITION_MAPPING, position_measurement
+
+    vector, model = position_measurement(None, None, (1.0, 2.0, 3.0), has_altitude=True)
+    assert vector.ravel().tolist() == [1.0, 2.0, 3.0]
+    assert tuple(model.mapping) == POSITION_MAPPING
+
+
+def test_position_measurement_without_height_uses_east_and_north_only():
+    from context_foundry.fusion.measurement import HORIZONTAL_MAPPING, position_measurement
+
+    sensor = {"geometric_error": {"variation_type": "constant", "base_m": 8.0}}
+    vector, model = position_measurement(sensor, (0.0, 0.0, 0.0), (1.0, 2.0, 0.0), False)
+    assert vector.ravel().tolist() == [1.0, 2.0]
+    assert tuple(model.mapping) == HORIZONTAL_MAPPING
+    assert np.allclose(model.noise_covar, np.diag([64.0, 64.0]))

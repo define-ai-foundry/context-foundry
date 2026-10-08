@@ -16,7 +16,15 @@
       "update_rate_sec": 18.0,
       "capabilities": ["position_3d", "velocity", "classification"],
       "status": "operational",
-      "notes": "Primary anchor node - establishes ENU origin"
+      "notes": "Primary anchor node - establishes ENU origin",
+      "geometric_error": {
+        "type": "standard_deviation",
+        "units": "m",
+        "variation_type": "linear_with_range",
+        "base_m": 5.0,
+        "at_max_range_m": 35.0
+      },
+      "tracking_type": "TRACKING_TYPE_TRACK"
     },
     {
       "id": "FI-MIL-MRAD-HEINA-02",
@@ -28,7 +36,15 @@
       "range_m": 25000,
       "update_rate_sec": 11.0,
       "capabilities": ["position_3d", "velocity", "classification"],
-      "status": "operational"
+      "status": "operational",
+      "geometric_error": {
+        "type": "standard_deviation",
+        "units": "m",
+        "variation_type": "linear_with_range",
+        "base_m": 5.0,
+        "at_max_range_m": 35.0
+      },
+      "tracking_type": "TRACKING_TYPE_TRACK"
     },
     {
       "id": "FI-MIL-RAD-ONTTOLA-01",
@@ -40,7 +56,15 @@
       "range_m": 40000,
       "update_rate_sec": 12.0,
       "capabilities": ["position_3d", "velocity", "classification"],
-      "status": "operational"
+      "status": "operational",
+      "geometric_error": {
+        "type": "standard_deviation",
+        "units": "m",
+        "variation_type": "linear_with_range",
+        "base_m": 5.0,
+        "at_max_range_m": 35.0
+      },
+      "tracking_type": "TRACKING_TYPE_TRACK"
     },
     {
       "id": "FI-CIV-ACU-SAVONVOIMA-01",
@@ -53,7 +77,16 @@
       "update_rate_sec": 9.0,
       "capabilities": ["bearing_only"],
       "status": "operational",
-      "notes": "Reports range/bearing, which is resolved about this position"
+      "notes": "Reports range/bearing, which is resolved about this position",
+      "geometric_error": {
+        "type": "standard_deviation",
+        "units": "m",
+        "variation_type": "bearing",
+        "bearing_deg": 3.5,
+        "range_sigma_m": 1.0,
+        "vertical_m": 1000.0
+      },
+      "tracking_type": "TRACKING_TYPE_TRACK"
     },
     {
       "id": "FI-CIV-EOIR-SAVONVOIMA-STACK",
@@ -65,7 +98,15 @@
       "range_m": 4000,
       "update_rate_sec": 14.0,
       "capabilities": ["position_3d", "classification"],
-      "status": "operational"
+      "status": "operational",
+      "geometric_error": {
+        "type": "standard_deviation",
+        "units": "m",
+        "variation_type": "quadratic_with_range",
+        "base_m": 2.0,
+        "at_max_range_m": 17.0
+      },
+      "tracking_type": "TRACKING_TYPE_TRACK"
     },
     {
       "id": "FI-MIL-MDOP-RAIL-01",
@@ -77,7 +118,14 @@
       "range_m": 3500,
       "update_rate_sec": 9.0,
       "capabilities": ["velocity", "classification"],
-      "status": "operational"
+      "status": "operational",
+      "geometric_error": {
+        "type": "standard_deviation",
+        "units": "m",
+        "variation_type": "constant",
+        "base_m": 1.5
+      },
+      "tracking_type": "TRACKING_TYPE_TRACK"
     },
     {
       "id": "FI-MIL-MDOP-AIRPORT-WEST",
@@ -89,7 +137,14 @@
       "range_m": 3500,
       "update_rate_sec": 13.0,
       "capabilities": ["velocity", "classification"],
-      "status": "operational"
+      "status": "operational",
+      "geometric_error": {
+        "type": "standard_deviation",
+        "units": "m",
+        "variation_type": "constant",
+        "base_m": 1.5
+      },
+      "tracking_type": "TRACKING_TYPE_TRACK"
     },
     {
       "id": "FI-BOR-EOIR-PEKKALABRIDGE-01",
@@ -101,7 +156,15 @@
       "range_m": 4000,
       "update_rate_sec": 12.0,
       "capabilities": ["position_3d", "classification"],
-      "status": "operational"
+      "status": "operational",
+      "geometric_error": {
+        "type": "standard_deviation",
+        "units": "m",
+        "variation_type": "quadratic_with_range",
+        "base_m": 2.0,
+        "at_max_range_m": 17.0
+      },
+      "tracking_type": "TRACKING_TYPE_TRACK"
     },
     {
       "id": "FI-CIV-CAM-SAVONVOIMA-GATE",
@@ -113,7 +176,15 @@
       "range_m": 3000,
       "update_rate_sec": 14.0,
       "capabilities": ["position_3d", "classification"],
-      "status": "operational"
+      "status": "operational",
+      "geometric_error": {
+        "type": "standard_deviation",
+        "units": "m",
+        "variation_type": "quadratic_with_range",
+        "base_m": 2.0,
+        "at_max_range_m": 17.0
+      },
+      "tracking_type": "TRACKING_TYPE_TRACK"
     }
   ],
   "metadata": {

@@ -66,7 +66,7 @@ def test_normalize_extracts_internal_detection(validator):
     assert det.longitude == pytest.approx(29.8)
     assert det.altitude == pytest.approx(100.0)
     assert det.classification == "a-f-A-M-F"
-    assert det.raw_metadata == {"original_xml": VALID_COT_XML}
+    assert det.raw_metadata == {"original_xml": VALID_COT_XML, "ce": 10.0, "le": 10.0}
     assert det.timestamp.year == 2026
 
 
@@ -83,3 +83,13 @@ def test_process_message_returns_none_for_invalid_xml(validator):
 def test_init_loads_schema_from_explicit_path():
     v = CotValidator(xsd_path=XSD_PATH)
     assert isinstance(v.schema, etree.XMLSchema)
+
+
+def test_normalize_treats_cot_unknown_values_as_absent(validator):
+    xml = VALID_COT_XML.replace(
+        'hae="100.0" ce="10.0" le="10.0"', 'hae="9999999.0" ce="9999999.0" le="9999999.0"'
+    )
+    det = validator.normalize(xml)
+    assert det.altitude is None
+    assert det.raw_metadata["ce"] is None
+    assert det.raw_metadata["le"] is None

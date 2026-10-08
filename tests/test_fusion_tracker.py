@@ -113,7 +113,7 @@ def test_bootstrap_creates_one_track_per_det(tracker):
 
     result = tracker.process_async_event(T0, {d1, d2})
 
-    assert result is tracker.tracks
+    assert result == tracker.tracks
     assert len(tracker.tracks) == 2
     for track in tracker.tracks:
         assert len(track.states) == 1
@@ -836,4 +836,64 @@ def test_position_association_is_skipped_when_every_track_is_bound_by_id(tracker
 
     tracker.data_associator.associate.assert_not_called()
     assert isinstance(track.state, GaussianStateUpdate)
+    assert len(tracker.tracks) == 1
+
+
+def test_new_tracks_stay_tentative_until_confirmed():
+    tracker = SapientAsynchronousTracker(confirm_hits=3)
+    t1, t2, t3 = T0, T0 + timedelta(seconds=2), T0 + timedelta(seconds=4)
+
+    assert tracker.process_async_event(t1, {_det(0.0, 0.0, 0.0, t1)}) == set()
+    assert tracker.process_async_event(t2, {_det(0.0, 0.0, 0.0, t2)}) == set()
+    confirmed = tracker.process_async_event(t3, {_det(0.0, 0.0, 0.0, t3)})
+
+    assert len(confirmed) == 1
+    assert tracker.confirmed_tracks() == confirmed
+
+
+def test_a_tentative_track_that_misses_its_window_is_dropped():
+    tracker = SapientAsynchronousTracker(confirm_hits=3, confirm_window_seconds=10)
+    tracker.process_async_event(T0, {_det(0.0, 0.0, 0.0, T0)})
+    # A stray report elsewhere, 11 s later: the first tentative track never confirmed.
+    later = T0 + timedelta(seconds=11)
+    tracker.process_async_event(later, {_det(9000.0, 9000.0, 0.0, later)})
+
+    assert len(tracker.tracks) == 1
+    assert tracker.confirmed_tracks() == set()
+
+
+@pytest.mark.parametrize("hits, window", [(0, 15.0), (3, 0.0)])
+def test_rejects_bad_confirmation_settings(hits, window):
+    with pytest.raises(ValueError):
+        SapientAsynchronousTracker(confirm_hits=hits, confirm_window_seconds=window)
+
+
+def _det_without_height(e, n, timestamp):
+    from stonesoup.models.measurement.linear import LinearGaussian
+
+    model = LinearGaussian(ndim_state=9, mapping=(0, 3), noise_covar=np.diag([25.0, 25.0]))
+    d = Detection(state_vector=np.array([[e], [n]]), measurement_model=model, timestamp=timestamp)
+    d.metadata = {"classification": "UAS", "swarm_count": 1}
+    return d
+
+
+def test_a_track_started_without_height_takes_it_from_the_next_report():
+    tracker = SapientAsynchronousTracker()
+    tracker.process_async_event(T0, {_det_without_height(0.0, 0.0, T0)})
+    (track,) = tracker.tracks
+    assert track.state.covar[6, 6] == pytest.approx(1000.0**2)
+
+    later = T0 + timedelta(seconds=2)
+    tracker.process_async_event(later, {_det(0.0, 0.0, 400.0, later)})
+
+    (track,) = tracker.tracks
+    assert track.state.state_vector[6, 0] == pytest.approx(400.0, abs=5.0)
+
+
+def test_a_report_without_height_joins_a_track_far_above_the_ground():
+    tracker = SapientAsynchronousTracker()
+    tracker.process_async_event(T0, {_det(0.0, 0.0, 400.0, T0)})
+    later = T0 + timedelta(seconds=2)
+    tracker.process_async_event(later, {_det_without_height(3.0, -2.0, later)})
+
     assert len(tracker.tracks) == 1

@@ -258,3 +258,12 @@ def test_iter_events_detection_for_an_emitted_instant_becomes_its_own_event(monk
 
     with pytest.raises(_Stop):
         next(gen)
+
+
+def test_point_accuracy_uses_the_points_own_error_or_the_cautious_default():
+    from context_foundry.fusion.sources.cot_stream import _point_accuracy
+
+    declared = _point_accuracy({"ce": 12.0, "le": 30.0})["geometric_error"]
+    assert (declared["base_m"], declared["vertical_m"]) == (12.0, 30.0)
+    unknown = _point_accuracy({"ce": None, "le": None})["geometric_error"]
+    assert (unknown["base_m"], unknown["vertical_m"]) == (50.0, 50.0)

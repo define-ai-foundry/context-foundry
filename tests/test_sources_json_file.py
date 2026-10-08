@@ -7,7 +7,6 @@ import numpy as np
 import pytest
 
 from context_foundry.fusion import config
-from context_foundry.fusion.measurement import DEFAULT_MEASUREMENT_MODEL
 from context_foundry.fusion.sources.json_file import JsonSapientSource
 
 
@@ -194,7 +193,9 @@ def test_iter_events_sensor_geodetic_none_when_unregistered(tmp_path):
     assert dets[0].metadata["sensor_geodetic"] is None
 
 
-def test_iter_events_uses_the_default_noise_without_geometric_error(tmp_path):
+def test_iter_events_uses_a_cautious_default_without_geometric_error(tmp_path):
+    # A sensor of no known kind that declares no accuracy is assumed 50 m, not the
+    # old shared 5 m that split every radar's reports into tracks of their own.
     config.load_sensor_network(
         sensor_network_list=[{"id": "node-A", "lat": 62.9, "lon": 29.8, "alt": 0.0}]
     )
@@ -203,7 +204,7 @@ def test_iter_events_uses_the_default_noise_without_geometric_error(tmp_path):
     path.write_text(json.dumps([_msg("node-A", ts, "obj-1")]), encoding="utf-8")
 
     ((_, dets),) = list(JsonSapientSource(path).iter_events())
-    assert dets[0].measurement_model is DEFAULT_MEASUREMENT_MODEL
+    assert dets[0].measurement_model.noise_covar[0, 0] == pytest.approx(50.0**2)
 
 
 def test_iter_events_takes_noise_from_the_sensors_geometric_error(tmp_path):

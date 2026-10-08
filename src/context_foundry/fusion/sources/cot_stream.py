@@ -9,11 +9,31 @@ from stonesoup.models.measurement.linear import LinearGaussian
 from stonesoup.types.detection import Detection
 
 from .. import config
+from ..measurement import UNKNOWN_SENSOR_GEOMETRIC_ERROR, position_measurement
 from ..validators.cot import CotValidator
 from .base import SapientSource
 from .frames import DEFAULT_FRAME_WINDOW_SECONDS, FrameAssembler
 
 logger = logging.getLogger(__name__)
+
+
+def _point_accuracy(raw_metadata):
+    """A pseudo sensor entry carrying the CoT point's own error as its geometric_error.
+
+    CoT says how accurate each point is (ce horizontally, le vertically); an
+    unknown one falls back to the cautious default for a sensor of unknown kind.
+    """
+    unknown = UNKNOWN_SENSOR_GEOMETRIC_ERROR
+    ce = (raw_metadata or {}).get("ce")
+    le = (raw_metadata or {}).get("le")
+    return {
+        "type": "cot",
+        "geometric_error": {
+            "variation_type": "constant",
+            "base_m": ce if ce is not None else unknown["base_m"],
+            "vertical_m": le if le is not None else unknown["vertical_m"],
+        },
+    }
 
 
 class CotNetworkStream(SapientSource):
@@ -88,14 +108,18 @@ class CotNetworkStream(SapientSource):
         if clean_det is None:
             return []  # Drop invalid CoT
 
-        # 2. Translate to Stone Soup Detection
+        # 2. Translate to Stone Soup Detection. A point without a height is
+        # projected at 0 m but measured in east and north only.
+        has_height = clean_det.altitude is not None
         e, n, u = config.wgs84_to_enu(
-            clean_det.latitude, clean_det.longitude, clean_det.altitude or 0.0
+            clean_det.latitude, clean_det.longitude, clean_det.altitude if has_height else 0.0
         )
-
+        state_vector, model = position_measurement(
+            _point_accuracy(clean_det.raw_metadata), None, (e, n, u), has_height
+        )
         detection = Detection(
-            state_vector=np.array([[e], [n], [u]]),
-            measurement_model=self.cartesian_meas_model,
+            state_vector=state_vector,
+            measurement_model=model,
             timestamp=clean_det.timestamp,
         )
 
