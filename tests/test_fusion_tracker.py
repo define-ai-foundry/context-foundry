@@ -943,3 +943,37 @@ def test_a_fast_object_with_a_fast_revisit_is_followed():
     tracker, confirmed = _follow_fast_object(5)
     assert len(tracker.tracks) == 1
     assert len(confirmed) == 1
+
+
+# --- track ids fixed by the detection that seeds them -------------------------
+
+
+def _seeded(node="RAD-1", object_id="obj-1", east=0.0, seconds=0.0):
+    detection = Detection(
+        state_vector=np.array([[east], [0.0], [100.0]]),
+        measurement_model=MEAS_MODEL,
+        timestamp=T0 + timedelta(seconds=seconds),
+    )
+    detection.metadata = {"nodeId": node, "objectId": object_id}
+    return detection
+
+
+def test_a_track_seeded_by_the_same_detection_gets_the_same_id():
+    first = SapientAsynchronousTracker()
+    second = SapientAsynchronousTracker()
+    (a,) = first.process_async_event(T0, {_seeded()})
+    (b,) = second.process_async_event(T0, {_seeded()})
+    assert a.id == b.id
+
+
+def test_tracks_seeded_by_different_detections_get_different_ids():
+    tracker = SapientAsynchronousTracker()
+    tracks = tracker.process_async_event(T0, {_seeded(), _seeded(east=5000.0, object_id="obj-2")})
+    assert len({track.id for track in tracks}) == 2
+
+
+def test_two_live_tracks_seeded_alike_are_told_apart():
+    tracker = SapientAsynchronousTracker()
+    tracker._initialize_new_track(_seeded())
+    tracker._initialize_new_track(_seeded())
+    assert len({track.id for track in tracker.tracks}) == 2
