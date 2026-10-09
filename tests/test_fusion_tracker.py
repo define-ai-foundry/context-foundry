@@ -897,3 +897,49 @@ def test_a_report_without_height_joins_a_track_far_above_the_ground():
     tracker.process_async_event(later, {_det_without_height(3.0, -2.0, later)})
 
     assert len(tracker.tracks) == 1
+
+
+def test_the_confirmation_window_holds_three_revisits_of_a_slow_radar():
+    # A long-range radar revisiting every 12 s confirms an object on its third report.
+    tracker = SapientAsynchronousTracker(confirm_hits=3)
+    times = [T0 + timedelta(seconds=12 * i) for i in range(3)]
+    for t in times[:2]:
+        assert tracker.process_async_event(t, {_det(0.0, 0.0, 0.0, t)}) == set()
+    assert len(tracker.process_async_event(times[2], {_det(0.0, 0.0, 0.0, times[2])})) == 1
+
+
+def test_a_new_track_may_be_moving_fast_horizontally_only():
+    tracker = SapientAsynchronousTracker()
+    tracker.process_async_event(T0, {_det(0.0, 0.0, 0.0, T0)})
+    (track,) = tracker.tracks
+    variances = np.diag(track.state.covar)
+    assert variances[1] == pytest.approx(tracker_module.DEFAULT_INITIAL_VELOCITY_VARIANCE)
+    assert variances[4] == pytest.approx(tracker_module.DEFAULT_INITIAL_VELOCITY_VARIANCE)
+    # Acceleration keeps the old, small spread.
+    assert variances[2] == pytest.approx(25.0)
+
+
+def _follow_fast_object(revisit_seconds):
+    # 800 m/s east, reported with a stable object id at a fixed revisit.
+    tracker = SapientAsynchronousTracker(confirm_hits=3)
+    confirmed = set()
+    for i in range(5):
+        seconds = revisit_seconds * i
+        t = T0 + timedelta(seconds=seconds)
+        confirmed = tracker.process_async_event(t, {_id_det(800.0 * seconds, 0.0, t, "fast-1")})
+    return tracker, confirmed
+
+
+def test_a_fast_object_with_a_slow_revisit_is_followed():
+    # A long-range radar revisiting every 15 s, as the Alakurtti missile is first seen.
+    tracker, confirmed = _follow_fast_object(15)
+    assert len(tracker.tracks) == 1
+    assert len(confirmed) == 1
+
+
+def test_a_fast_object_with_a_fast_revisit_is_followed():
+    # A single radar revisiting every 5 s: 4 km between reports, inside the gate of
+    # a track allowed to start at 100 m/s.
+    tracker, confirmed = _follow_fast_object(5)
+    assert len(tracker.tracks) == 1
+    assert len(confirmed) == 1
