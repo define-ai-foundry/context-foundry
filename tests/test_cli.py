@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from context_foundry import cli
+from context_foundry.fusion.engine import LATE_EVENT_TOLERANCE_SECONDS
 from context_foundry.fusion.schemas import TacticalTrack
 from context_foundry.fusion.sources.offset import OffsetReplaySource
 
@@ -147,10 +148,18 @@ def _no_real_sensor_config_load(monkeypatch):
     monkeypatch.setattr(cli.config, "load_sensor_network", lambda **kwargs: None)
 
 
-def test_missing_required_config_arg_exits(monkeypatch):
-    monkeypatch.setattr("sys.argv", ["fusion", "--replay-file", "x.json"])
-    with pytest.raises(SystemExit):
+def test_without_a_sensor_config_none_is_loaded(monkeypatch, caplog):
+    """The sensor file is optional: sensors are learned from Registration and status."""
+
+    def _must_not_load(**kwargs):
+        raise AssertionError("no sensor config was given")
+
+    monkeypatch.setattr(cli.config, "load_sensor_network", _must_not_load)
+    # No source and no sink, so it stops right after the sensor config step.
+    monkeypatch.setattr("sys.argv", ["fusion"])
+    with caplog.at_level("INFO"), pytest.raises(SystemExit):
         cli.fusion_main()
+    assert any("No sensor config" in r.message for r in caplog.records)
 
 
 def test_sensor_config_load_failure_exits_nonzero(monkeypatch, caplog):
@@ -1926,7 +1935,7 @@ def test_a_fast_sensor_within_the_horizon_cannot_rewind_the_tracker(monkeypatch,
     backwards = [-step for step in steps if step < 0]
     # Any rewind left is bounded by the tolerance alone, not by the future horizon
     # stacked on top of it.
-    assert max(backwards, default=0.0) <= cli.LATE_EVENT_TOLERANCE_SECONDS
+    assert max(backwards, default=0.0) <= LATE_EVENT_TOLERANCE_SECONDS
     assert max(backwards, default=0.0) < offset.total_seconds()
 
     # Every event is fused: the healthy ones stay inside the tolerance because the

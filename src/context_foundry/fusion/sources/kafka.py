@@ -6,15 +6,10 @@
 import json
 import logging
 from collections import deque
-from datetime import datetime
 
-from stonesoup.types.detection import Detection
-
-from .. import config
-from ..measurement import DEFAULT_MEASUREMENT_MODEL, position_measurement
-from ..registration import sensor_capabilities
-from ..validators.sapient import SapientValidator
-from .base import SapientSource, swarm_count
+from ..measurement import DEFAULT_MEASUREMENT_MODEL
+from ..sapient_input import SapientRecordReader, event_time
+from .base import SapientSource
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +32,6 @@ def _lineage(headers) -> dict:
     }
 
 
-def _event_time(record: dict) -> datetime:
-    return datetime.fromisoformat(record["event_time"].replace("Z", "+00:00"))
-
-
 class KafkaSapientSource(SapientSource):
     """
     Pipeline ingress adapter. Subscribes to a sapient-raw topic -- the records
@@ -56,6 +47,8 @@ class KafkaSapientSource(SapientSource):
 
     One sensor-instant is one event, the same (timestamp, sensor) grouping the
     replay source uses. Offsets are not committed yet: a restart re-reads the topic.
+    Sensors are learned from their Registration and status reports on the topic
+    (SapientRecordReader), and fusion's own records, `own_node_id`, are skipped.
     """
 
     def __init__(
@@ -65,19 +58,20 @@ class KafkaSapientSource(SapientSource):
         group_id: str,
         security_protocol: str = "PLAINTEXT",
         consumer=None,
+        own_node_id: str | None = None,
     ):
         self.topic = topic
         # The shared model before per-sensor accuracy; detections use measurement_model_for.
         self.cartesian_meas_model = DEFAULT_MEASUREMENT_MODEL
-        # Each sensor's position in the tracking frame, for its geometric_error.
-        self._sensor_enu = {}
-        self.validator = SapientValidator()
+        self.reader = SapientRecordReader(own_node_id)
 
         self._buffers: dict[int, deque] = {}
         self._at_end: set[int] = set()
         self._paused: set[int] = set()
         self.records_read = 0
-        self.records_rejected = 0
+        # Records that are not sapient-raw at all; detection reports that do not
+        # validate are counted by the reader.
+        self._unreadable = 0
 
         if consumer is None:
             # Imported here so the rest of the engine runs without the Kafka client.
@@ -149,23 +143,23 @@ class KafkaSapientSource(SapientSource):
                 self.consumer.resume([TopicPartition(self.topic, partition)])
                 self._paused.discard(partition)
 
+    @property
+    def records_rejected(self) -> int:
+        return self._unreadable + self.reader.records_rejected
+
     def _parse(self, value: bytes):
         """A sapient-raw record holding a detection report, or None."""
         try:
             record = json.loads(value)
-            _event_time(record)
+            event_time(record)
         except (TypeError, ValueError, KeyError, AttributeError) as e:
-            self.records_rejected += 1
+            self._unreadable += 1
             logger.warning("Skipping a record that is not sapient-raw: %s", e)
             return None
-        if record.get("content_type") == "registration":
-            # What the sensor says about itself decides how its reports associate.
-            config.apply_registration(
-                record.get("node_id"), sensor_capabilities(record.get("message"))
-            )
+        # Registrations and status reports teach fusion its sensors as they arrive,
+        # ahead of the merge, so a sensor is known before its first detection is fused.
+        if self.reader.learn(record) or not self.reader.is_detection(record):
             return None
-        if record.get("content_type") != "detection_report":
-            return None  # Status reports and alerts carry no detection.
         return record
 
     def _next_in_order(self):
@@ -175,7 +169,7 @@ class KafkaSapientSource(SapientSource):
         heads = []
         for partition, buffer in self._buffers.items():
             if buffer:
-                heads.append((_event_time(buffer[0]), partition))
+                heads.append((event_time(buffer[0]), partition))
             elif partition not in self._at_end:
                 return None  # This partition may still hold something older.
         if not heads:
@@ -186,58 +180,7 @@ class KafkaSapientSource(SapientSource):
     # --- records into detections ---------------------------------------------
 
     def _detection(self, record: dict):
-        clean_det = self.validator.process_message({"sapientMessage": record.get("message")})
-        if clean_det is None:
-            self.records_rejected += 1
-            return None
-
-        # Without a height the position is projected at 0 m, but only its east and
-        # north are used; see position_measurement.
-        alt = clean_det.altitude if clean_det.altitude is not None else 0.0
-        e, n, u = config.wgs84_to_enu(clean_det.latitude, clean_det.longitude, alt)
-
-        original_report = clean_det.raw_metadata.get("original_report", {})
-        sensor_meta = config.sensor_profile(clean_det.sensor_id)
-
-        # A geometric_error grows with distance from the sensor, so the sensor is
-        # needed in the same frame. Projected only after a detection: the frame's
-        # origin is fixed by the first point ever projected, which has to stay the
-        # first detection.
-        sensor_enu = None
-        if sensor_meta and "lat" in sensor_meta:
-            sensor_enu = self._sensor_enu.get(clean_det.sensor_id)
-            if sensor_enu is None:
-                sensor_enu = config.wgs84_to_enu(
-                    sensor_meta["lat"], sensor_meta["lon"], sensor_meta["alt"]
-                )
-                self._sensor_enu[clean_det.sensor_id] = sensor_enu
-
-        state_vector, model = position_measurement(
-            sensor_meta, sensor_enu, (e, n, u), clean_det.altitude is not None
-        )
-        detection = Detection(
-            state_vector=state_vector,
-            measurement_model=model,
-            timestamp=clean_det.timestamp,
-        )
-        detection.metadata = {
-            "nodeId": clean_det.sensor_id,
-            "objectId": original_report.get("objectId"),
-            # Whether the tracker may follow this objectId from report to report.
-            "stable_object_id": config.has_stable_object_ids(sensor_meta),
-            "classification": clean_det.classification or "Unknown",
-            "swarm_count": swarm_count(original_report),
-            "sensor_geodetic": {
-                "latitude": sensor_meta["lat"],
-                "longitude": sensor_meta["lon"],
-                "altitude": sensor_meta["alt"],
-            }
-            if sensor_meta and "lat" in sensor_meta
-            else None,
-            # Lineage for the fused track this detection updates; see the Kafka sink.
-            **record.get("_lineage", {}),
-        }
-        return clean_det.timestamp, clean_det.sensor_id, detection
+        return self.reader.detection(record)
 
     def iter_events(self):
         key, frame = None, []

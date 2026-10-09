@@ -167,11 +167,11 @@ A live run only ends when it is signalled; SIGTERM (`docker stop`, a pod deletio
 
 ## CLI Reference
 
-The installation exposes the `context-foundry-fusion` command globally. `--config` is always required, and at least one source (`--replay-file`, `--enable-sapient`, or `--enable-cot`) must be provided. `--replay-file` and the live sources are **mutually exclusive** — a scenario's clock does not line up with a sensor's, and the engine refuses the pair rather than silently discarding whichever is behind. The two live sources can be used together, provided their sensors agree on the time. At least one output sink is also required — `--log-to-file`, `--tak-ws-host`, `--tak-tls-host`, or any combination.
+The installation exposes the `context-foundry-fusion` command globally. `--config` names the sensor network file; with `--kafka-topic` it is optional, since each sensor's kind, accuracy, range and position are then learned from its SAPIENT Registration and status reports, and what a sensor declares wins over the file. At least one source (`--replay-file`, `--enable-sapient`, or `--enable-cot`) must be provided. `--replay-file` and the live sources are **mutually exclusive** — a scenario's clock does not line up with a sensor's, and the engine refuses the pair rather than silently discarding whichever is behind. The two live sources can be used together, provided their sensors agree on the time. At least one output sink is also required — `--log-to-file`, `--tak-ws-host`, `--tak-tls-host`, or any combination.
 
 | Flag / Argument | Type | Description | Default / Required |
 | :--- | :--- | :--- | :--- |
-| `--config` | `String` | Path to the sensor network config JSON. | *Required* |
+| `--config` | `String` | Path to the sensor network config JSON. Optional with `--kafka-topic`: sensors are learned from their Registration and status reports. | `None` |
 | `--replay-file` | `String` | Path to a JSON scenario file to replay. Cannot be combined with a live source. | *One source required* |
 | `--loop` | `Flag` | With `--replay-file`, restart the replay continuously instead of exiting — turns a one-shot replay into a continuous feed (ideal as a long-running Deployment demo streaming into TAK). No effect without `--replay-file`. | `False` |
 | `--loop-delay` | `Float` | Seconds to wait between replay iterations when `--loop` is set. | `60` |

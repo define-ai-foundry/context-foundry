@@ -241,3 +241,40 @@ def test_a_registration_record_sets_the_sensors_accuracy_and_tracking():
     ((_, [det]),) = _drain(_source(batches, partitions=(0,)))
     assert det.metadata["stable_object_id"] is True
     assert det.measurement_model.noise_covar[0, 0] == pytest.approx(64.0)
+
+
+def test_fusions_own_records_and_a_sensors_status_are_handled_before_the_merge():
+    own = "fusion-node"
+    status = {
+        "event_time": _ts(1),
+        "content_type": "status_report",
+        "node_id": NODE_B,
+        "message": {
+            "timestamp": _ts(1),
+            "node_id": NODE_B,
+            "status_report": {
+                "node_location": {
+                    "x": 29.81,
+                    "y": 62.91,
+                    "z": 10.0,
+                    "coordinate_system": "LOCATION_COORDINATE_SYSTEM_LAT_LNG_DEG_M",
+                }
+            },
+        },
+    }
+    batches = [
+        [
+            _Msg(0, json.dumps(status).encode()),
+            _Msg(0, _record(_ts(2), node=own)),
+            _Msg(0, _record(_ts(3), node=NODE_B)),
+            _Msg(0, eof=True),
+        ],
+        _Stop(),
+    ]
+    source = KafkaSapientSource(
+        "unused:9092", "topic", "group", consumer=_FakeConsumer(batches, (0,)), own_node_id=own
+    )
+    events = _drain(source)
+    assert [dets[0].metadata["nodeId"] for _, dets in events] == [NODE_B]
+    assert config.sensor_profile(NODE_B)["lat"] == 62.91
+    assert source.reader.own_records_skipped == 1
