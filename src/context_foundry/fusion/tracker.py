@@ -93,9 +93,29 @@ OBJECT_ID_GATE_MAHALANOBIS_DISTANCE = 3 * GATE_MAHALANOBIS_DISTANCE
 # returned to the caller, and a tentative track that misses the window is dropped.
 # A real object is reported again and again, so it confirms within a few revisits;
 # a stray report never does. The tracker's own default is 1 (no confirmation), which
-# keeps its behaviour for callers that do not ask for it; the CLI asks for 3.
+# keeps its behaviour for callers that do not ask for it; the CLI asks for
+# DEFAULT_CONFIRM_HITS.
+#
+# How many reports, and how long to gather them: 3 reports in 30 s shows a real
+# object quickly -- within about 36 s on the simulated Joensuu attack, against 72 s
+# for 5 reports in 60 s -- with the same tracks and accuracy on the four simulated
+# scenarios. The window has to hold three revisits of the slowest sensor that may
+# see an object first: long-range radars revisit every 15-30 s, and with 15 s an
+# object only they see could not be confirmed at all -- on the Joensuu attack five
+# of six swarms went unshown for 7 to 16 minutes. The cost is noisy sensors: with
+# 300 random false reports in two minutes, 3 reports let through 65-74 ghost
+# tracks, 5 reports in 60 s only 6-7.
 DEFAULT_CONFIRM_HITS = 3
-CONFIRM_WINDOW_SECONDS = 15.0
+CONFIRM_WINDOW_SECONDS = 30.0
+
+# Variance (m^2/s^2, east and north) of a new track's velocity, 100 m/s 1-sigma. One
+# detection gives a position and no speed, so a track starts at rest, and this is
+# how far the next report may be from where it started. About 7 m/s, the old value,
+# put a 833 m/s missile's next report -- 4 km on, five seconds later -- far outside
+# the gate, so every report started a track of its own. 75-200 m/s followed a fast
+# object even from a single radar revisiting every 5 s and left the drone scenarios
+# unchanged; 100 m/s is the middle of that range.
+DEFAULT_INITIAL_VELOCITY_VARIANCE = 10000.0
 
 # Height uncertainty (1-sigma, metres) of a track started by a detection that
 # carries no height.
@@ -160,6 +180,7 @@ class SapientAsynchronousTracker:
         self,
         q_noise=0.2,
         p_init_variance=50.0,
+        initial_velocity_variance: float = DEFAULT_INITIAL_VELOCITY_VARIANCE,
         max_live_tracks: int = MAX_LIVE_TRACKS,
         max_track_history: int = MAX_TRACK_HISTORY,
         max_coast_seconds: float = MAX_COAST_SECONDS,
@@ -240,6 +261,10 @@ class SapientAsynchronousTracker:
         # Track storage manifest
         self.tracks = set()
         self.p_init_val = p_init_variance
+        # Horizontal velocity only: a fast object needs room to be moving, but
+        # widening the acceleration with it lets a once-seen track's uncertainty
+        # grow so fast that it is dropped long before its coast horizon.
+        self.initial_velocity_variance = initial_velocity_variance
         # Last real detection per track id. Pruning needs it and track history is
         # capped, so it cannot be recovered by scanning states; see
         # _prune_stale_tracks.
@@ -430,10 +455,10 @@ class SapientAsynchronousTracker:
         covar = np.diag(
             [
                 10.0,
-                self.p_init_val,
+                self.initial_velocity_variance,
                 self.p_init_val / 2.0,  # East states [pos, vel, acc]
                 10.0,
-                self.p_init_val,
+                self.initial_velocity_variance,
                 self.p_init_val / 2.0,  # North states
                 up_variance,
                 self.p_init_val / 2.0,
