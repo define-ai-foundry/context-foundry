@@ -62,7 +62,9 @@ def noise_covariance(geometric_error, sensor_enu, detection_enu, range_m):
         if variation == "constant":
             sigma = base
         else:
-            fraction = min(distance / range_m, 1.0) if range_m else 0.0
+            # Without a range the growth cannot be placed, so the error is taken at
+            # its far end: too wide a gate only widens it, too narrow splits tracks.
+            fraction = min(distance / range_m, 1.0) if range_m else 1.0
             if variation == "quadratic_with_range":
                 fraction **= 2
             elif variation != "linear_with_range":
@@ -103,32 +105,64 @@ UNKNOWN_SENSOR_GEOMETRIC_ERROR = {"variation_type": "constant", "base_m": 50.0, 
 
 
 def default_geometric_error(sensor_meta):
-    """The geometric_error assumed for a sensor that declares none."""
-    kind = str((sensor_meta or {}).get("type", "")).lower()
+    """The geometric_error assumed for a sensor that declares none.
+
+    By the manifest's type, which may name a model ("MDOP doppler radar"), else by the
+    NodeType the sensor registered as ("radar", "camera", "acoustic").
+    """
+    sensor_meta = sensor_meta or {}
+    kind = f"{sensor_meta.get('type', '')} {sensor_meta.get('node_type', '')}".lower()
     for keyword, geometric_error in TYPE_DEFAULT_GEOMETRIC_ERRORS:
         if keyword in kind:
             return geometric_error
     return UNKNOWN_SENSOR_GEOMETRIC_ERROR
 
 
+# How far a sensor that states no range is taken to see, for a bearing error whose
+# sensor position is unknown; the manifest's default range too.
+DEFAULT_SENSOR_RANGE_M = 10000.0
+
+
+def far_end_error(geometric_error, range_m):
+    """A geometric_error as the constant error at the far end of the sensor's reach.
+
+    For a sensor whose position is not known yet -- it has registered but sent no
+    status report -- so no error that grows with distance can be placed: it is taken
+    at its largest, at_max_range_m, or across a bearing at the sensor's range.
+    """
+    variation = geometric_error["variation_type"]
+    if variation == "constant":
+        return geometric_error
+    if variation == "bearing":
+        reach = range_m or DEFAULT_SENSOR_RANGE_M
+        across = reach * math.tan(math.radians(geometric_error["bearing_deg"]))
+        sigma = max(float(geometric_error.get("range_sigma_m", MIN_SIGMA_M)), across)
+    else:
+        sigma = float(geometric_error["at_max_range_m"])
+    far = {"variation_type": "constant", "base_m": sigma}
+    if "vertical_m" in geometric_error:
+        far["vertical_m"] = geometric_error["vertical_m"]
+    return far
+
+
 def measurement_model_for(sensor_meta, sensor_enu, detection_enu):
     """The position measurement model of one detection from the sensor that reported it.
 
     The sensor's declared geometric_error when it has one; otherwise a cautious
-    default for its kind of sensor (default_geometric_error). A sensor missing from
-    the manifest has no position to measure range from, so it gets the unknown-kind
-    default, which does not depend on range.
+    default for its kind of sensor (default_geometric_error). A sensor fusion knows
+    nothing of gets the unknown-kind default; one whose position is not known gets
+    its error at the far end of its reach (far_end_error), since range and bearing
+    cannot be measured without it.
     """
     if sensor_meta is None:
         geometric_error = UNKNOWN_SENSOR_GEOMETRIC_ERROR
     else:
         geometric_error = sensor_meta.get("geometric_error") or default_geometric_error(sensor_meta)
+    range_m = float((sensor_meta or {}).get("range_m") or 0.0)
     if sensor_enu is None:
-        # Without the sensor's position nothing can depend on range or bearing.
+        geometric_error = far_end_error(geometric_error, range_m)
         sensor_enu = detection_enu
-    covar = noise_covariance(
-        geometric_error, sensor_enu, detection_enu, float((sensor_meta or {}).get("range_m", 0.0))
-    )
+    covar = noise_covariance(geometric_error, sensor_enu, detection_enu, range_m)
     return LinearGaussian(ndim_state=9, mapping=POSITION_MAPPING, noise_covar=covar)
 
 

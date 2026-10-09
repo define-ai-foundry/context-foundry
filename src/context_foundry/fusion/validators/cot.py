@@ -4,6 +4,7 @@
 
 from lxml import etree
 
+from context_foundry.fusion.cot_input import known
 from context_foundry.fusion.schemas import InternalDetection
 from context_foundry.fusion.validators.base import ProtocolValidator
 
@@ -39,25 +40,13 @@ class CotValidator(ProtocolValidator):
             timestamp=root.get("time"),
             latitude=float(point.get("lat")),
             longitude=float(point.get("lon")),
-            altitude=_known(point.get("hae")),  # Height Above Ellipsoid
+            altitude=known(point.get("hae")),  # Height Above Ellipsoid
             classification=root.get("type"),
             raw_metadata={
                 "original_xml": raw_xml_string,
                 # The point's own circular (horizontal) and linear (vertical) error,
                 # in metres; None where the sender marked it unknown.
-                "ce": _known(point.get("ce")),
-                "le": _known(point.get("le")),
+                "ce": known(point.get("ce")),
+                "le": known(point.get("le")),
             },
         )
-
-
-# The value CoT uses for "unknown" in hae, ce and le.
-COT_UNKNOWN = 9999999.0
-
-
-def _known(value):
-    """A CoT point attribute as a float, or None when absent or marked unknown."""
-    if value is None:
-        return None
-    number = float(value)
-    return None if number >= COT_UNKNOWN else number

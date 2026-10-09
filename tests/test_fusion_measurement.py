@@ -11,6 +11,7 @@ from context_foundry.fusion.measurement import (
     MIN_SIGMA_M,
     POSITION_MAPPING,
     default_geometric_error,
+    far_end_error,
     measurement_model_for,
     noise_covariance,
 )
@@ -186,3 +187,44 @@ def test_position_measurement_without_height_uses_east_and_north_only():
     assert vector.ravel().tolist() == [1.0, 2.0]
     assert tuple(model.mapping) == HORIZONTAL_MAPPING
     assert np.allclose(model.noise_covar, np.diag([64.0, 64.0]))
+
+
+# --- a sensor whose position or range is not known ---------------------------
+
+LINEAR = {"variation_type": "linear_with_range", "base_m": 5.0, "at_max_range_m": 35.0}
+
+
+def test_without_a_range_a_growing_error_is_taken_at_its_far_end():
+    near = noise_covariance(LINEAR, SENSOR, (10.0, 0.0, 0.0), 0.0)
+    assert _horizontal_sigma(near) == pytest.approx(35.0)
+
+
+def test_far_end_error_of_a_constant_error_is_itself():
+    constant = {"variation_type": "constant", "base_m": 17.0}
+    assert far_end_error(constant, 0.0) is constant
+
+
+def test_far_end_error_of_a_growing_error_is_its_largest():
+    far = far_end_error({**LINEAR, "vertical_m": 40.0}, 3000.0)
+    assert far == {"variation_type": "constant", "base_m": 35.0, "vertical_m": 40.0}
+
+
+def test_far_end_error_of_a_bearing_is_across_the_sensors_reach():
+    bearing = {"variation_type": "bearing", "bearing_deg": 5.0, "range_sigma_m": 10.0}
+    far = far_end_error(bearing, 2000.0)
+    assert far["base_m"] == pytest.approx(2000.0 * math.tan(math.radians(5.0)))
+    # With no range stated, the manifest's default reach.
+    assert far_end_error(bearing, 0.0)["base_m"] == pytest.approx(
+        10000.0 * math.tan(math.radians(5.0))
+    )
+
+
+def test_a_sensor_of_unknown_position_is_measured_at_its_far_end():
+    model = measurement_model_for({"geometric_error": LINEAR, "range_m": 3000.0}, None, SENSOR)
+    assert model.noise_covar[0, 0] == pytest.approx(35.0**2)
+
+
+def test_the_registered_node_type_picks_the_default_when_no_type_is_given():
+    assert default_geometric_error({"node_type": "camera"})["base_m"] == 17.0
+    # The manifest's type names a model more precisely than the NodeType.
+    assert default_geometric_error({"type": "MDOP doppler", "node_type": "radar"})["base_m"] == 5.0

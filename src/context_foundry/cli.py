@@ -11,6 +11,7 @@ from pathlib import Path
 
 from context_foundry.fusion import config
 from context_foundry.fusion.augmentor import TacticalContextAugmentor
+from context_foundry.fusion.engine import FusionEngine, sensor_ids
 from context_foundry.fusion.publish import (
     DEFAULT_COAST_SECONDS,
     DEFAULT_WINDOW_SECONDS,
@@ -49,25 +50,6 @@ logger = logging.getLogger("FusionEngine")
 # How often to report events dropped for arriving out of step. A skewed sensor
 # clock produces one per packet, so this is a rate limit, not a one-shot.
 LATE_EVENT_REPORT_SECONDS = 60.0
-
-# How far ahead of now a live event may be stamped. Live sensors report the
-# present, so anything beyond this is a broken clock or a spoofed datagram --
-# and without the bound one such packet would become the high-water mark that
-# every healthy event afterwards is measured against and dropped.
-FUTURE_HORIZON_SECONDS = 10.0
-
-# How far behind the newest event seen a live event may still be fused. A sensor
-# stamps before it transmits, so every event arrives already a little in the past
-# -- flight time, frame assembly, one fusion pass -- while the newest timestamp a
-# live run will accept is pinned to the present. A gate with no tolerance
-# therefore drops the ordinary case: measured, healthy sensors landed 0.3s behind
-# a mark an out-of-step sender had pulled up to now, and every one was refused.
-# Beyond this it is a clock that disagrees rather than latency. This is also the
-# whole bound on how far an accepted event can rewind the tracker, because the
-# tracker is fed the same clamped timestamp the mark is made of: the mark never
-# runs ahead of the present, so an event that passes this gate is at most this far
-# behind what was last fused.
-LATE_EVENT_TOLERANCE_SECONDS = 2.0
 
 # How often to log the running fusion summary. Without it an engine that is up
 # and fusing nothing logs the same lines as a healthy one and then nothing at
@@ -125,12 +107,6 @@ def _kernel_udp_drops(ports):
                 # One port can appear more than once (several bound sockets).
                 drops[port] = drops.get(port, 0) + count
     return drops
-
-
-def _sensor_ids(detections):
-    """The sensors an event came from, for reporting which one is out of step."""
-    ids = {getattr(det, "metadata", {}).get("nodeId") for det in detections}
-    return ", ".join(sorted(str(node_id) for node_id in ids if node_id)) or "an unnamed sensor"
 
 
 def _start_summary_reporter(counters, live_ports=()):
@@ -418,7 +394,13 @@ def fusion_main():
     parser.add_argument(
         "--tak-bearer-token", help="Static bearer token, as an alternative to a Keycloak grant"
     )
-    parser.add_argument("--config", type=str, required=True, help="Path to sensor config JSON")
+    parser.add_argument(
+        "--config",
+        type=str,
+        help="Path to a sensor config JSON. Optional: without one, sensors are learned from "
+        "their SAPIENT Registration and status reports (Kafka input), and a declared value "
+        "always wins over the file's.",
+    )
     args = parser.parse_args()
 
     if args.loop and not args.replay_file:
@@ -497,14 +479,17 @@ def fusion_main():
     # A negative sleep would raise; clamp once and use the local everywhere below.
     loop_delay = max(0.0, args.loop_delay)
 
-    # Load the sensor network from the file
-    try:
-        config.load_sensor_network(sensor_config_path=args.config)
-    except Exception as e:
-        # Non-zero, or the container exits "Completed" and a misconfiguration
-        # looks exactly like a clean finish to the runtime and to alerting.
-        logger.error(f"Failed to load sensor config: {e}")
-        raise SystemExit(1) from e
+    # Load the sensor network from the file, when there is one
+    if args.config:
+        try:
+            config.load_sensor_network(sensor_config_path=args.config)
+        except Exception as e:
+            # Non-zero, or the container exits "Completed" and a misconfiguration
+            # looks exactly like a clean finish to the runtime and to alerting.
+            logger.error(f"Failed to load sensor config: {e}")
+            raise SystemExit(1) from e
+    else:
+        logger.info("No sensor config: sensors are learned from Registration and status reports")
 
     # 2. Setup Sources
     sources = []
@@ -526,6 +511,7 @@ def fusion_main():
             logger.info(f"Replaying {args.replay_file} unpaced, as fast as events can be fused")
         sources.append(replay_source)
     if args.kafka_topic:
+        from context_foundry.fusion.sapient_raw import fusion_node_id
         from context_foundry.fusion.sources.kafka import KafkaSapientSource
 
         sources.append(
@@ -534,6 +520,8 @@ def fusion_main():
                 args.kafka_topic,
                 args.kafka_group,
                 security_protocol=args.kafka_security_protocol,
+                # Fused tracks routed back to the input are not fused again.
+                own_node_id=fusion_node_id(args.pipeline_id, args.producer_stage),
             )
         )
     if args.enable_sapient:
@@ -657,10 +645,7 @@ def fusion_main():
     logger.info("Fusion loop started. Listening for targets...")
 
     # 4. The Main Loop
-    latest_timestamp = None
-    # Which sensor's event set the current watermark, so a drop report can name
-    # the sensor that caused it and not only the one that suffered it.
-    watermark_sensor = "no event accepted yet"
+    engine = FusionEngine(tracker, publish_policy, augmentor)
     counters = {"events": 0, "detections": 0, "cot": 0, "dropped": 0}
     next_skew_report = 0.0
     # Reported off a timer rather than from the loop below: an ingress that has
@@ -668,44 +653,21 @@ def fusion_main():
     # report says nothing at all precisely then, so silence would have to be read
     # as either "no sensor is sending" or "the process is wedged".
     stop_summary = _start_summary_reporter(counters, live_ports)
-    # Only a live run has a present to be measured against; see the gate below.
-    # Kafka records keep their sensors' event_time, which a backlog or a replayed
-    # scenario leaves far from the present, so they are gated like a replay.
-    future_horizon = FUTURE_HORIZON_SECONDS if not (args.replay_file or args.kafka_topic) else None
+    # Only a live run has a present to be measured against. A replay legitimately
+    # runs ahead of the wall clock, and cannot be combined with a live source; Kafka
+    # records keep their sensors' event_time, which a backlog or a replayed scenario
+    # leaves far from the present. Both are gated on their own timestamps alone.
+    live = not (args.replay_file or args.kafka_topic)
     try:
         while True:
             processed_any_events = False
             for source in sources:
                 for timestamp, detections in source.iter_events():
                     processed_any_events = True
+                    now = datetime.now(timezone.utc) if live else None
+                    result = engine.process(timestamp, detections, now)
 
-                    # Stone Soup cannot predict backwards: feeding it an event
-                    # older than the last one rewinds every track's timestamp and
-                    # re-broadcasts the lot with a CoT time that moves back, which
-                    # TAK draws as markers jumping into the past -- for every
-                    # track, not just the late sensor's. So events are gated to
-                    # the highest timestamp seen so far.
-                    #
-                    # That makes the gate only as good as the highest timestamp,
-                    # which is why a live event stamped in the future is refused
-                    # the mark: one bad clock or spoofed datagram would otherwise
-                    # set a watermark every healthy sensor then falls behind, and
-                    # the engine would go quiet for good. A replay legitimately
-                    # runs ahead of the wall clock, and cannot be combined with a
-                    # live source, so the horizon only applies to live runs.
-                    skew = None
-                    now = None
-                    if future_horizon is not None:
-                        now = datetime.now(timezone.utc)
-                        ahead = (timestamp - now).total_seconds()
-                        if ahead > future_horizon:
-                            skew = f"{ahead:.1f}s ahead of the present"
-                    if skew is None and latest_timestamp is not None:
-                        behind = (latest_timestamp - timestamp).total_seconds()
-                        if behind > LATE_EVENT_TOLERANCE_SECONDS:
-                            skew = f"{behind:.1f}s behind the newest event seen"
-
-                    if skew is not None:
+                    if result.dropped:
                         counters["dropped"] += 1
                         if time.monotonic() >= next_skew_report:
                             next_skew_report = time.monotonic() + LATE_EVENT_REPORT_SECONDS
@@ -715,82 +677,40 @@ def fusion_main():
                                 "Fusing it would drag every track's time with it. Check the "
                                 "sensors' clocks.",
                                 counters["dropped"],
-                                skew,
-                                _sensor_ids(detections),
-                                watermark_sensor,
+                                result.skew,
+                                sensor_ids(detections),
+                                engine.watermark_sensor,
                             )
                         continue
 
-                    # On a live run the event is fused at the present rather than at
-                    # its own timestamp, and that clamped time is also the watermark
-                    # it sets. A sensor a few seconds fast is inside the future
-                    # horizon, so it is fused -- and with its raw timestamp it would
-                    # push every track's state that far ahead, while the next healthy
-                    # event, inside the lateness tolerance and so accepted, rewound
-                    # the tracker by the whole offset and re-broadcast every track
-                    # with a CoT time in the past. Clamping bounds any rewind by the
-                    # tolerance alone. Letting it mark the future would also put the
-                    # gate ahead of what the healthy sensors report, so their events
-                    # -- not its -- get dropped. A replay has no present to be
-                    # measured against and keeps its own timestamps throughout.
-                    mark = timestamp if now is None else min(timestamp, now)
-                    if latest_timestamp is None or mark > latest_timestamp:
-                        latest_timestamp = mark
-                        watermark_sensor = _sensor_ids(detections)
-
-                    if mark != timestamp:
-                        # The detections move with the event. Stone Soup predicts
-                        # each hypothesis to its detection's own timestamp, so a
-                        # track updated by one ends up stamped with it -- leave them
-                        # raw and the broadcast gate below matches nothing, which
-                        # emits no CoT at all for that sensor and says nothing.
-                        for detection in detections:
-                            detection.timestamp = mark
-
                     counters["events"] += 1
                     counters["detections"] += len(detections)
-                    active_tracks = tracker.process_async_event(mark, set(detections))
-                    broadcast = 0
 
                     # Serialization / Output
-                    for track in active_tracks:
-                        # ONLY broadcast if this track was updated during this specific event
-                        # timestamp; this prevents re-broadcasting tracks that haven't changed
-                        # and the publish rule lets it out (by default: only a state
-                        # a sensor report made, at most once per track per window).
-                        if track.state.timestamp == mark and publish_policy.should_publish(
-                            track, mark
-                        ):
-                            tactical_track = augmentor.extract_tactical_track(track)
-                            cot_payload = serializers["TAK"].serialize(tactical_track)
-
-                            for sink in sinks:
-                                sink.send(cot_payload)
-                            if kafka_sink is not None:
-                                kafka_sink.send_track(
-                                    tactical_track,
-                                    track.metadata,
-                                    predicted=is_predicted(track) if args.label_predicted else None,
-                                    sources=recent_sources(track) if args.list_sources else None,
-                                )
-
-                            counters["cot"] += 1
-                            broadcast += 1
-                            # Per track per event: 20 lines a second on a busy
-                            # picture, which buries the drop warnings. The
-                            # per-event line below carries the same information at
-                            # a rate an operator can read.
-                            logger.debug(
-                                f"Broadcast Update for Track {tactical_track.track_id[-4:]} | Threat: {tactical_track.threat_level.upper()}"
+                    for track, tactical_track in result.published:
+                        cot_payload = serializers["TAK"].serialize(tactical_track)
+                        for sink in sinks:
+                            sink.send(cot_payload)
+                        if kafka_sink is not None:
+                            kafka_sink.send_track(
+                                tactical_track,
+                                track.metadata,
+                                predicted=is_predicted(track) if args.label_predicted else None,
+                                sources=recent_sources(track) if args.list_sources else None,
                             )
-
-                    publish_policy.forget_all_but(t.id for t in active_tracks)
+                        counters["cot"] += 1
+                        # Per track per event: 20 lines a second on a busy picture,
+                        # which buries the drop warnings. The per-event line below
+                        # carries the same information at a rate an operator can read.
+                        logger.debug(
+                            f"Broadcast Update for Track {tactical_track.track_id[-4:]} | Threat: {tactical_track.threat_level.upper()}"
+                        )
 
                     logger.info(
                         "Fused event at %s: %d detection(s) in, %d track(s) broadcast.",
-                        mark.isoformat(timespec="seconds"),
+                        result.mark.isoformat(timespec="seconds"),
                         len(detections),
-                        broadcast,
+                        len(result.published),
                     )
 
             if processed_any_events:
@@ -815,16 +735,15 @@ def fusion_main():
                     # not carry over. Required outright under --use-scenario-timestamps:
                     # timestamps jump backwards there and Stone Soup cannot predict
                     # backwards.
-                    tracker = SapientAsynchronousTracker(
-                        max_live_tracks=args.max_live_tracks,
-                        max_track_history=args.max_track_history,
-                        max_coast_seconds=args.max_coast_seconds,
-                        max_event_detections=args.max_event_detections,
-                        confirm_hits=args.confirm_hits,
+                    engine.reset(
+                        SapientAsynchronousTracker(
+                            max_live_tracks=args.max_live_tracks,
+                            max_track_history=args.max_track_history,
+                            max_coast_seconds=args.max_coast_seconds,
+                            max_event_detections=args.max_event_detections,
+                            confirm_hits=args.confirm_hits,
+                        )
                     )
-                    # The new iteration re-anchors the clock, so the previous
-                    # one's timestamps must not gate it.
-                    latest_timestamp = None
                     time.sleep(loop_delay)
                     continue
                 logger.info("Replay file processing complete. Exiting.")

@@ -4,7 +4,12 @@ import pytest
 
 from context_foundry.fusion import config
 from context_foundry.fusion.measurement import measurement_model_for
-from context_foundry.fusion.registration import geometric_error_from, sensor_capabilities
+from context_foundry.fusion.registration import (
+    geometric_error_from,
+    node_location,
+    range_from,
+    sensor_capabilities,
+)
 
 
 def _value(kind, number):
@@ -104,3 +109,78 @@ def test_a_sensor_known_only_from_its_registration_has_no_position():
 def test_an_empty_registration_changes_nothing():
     config.apply_registration("RAD-9", {})
     assert config.sensor_profile("RAD-9") is None
+
+
+# --- node type, range and position ------------------------------------------
+
+
+def test_node_type_is_read_as_a_word():
+    message = {"registration": {"node_definition": [{"node_type": "NODE_TYPE_CAMERA"}]}}
+    assert sensor_capabilities(message) == {"node_type": "camera"}
+
+
+@pytest.mark.parametrize("node_type", ["NODE_TYPE_UNSPECIFIED", "NODE_TYPE_OTHER", None])
+def test_an_unspecified_node_type_is_left_out(node_type):
+    message = {"registration": {"node_definition": [{"node_type": node_type}]}}
+    assert "node_type" not in sensor_capabilities(message)
+
+
+@pytest.mark.parametrize(
+    ("kind", "units", "value", "expected"),
+    [
+        ("Max Range", "m", "5000", 5000.0),
+        ("Detection Range", "km", "12.5", 12500.0),
+        ("Range", "metres", "800", 800.0),
+    ],
+)
+def test_range_is_read_from_detection_performance(kind, units, value, expected):
+    definition = {"detection_performance": [{"type": kind, "units": units, "unit_value": value}]}
+    assert range_from(definition) == expected
+
+
+@pytest.mark.parametrize(
+    "performance",
+    [
+        {"type": "Max Range", "units": "furlongs", "unit_value": "5"},
+        {"type": "Max Range", "units": "m", "unit_value": "far"},
+        {"type": "Max Range", "units": "m", "unit_value": "0"},
+        {"type": "Probability of Detection", "units": "%", "unit_value": "90"},
+    ],
+)
+def test_an_unreadable_range_is_left_out(performance):
+    assert range_from({"detection_performance": [performance]}) is None
+
+
+def test_sensor_capabilities_reads_the_range():
+    definition = {
+        "detection_performance": [{"type": "Max Range", "units": "km", "unit_value": "3"}]
+    }
+    message = {"registration": {"mode_definition": [{"detection_definition": [definition]}]}}
+    assert sensor_capabilities(message) == {"range_m": 3000.0}
+
+
+def test_node_location_is_read_from_a_status_report():
+    location = {
+        "x": 29.8,
+        "y": 62.9,
+        "z": 120.0,
+        "coordinate_system": "LOCATION_COORDINATE_SYSTEM_LAT_LNG_DEG_M",
+    }
+    assert node_location({"status_report": {"node_location": location}}) == {
+        "lat": 62.9,
+        "lon": 29.8,
+        "alt": 120.0,
+    }
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        None,
+        {"x": 500000.0, "y": 6900000.0, "coordinate_system": "LOCATION_COORDINATE_SYSTEM_UTM_M"},
+        {"x": 29.8, "coordinate_system": "LOCATION_COORDINATE_SYSTEM_LAT_LNG_DEG_M"},
+        {"x": 29.8, "y": 95.0, "coordinate_system": "LOCATION_COORDINATE_SYSTEM_LAT_LNG_DEG_M"},
+    ],
+)
+def test_an_unusable_node_location_is_left_out(location):
+    assert node_location({"status_report": {"node_location": location}}) is None

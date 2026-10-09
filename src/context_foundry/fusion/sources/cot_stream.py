@@ -9,7 +9,8 @@ from stonesoup.models.measurement.linear import LinearGaussian
 from stonesoup.types.detection import Detection
 
 from .. import config
-from ..measurement import UNKNOWN_SENSOR_GEOMETRIC_ERROR, position_measurement
+from ..cot_input import point_accuracy
+from ..measurement import position_measurement
 from ..validators.cot import CotValidator
 from .base import SapientSource
 from .frames import DEFAULT_FRAME_WINDOW_SECONDS, FrameAssembler
@@ -23,17 +24,8 @@ def _point_accuracy(raw_metadata):
     CoT says how accurate each point is (ce horizontally, le vertically); an
     unknown one falls back to the cautious default for a sensor of unknown kind.
     """
-    unknown = UNKNOWN_SENSOR_GEOMETRIC_ERROR
-    ce = (raw_metadata or {}).get("ce")
-    le = (raw_metadata or {}).get("le")
-    return {
-        "type": "cot",
-        "geometric_error": {
-            "variation_type": "constant",
-            "base_m": ce if ce is not None else unknown["base_m"],
-            "vertical_m": le if le is not None else unknown["vertical_m"],
-        },
-    }
+    raw_metadata = raw_metadata or {}
+    return point_accuracy(raw_metadata.get("ce"), raw_metadata.get("le"))
 
 
 class CotNetworkStream(SapientSource):
