@@ -108,8 +108,9 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
           DIGEST: sha256:0000000000000000000000000000000000000000000000000000000000000000
         run: |
-          python stage/publish.py fill \
-            --stages pipeline-stages --catalog catalog --staging-dir "$STAGING_DIR" \
+          python pipeline-stages/scripts/publish_descriptor.py fill \
+            --stage "$STAGE_TYPE" --source "stage/${STAGE_TYPE}" --repository "$IMAGE" \
+            --catalog catalog --staging-dir "$STAGING_DIR" \
             --digest "$DIGEST" --version "$VERSION"
           python pipeline-stages/scripts/publish_descriptor.py stage \
             --stage "$STAGE_TYPE" --digest "$DIGEST" \
@@ -326,8 +327,9 @@ jobs:
         env:
           DIGEST: ${{ steps.ref.outputs.digest }}
         run: |
-          python stage/publish.py fill \
-            --stages pipeline-stages --catalog catalog --staging-dir "$STAGING_DIR" \
+          python pipeline-stages/scripts/publish_descriptor.py fill \
+            --stage "$STAGE_TYPE" --source "stage/${STAGE_TYPE}" --repository "$IMAGE" \
+            --catalog catalog --staging-dir "$STAGING_DIR" \
             --digest "$DIGEST" --version "$VERSION" >> "$GITHUB_OUTPUT"
 
       # The harness issues no pull, so the digest under test has to be in the local store first.
@@ -396,8 +398,8 @@ jobs:
             --new-stage-type "$NEW_STAGE_TYPE" --runtime "$RUNTIME" \
             --own-runtime "$OWN_RUNTIME" --catalog-runtime "$CATALOG_RUNTIME" \
             --catalog-commit "$CATALOG_COMMIT" --repository "$GITHUB_REPOSITORY" \
-            --run-url "$RUN_URL" --report conformance-report.json > pr-body.md
-          python stage/publish.py retarget-body pr-body.md
+            --run-url "$RUN_URL" --report conformance-report.json \
+            --image-repository "$IMAGE" --workflow .github/workflows/stage.yaml > pr-body.md
 
       # An open pull request for this version is brought up to date rather than duplicated.
       # Nothing is pushed when main's digest or runtime for the stage type changed since the
