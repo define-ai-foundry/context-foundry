@@ -3,11 +3,14 @@
 
 # src/context_foundry/fusion/registration.py
 
-"""What a sensor says about itself in its SAPIENT Registration, in the terms fusion uses.
+"""What a sensor says about itself in SAPIENT, in the terms fusion uses.
 
 A sensor that registers can tell fusion two things that decide how its reports are
 associated: how far off its positions may be (DetectionDefinition.geometric_error)
-and whether its object_id keeps naming the same object (ModeDefinition.tracking_type).
+and whether its object_id keeps naming the same object (ModeDefinition.tracking_type);
+and two more that refine the first: what kind of sensor it is (NodeType), and how far
+it sees (detection_performance). Where it stands comes from its StatusReport's
+node_location, so fusion needs no sensor file.
 Both are optional in BSI Flex 335, and geometric_error is loosely typed -- its
 variation is free text and its performance values are named by the sensor -- so
 this reads the common spellings and leaves out what it cannot read. What is left
@@ -88,22 +91,83 @@ def geometric_error_from(definition: dict) -> dict | None:
     return {"variation_type": variation, **values}
 
 
-def sensor_capabilities(registration_message: dict) -> dict:
-    """{"tracking_type": ..., "geometric_error": ...} from a Registration message, as found.
+# detection_performance value names, normalised to letters only, that state how far
+# the sensor sees, and the units they may be given in, in metres.
+_RANGE_NAMES = frozenset({"range", "maxrange", "maximumrange", "detectionrange"})
+_RANGE_UNITS = {"m": 1.0, "metre": 1.0, "metres": 1.0, "meter": 1.0, "meters": 1.0}
+_RANGE_UNITS |= {"km": 1000.0, "kilometre": 1000.0, "kilometres": 1000.0}
+_RANGE_UNITS |= {"kilometer": 1000.0, "kilometers": 1000.0}
 
-    The first mode that declares a tracking type gives it, and the first detection
-    definition with a readable geometric_error gives that; either key is left out
-    when nothing declares it.
+
+def range_from(definition: dict) -> float | None:
+    """How far a DetectionDefinition says its sensor sees, in metres, or None."""
+    for value in (definition or {}).get("detection_performance", []):
+        if _letters(value.get("type")) not in _RANGE_NAMES:
+            continue
+        scale = _RANGE_UNITS.get(_letters(value.get("units")))
+        try:
+            number = float(value.get("unit_value"))
+        except (TypeError, ValueError):
+            continue
+        if scale and number > 0:
+            return number * scale
+    return None
+
+
+def node_kind(registration: dict) -> str | None:
+    """The first declared NodeType as a lower-case word ("radar", "camera"), or None."""
+    for definition in registration.get("node_definition", []):
+        node_type = str(definition.get("node_type") or "")
+        if node_type and node_type not in ("NODE_TYPE_UNSPECIFIED", "NODE_TYPE_OTHER"):
+            return node_type.removeprefix("NODE_TYPE_").lower()
+    return None
+
+
+def sensor_capabilities(registration_message: dict) -> dict:
+    """What a Registration message declares about its sensor, as found.
+
+    {"tracking_type", "geometric_error", "range_m", "node_type"}: the first mode that
+    declares a tracking type gives it, the first detection definition with a readable
+    geometric_error gives that, the first with a readable range gives range_m, and
+    the first node definition with a type gives node_type. A key is left out when
+    nothing declares it.
     """
     registration = (registration_message or {}).get("registration") or {}
     found = {}
+    kind = node_kind(registration)
+    if kind:
+        found["node_type"] = kind
     for mode in registration.get("mode_definition", []):
         if "tracking_type" not in found and mode.get("tracking_type"):
             found["tracking_type"] = mode["tracking_type"]
-        if "geometric_error" not in found:
-            for definition in mode.get("detection_definition", []):
+        for definition in mode.get("detection_definition", []):
+            if "geometric_error" not in found:
                 geometric_error = geometric_error_from(definition)
                 if geometric_error:
                     found["geometric_error"] = geometric_error
-                    break
+            if "range_m" not in found:
+                range_m = range_from(definition)
+                if range_m:
+                    found["range_m"] = range_m
     return found
+
+
+def node_location(status_message: dict) -> dict | None:
+    """{"lat", "lon", "alt"} of a StatusReport's node_location in degrees, or None.
+
+    Where a sensor is comes from its status reports, not its Registration. Only a
+    latitude/longitude location is read; a UTM one is left out rather than guessed.
+    """
+    location = ((status_message or {}).get("status_report") or {}).get("node_location")
+    if not location:
+        return None
+    if "LAT_LNG" not in str(location.get("coordinate_system", "")):
+        return None
+    try:
+        lat, lon = float(location["y"]), float(location["x"])
+        alt = float(location.get("z") or 0.0)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        return None
+    return {"lat": lat, "lon": lon, "alt": alt}

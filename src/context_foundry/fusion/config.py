@@ -181,15 +181,16 @@ def has_stable_object_ids(sensor: dict[str, Any] | None) -> bool:
     return bool(sensor) and sensor.get("tracking_type") in STABLE_OBJECT_ID_TRACKING_TYPES
 
 
-# What sensors declared about themselves in their SAPIENT Registration
-# (tracking_type, geometric_error), by node id. Kept apart from the operator's
-# manifest so that a sensor which registers without being in it gains its
-# accuracy and tracking type but no made-up position.
+# What sensors declared about themselves in SAPIENT, by node id: from their
+# Registration (tracking_type, geometric_error, range_m, node_type) and from their
+# StatusReport's node_location (lat, lon, alt). Kept apart from the operator's
+# manifest, which is optional, so that a sensor which is not in it gains only what
+# it declared and no made-up position.
 REGISTRATION_CAPABILITIES: dict[str, dict[str, Any]] = {}
 
 
 def apply_registration(node_id: str, capabilities: dict[str, Any]) -> None:
-    """Records what a sensor's Registration declared; later registrations win."""
+    """Records what a sensor declared about itself; what it declares later wins."""
     if not node_id or not capabilities:
         return
     previous = REGISTRATION_CAPABILITIES.get(node_id)

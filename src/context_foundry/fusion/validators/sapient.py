@@ -125,10 +125,14 @@ class SapientValidator(ProtocolValidator):
         the network ENU anchor displaces every detection from a non-anchor sensor by the
         anchor-to-sensor baseline, which is tens of kilometres in a real deployment.
         """
-        sensor = config.get_sensor(node_id)
-        if sensor is None:
+        # The manifest's position or, without one, where the sensor's status reports
+        # placed it.
+        sensor = config.sensor_profile(node_id)
+        if sensor is None or "lat" not in sensor:
             _report_unregistered_node(node_id)
-            raise ValueError(f"range_bearing detection from unregistered node '{node_id}'.")
+            raise ValueError(
+                f"range_bearing detection from unregistered node '{node_id}' (position unknown)."
+            )
 
         # Azimuth is clockwise from the node's north; elevation is above its horizon,
         # so the slant range projects onto the ground plane before splitting East/North.
