@@ -5,6 +5,7 @@
 
 import logging
 import time
+import uuid
 
 import numpy as np
 from stonesoup.dataassociator.neighbour import GNNWith2DAssignment
@@ -470,13 +471,40 @@ class SapientAsynchronousTracker:
         # Seed the track's metadata from the hit that spawned it: Stone Soup only
         # accumulates metadata from Updates, so without this the track is
         # unclassified until its second detection.
-        track = Track([prior], init_metadata=dict(detection.metadata))
+        track = Track([prior], id=self._seed_id(detection), init_metadata=dict(detection.metadata))
         self.tracks.add(track)
         # The seeding hit is a real detection, so it anchors staleness.
         self._last_update_time[track.id] = detection.timestamp
         if self.confirm_hits > 1:
             self._tentative[track.id] = [1, detection.timestamp]
         self._bind_object_id(detection, track)
+
+    def _seed_id(self, detection) -> str:
+        """A track id fixed by the detection that starts the track.
+
+        Fed the same detections again -- a pipeline stage rebuilding its tracks from a
+        re-read window after a restart -- the tracker gives each rebuilt track the id it
+        had before, so what it publishes next continues that track rather than starting
+        a second one beside it. Two tracks seeded alike while both live are told apart
+        by a count, in the order they are seeded, which a replay repeats.
+        """
+        metadata = detection.metadata or {}
+        position = ",".join(f"{float(v):.2f}" for v in np.ravel(detection.state_vector))
+        seed = "|".join(
+            (
+                str(metadata.get("nodeId")),
+                str(metadata.get("objectId")),
+                detection.timestamp.isoformat(),
+                position,
+            )
+        )
+        live = {track.id for track in self.tracks}
+        candidate = str(uuid.uuid5(uuid.NAMESPACE_URL, f"context-foundry-track:{seed}"))
+        count = 1
+        while candidate in live:
+            count += 1
+            candidate = str(uuid.uuid5(uuid.NAMESPACE_URL, f"context-foundry-track:{seed}#{count}"))
+        return candidate
 
     def _report_track_limit(self) -> None:
         self._refused_tracks += 1
