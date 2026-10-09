@@ -1,0 +1,48 @@
+{
+  "event_time": "2026-10-05T08:14:03.512345Z",
+  "content_type": "detection_report",
+  "node_id": "d7cc1d88-0edd-428d-9e18-ef9cfa46de1a",
+  "message": {
+    "timestamp": "2026-10-05T08:14:03.512345Z",
+    "node_id": "d7cc1d88-0edd-428d-9e18-ef9cfa46de1a",
+    "detection_report": {
+      "report_id": "01KTBRQ86JEPCYYFCGEZHWDJ6G",
+      "object_id": "01KTBRPCT6APM11DZRQ3SEG3VX",
+      "location": {
+        "x": 4.1279,
+        "y": 52.1018,
+        "z": 42.8,
+        "x_error": 5.0,
+        "y_error": 5.0,
+        "z_error": 2.5,
+        "coordinate_system": "LOCATION_COORDINATE_SYSTEM_LAT_LNG_DEG_M",
+        "datum": "LOCATION_DATUM_WGS84_E"
+      },
+      "detection_confidence": 0.77,
+      "classification": [
+        {
+          "type": "UAV",
+          "confidence": 0.9,
+          "sub_class": [
+            {
+              "type": "Rotary Wing",
+              "confidence": 0.85,
+              "level": 1
+            }
+          ]
+        }
+      ],
+      "behaviour": [
+        {
+          "type": "hovering",
+          "confidence": 0.6
+        }
+      ],
+      "enu_velocity": {
+        "east_rate": 15.38,
+        "north_rate": -8.99,
+        "up_rate": 0.0
+      }
+    }
+  }
+}

@@ -1,0 +1,33 @@
+# Dedicated stage: the context-foundry fusion engine, associating SAPIENT detections and
+# CoT events from many sensors into one track per real object, written back as SAPIENT.
+image:
+  repository: context-foundry/fusion
+  # The stage workflow fills digest and version in from the image it pushed.
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  version: 0.0.0
+publisher: platform
+inputs:
+  - role: sapient
+    description: >-
+      SAPIENT messages decoded at ingest, keyed by node_id; each sensor's Registration
+      gives fusion its geometry, and fusion's own node_id is ignored.
+  - role: cot
+    description: CoT events, keyed by the event uid; each located event is a detection, its ce and le the accuracy.
+    encoding:
+      format: json
+      schema: cot-raw
+      version: 1
+outputs:
+  - role: tracks
+    description: >-
+      A DetectionReport per fused track from fusion's own node_id, keyed by track, with
+      threatLevel and estimatedSwarmCount in object_info.
+encoding:
+  format: json
+  schema: sapient-raw
+  version: 1
+# Tracks live in one process, so the stage runs as its own pod whatever its verification.
+runtime: deployment
+health: /health/assignments
+services:
+  - kafka

@@ -1,0 +1,444 @@
+name: Stage
+
+# The fusion pipeline stage: conformance on every pull request, and on main a publish to
+# the catalog when [project].version ranks above the version the catalog pins. Every job
+# is off until the repository variable FUSION_STAGE_CI is 'true'.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stage-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PYTHON_VERSION: "3.13"
+  REGISTRY: rainaiacr.azurecr.io
+  IMAGE: context-foundry/fusion
+  STAGE_TYPE: fusion
+  CATALOG_REPO: define-ai-foundry/pipeline-catalog
+  STAGES_REPO: define-ai-foundry/pipeline-stages
+  STAGING_DIR: publish-stage
+
+jobs:
+  conformance:
+    name: conformance against the stage image
+    if: vars.FUSION_STAGE_CI == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    # The harness builds a broker and waits on real timeouts; a hung run must not hold a runner.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mint a pipeline-stages token
+        id: stages-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.STAGES_APP_ID }}
+          private-key: ${{ secrets.STAGES_APP_PRIVATE_KEY }}
+          owner: define-ai-foundry
+          repositories: pipeline-stages
+          permission-contents: read
+
+      # Read only: a pull request never writes to the catalog.
+      - name: Mint a catalog token
+        id: catalog-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.CATALOG_APP_ID }}
+          private-key: ${{ secrets.CATALOG_APP_PRIVATE_KEY }}
+          owner: define-ai-foundry
+          repositories: pipeline-catalog
+          permission-contents: read
+
+      # Unpinned: the harness checks the contract as it is now.
+      - name: Check out pipeline-stages
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.STAGES_REPO }}
+          ref: main
+          path: pipeline-stages
+          token: ${{ steps.stages-token.outputs.token }}
+
+      - name: Check out the catalog's default branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CATALOG_REPO }}
+          ref: main
+          path: catalog
+          token: ${{ steps.catalog-token.outputs.token }}
+
+      - name: Record the harness and catalog commits
+        id: commits
+        run: |
+          echo "stages=$(git -C pipeline-stages rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "catalog=$(git -C catalog rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install the harness
+        run: python -m pip install "./pipeline-stages[conformance]" check-jsonschema
+
+      - name: Read the package version
+        id: version
+        run: |
+          version=$(python -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # Built straight into the runner's docker daemon; the harness runs it locally.
+      - name: Build the stage image
+        run: |
+          docker build \
+            --target stage \
+            --provenance=false \
+            --tag "${IMAGE}:ci" \
+            .
+
+      # The descriptor a publish would propose, with the placeholder digest in place of one.
+      - name: Fill the descriptor
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          DIGEST: sha256:0000000000000000000000000000000000000000000000000000000000000000
+        run: |
+          python stage/publish.py fill \
+            --stages pipeline-stages --catalog catalog --staging-dir "$STAGING_DIR" \
+            --digest "$DIGEST" --version "$VERSION"
+          python pipeline-stages/scripts/publish_descriptor.py stage \
+            --stage "$STAGE_TYPE" --digest "$DIGEST" \
+            --catalog catalog --staging-dir "$STAGING_DIR"
+
+      # The catalog's own gates, on the catalog with the descriptor and record staged.
+      - name: Validate against the catalog
+        working-directory: catalog
+        run: |
+          check-jsonschema --schemafile descriptor.schema.json "stages/${STAGE_TYPE}/descriptor.yaml"
+          check-jsonschema --schemafile verification.schema.json "stages/${STAGE_TYPE}/verification.yaml"
+          python scripts/check_descriptors.py
+
+      - name: Run the conformance harness
+        run: |
+          python -m pipeline_stages.conformance \
+            --image "${IMAGE}:ci" \
+            --stage-dir "${STAGING_DIR}/${STAGE_TYPE}" \
+            --catalog catalog \
+            --runtime docker \
+            --report conformance-report.json
+
+      - name: Name the harness that failed
+        if: failure()
+        env:
+          STAGES_COMMIT: ${{ steps.commits.outputs.stages }}
+          CATALOG_COMMIT: ${{ steps.commits.outputs.catalog }}
+        run: |
+          echo "::error::The harness came from ${STAGES_REPO} at ${STAGES_COMMIT}, against ${CATALOG_REPO} at ${CATALOG_COMMIT}; a failure that this pull request did not cause may be a contract change there."
+
+      - name: Upload the conformance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-report-${{ env.STAGE_TYPE }}
+          path: conformance-report.json
+          if-no-files-found: warn
+
+  select:
+    name: version to publish
+    if: vars.FUSION_STAGE_CI == 'true' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      publish: ${{ steps.decide.outputs.publish }}
+      version: ${{ steps.decide.outputs.version }}
+    steps:
+      # The registry's federated credential trusts only ref:refs/heads/main.
+      - name: Require main
+        if: github.ref != 'refs/heads/main'
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          echo "::error::The stage publishes only from main, and this run is on $REF; dispatch the workflow with main selected."
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - name: Mint a catalog token
+        id: catalog-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.CATALOG_APP_ID }}
+          private-key: ${{ secrets.CATALOG_APP_PRIVATE_KEY }}
+          owner: define-ai-foundry
+          repositories: pipeline-catalog
+          permission-contents: read
+
+      - name: Check out the catalog's default branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CATALOG_REPO }}
+          ref: main
+          path: catalog
+          token: ${{ steps.catalog-token.outputs.token }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install the selector's dependency
+        run: python -m pip install pyyaml
+
+      - name: Compare the version with the catalog's
+        id: decide
+        run: python stage/publish.py decide --catalog catalog | tee -a "$GITHUB_OUTPUT"
+
+      - name: Report a skipped publish
+        if: steps.decide.outputs.publish != 'true'
+        env:
+          REASON: ${{ steps.decide.outputs.reason }}
+        run: |
+          echo "::notice::Nothing published for ${STAGE_TYPE}: ${REASON}."
+
+  publish:
+    name: publish
+    needs: select
+    if: needs.select.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    # A build and push, the conformance run and the catalog pull request, in one job.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write # OIDC federated login to Azure
+    env:
+      VERSION: ${{ needs.select.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The app is the only credential that can push the publish branch and open the pull request.
+      - name: Mint a catalog token
+        id: catalog-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.CATALOG_APP_ID }}
+          private-key: ${{ secrets.CATALOG_APP_PRIVATE_KEY }}
+          owner: define-ai-foundry
+          repositories: pipeline-catalog
+
+      - name: Mint a pipeline-stages token
+        id: stages-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.STAGES_APP_ID }}
+          private-key: ${{ secrets.STAGES_APP_PRIVATE_KEY }}
+          owner: define-ai-foundry
+          repositories: pipeline-stages
+          permission-contents: read
+
+      - name: Check out pipeline-stages
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.STAGES_REPO }}
+          ref: main
+          path: pipeline-stages
+          token: ${{ steps.stages-token.outputs.token }}
+
+      # The harness reads its schemas here, and the pull request is opened against it.
+      - name: Check out the catalog's default branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CATALOG_REPO }}
+          ref: main
+          path: catalog
+          token: ${{ steps.catalog-token.outputs.token }}
+
+      - name: Record the harness and catalog commits
+        id: commits
+        run: |
+          echo "stages=$(git -C pipeline-stages rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "catalog=$(git -C catalog rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install the harness
+        run: python -m pip install "./pipeline-stages[conformance]"
+
+      - name: Short commit sha
+        id: sha
+        run: echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Log in to the registry
+        run: az acr login --name "${REGISTRY%%.*}"
+
+      - uses: docker/setup-buildx-action@v3
+
+      # The descriptor pins the digest this step reports, not either tag.
+      - name: Build and push the image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: stage
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE }}:sha-${{ steps.sha.outputs.short }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+          # A scope of its own, so this and the standalone image do not evict each other.
+          cache-from: type=gha,scope=fusion-stage
+          cache-to: type=gha,scope=fusion-stage,mode=max
+
+      - name: Reference the image by digest
+        id: ref
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          if ! [[ $DIGEST =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo "::error::the build reported no usable digest: '$DIGEST'"
+            exit 1
+          fi
+          {
+            echo "digest=$DIGEST"
+            echo "image=${REGISTRY}/${IMAGE}@${DIGEST}"
+          } >> "$GITHUB_OUTPUT"
+
+      # Conformance runs against the descriptor that is published, so it is filled in first.
+      - name: Fill the descriptor
+        id: descriptor
+        env:
+          DIGEST: ${{ steps.ref.outputs.digest }}
+        run: |
+          python stage/publish.py fill \
+            --stages pipeline-stages --catalog catalog --staging-dir "$STAGING_DIR" \
+            --digest "$DIGEST" --version "$VERSION" >> "$GITHUB_OUTPUT"
+
+      # The harness issues no pull, so the digest under test has to be in the local store first.
+      - name: Pull the image under test
+        env:
+          IMAGE_REF: ${{ steps.ref.outputs.image }}
+        run: docker pull "$IMAGE_REF"
+
+      - name: Run the conformance harness
+        env:
+          IMAGE_REF: ${{ steps.ref.outputs.image }}
+        run: |
+          python -m pipeline_stages.conformance \
+            --image "$IMAGE_REF" \
+            --stage-dir "${STAGING_DIR}/${STAGE_TYPE}" \
+            --catalog catalog \
+            --runtime docker \
+            --report conformance-report.json
+
+      - name: Name the harness that failed
+        if: failure()
+        env:
+          STAGES_COMMIT: ${{ steps.commits.outputs.stages }}
+          CATALOG_COMMIT: ${{ steps.commits.outputs.catalog }}
+        run: |
+          echo "::error::The harness came from ${STAGES_REPO} at ${STAGES_COMMIT}, against ${CATALOG_REPO} at ${CATALOG_COMMIT}."
+
+      - name: Upload the conformance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-report-${{ env.STAGE_TYPE }}
+          path: conformance-report.json
+          if-no-files-found: warn
+
+      - name: Stage the descriptor and the verification record
+        id: stage
+        env:
+          DIGEST: ${{ steps.ref.outputs.digest }}
+        run: |
+          python pipeline-stages/scripts/publish_descriptor.py stage \
+            --stage "$STAGE_TYPE" --digest "$DIGEST" \
+            --catalog catalog --staging-dir "$STAGING_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Render the pull request title and body
+        env:
+          DIGEST: ${{ steps.ref.outputs.digest }}
+          IMAGE_REF: ${{ steps.ref.outputs.image }}
+          PUBLISHER: ${{ steps.descriptor.outputs.publisher }}
+          COMMENTS_DROPPED: ${{ steps.descriptor.outputs.comments_dropped }}
+          RUNTIME: ${{ steps.descriptor.outputs.runtime }}
+          OWN_RUNTIME: ${{ steps.descriptor.outputs.own_runtime }}
+          CATALOG_RUNTIME: ${{ steps.descriptor.outputs.catalog_runtime }}
+          DIGEST_CHANGED: ${{ steps.stage.outputs.digest_changed }}
+          NEW_STAGE_TYPE: ${{ steps.stage.outputs.new_stage_type }}
+          CATALOG_COMMIT: ${{ steps.commits.outputs.catalog }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python pipeline-stages/scripts/publish_descriptor.py title \
+            --stage "$STAGE_TYPE" --version "$VERSION" \
+            --digest-changed "$DIGEST_CHANGED" --new-stage-type "$NEW_STAGE_TYPE" > pr-title.txt
+          python pipeline-stages/scripts/publish_descriptor.py body \
+            --stage "$STAGE_TYPE" --mode build --version "$VERSION" \
+            --digest "$DIGEST" --image-ref "$IMAGE_REF" --publisher "$PUBLISHER" \
+            --comments-dropped "$COMMENTS_DROPPED" --digest-changed "$DIGEST_CHANGED" \
+            --new-stage-type "$NEW_STAGE_TYPE" --runtime "$RUNTIME" \
+            --own-runtime "$OWN_RUNTIME" --catalog-runtime "$CATALOG_RUNTIME" \
+            --catalog-commit "$CATALOG_COMMIT" --repository "$GITHUB_REPOSITORY" \
+            --run-url "$RUN_URL" --report conformance-report.json > pr-body.md
+          python stage/publish.py retarget-body pr-body.md
+
+      # An open pull request for this version is brought up to date rather than duplicated.
+      # Nothing is pushed when main's digest or runtime for the stage type changed since the
+      # checkout the proposal was worked out against.
+      - name: Open the catalog pull request
+        working-directory: catalog
+        env:
+          GH_TOKEN: ${{ steps.catalog-token.outputs.token }}
+          BRANCH: publish/${{ env.STAGE_TYPE }}-${{ env.VERSION }}
+          APP_ID: ${{ vars.CATALOG_APP_ID }}
+          APP_SLUG: ${{ steps.catalog-token.outputs.app-slug }}
+        run: |
+          # The commits and the pull request belong to the app, so the author is its bot user.
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${APP_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
+          # actions/checkout leaves a single-branch refspec behind, so the publish
+          # branch has to be fetched by name before its tip can be leased.
+          git fetch origin "+refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}" || true
+          lease=$(git rev-parse -q --verify "refs/remotes/origin/${BRANCH}" || echo '')
+          base=$(git rev-parse HEAD)
+          git checkout -B "$BRANCH"
+          git add "stages/${STAGE_TYPE}"
+          title=$(cat ../pr-title.txt)
+          # Owner-qualified, so a fork's branch of the same name is never taken for this one.
+          number=$(gh api "repos/${CATALOG_REPO}/pulls?state=open&head=${CATALOG_REPO%%/*}:${BRANCH}" --jq '.[0].number // empty')
+          git fetch origin "+refs/heads/main:refs/remotes/origin/main"
+          python ../pipeline-stages/scripts/publish_descriptor.py recheck \
+            --stage "$STAGE_TYPE" --catalog . --before "$base" --now refs/remotes/origin/main
+          if git diff --cached --quiet; then
+            echo "The catalog already carries this descriptor; nothing to open."
+            exit 0
+          fi
+          git commit -m "$title"
+          git push --force-with-lease="${BRANCH}:${lease}" -u origin "$BRANCH"
+          if [ -n "$number" ]; then
+            gh pr edit "$number" --repo "$CATALOG_REPO" --title "$title" --body-file ../pr-body.md
+            echo "Pull request #$number for $BRANCH was already open; its branch, title and body were updated."
+            exit 0
+          fi
+          gh pr create \
+            --repo "$CATALOG_REPO" \
+            --base main --head "$BRANCH" \
+            --title "$title" \
+            --body-file ../pr-body.md

@@ -1,0 +1,18 @@
+{
+  "event_time": "2026-10-05T08:14:03.512Z",
+  "uid": "uav-589520ccfcd2",
+  "type": "a-h-A-M-H-Q",
+  "how": "m-r",
+  "version": "2.0",
+  "start": "2026-10-05T08:14:03.512Z",
+  "stale": "2026-10-05T08:14:33.512Z",
+  "detail": {
+    "contact": {
+      "callsign": "UAV-1"
+    },
+    "track": {
+      "course": "120.3",
+      "speed": "17.8"
+    }
+  }
+}

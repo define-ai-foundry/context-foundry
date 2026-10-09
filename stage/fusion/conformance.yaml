@@ -1,0 +1,22 @@
+# Conformance profile for fusion: a dedicated stage reading sapient-raw and cot-raw and
+# writing each fused track as a sapient-raw DetectionReport. The valid sapient record is a
+# located detection, which starts a track.
+team: conf
+stage: fusion
+inputs:
+  sapient:
+    key: "d7cc1d88-0edd-428d-9e18-ef9cfa46de1a"
+    value_file: samples/detection.json
+    event_time: "2026-10-05T08:14:03.512345Z"
+  cot:
+    key: "uav-589520ccfcd2"
+    value_file: samples/uav.json
+    event_time: "2026-10-05T08:14:03.512Z"
+poison:
+  - { role: sapient, key: "node-p", value: "not json", error_class: decode }
+  # A record without its message.
+  - { role: sapient, key: "node-s", value_file: samples/no-message.json, error_class: schema }
+  - { role: cot, key: "uid-p", value: "not json", error_class: decode }
+  # An event without its point.
+  - { role: cot, key: "uid-s", value_file: samples/no-point.json, error_class: schema }
+expect_output_role: tracks

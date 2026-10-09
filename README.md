@@ -377,6 +377,20 @@ The run fails if coverage drops below the configured threshold. Tests never touc
 
 All of the above run automatically on GitHub Actions (`.github/workflows/ci.yml`) for every push to `main`/`master` and every pull request: Ruff lint, Ruff format check, and the test suite with the coverage gate.
 
+### Pipeline stage
+
+The engine is also published as the `fusion` stage type of the pipeline platform: an image built from the Dockerfile's `stage` target, pushed to `rainaiacr.azurecr.io/context-foundry/fusion`, and described to the platform by `stage/fusion/descriptor.yaml` in the [`pipeline-catalog`](https://github.com/define-ai-foundry/pipeline-catalog). `stage/fusion/conformance.yaml` and `stage/fusion/samples/` are the stage type's conformance profile, the records the harness feeds it and what it expects back. The standalone image that `.github/workflows/publish-image.yaml` pushes is unaffected.
+
+`.github/workflows/stage.yaml` does the rest. On every pull request it builds the stage image locally, fills the descriptor with a placeholder digest into a checkout of the catalog's `main`, runs the catalog's own descriptor checks on it, and runs the conformance harness of [`pipeline-stages`](https://github.com/define-ai-foundry/pipeline-stages) against the image; the report is uploaded as the `conformance-report-fusion` artifact. The harness is taken from `pipeline-stages` `main`, unpinned, so it checks the contract as it is now; when it fails, the job names the `pipeline-stages` and catalog commits it ran with.
+
+A merge to `main`, or a manual run from `main`, publishes only when `[project].version` in `pyproject.toml` ranks above (semantic version precedence) the `image.version` the catalog's `main` pins for `fusion`, or the catalog has no `fusion` yet; otherwise the run is skipped with a notice. To publish, raise the version in the pull request. A publish pushes the image tagged `<version>` and `sha-<short sha>`, runs conformance against the pushed digest, and opens a catalog pull request from the branch `publish/fusion-<version>`, or updates the open one, carrying the descriptor pinned to that digest, the unverified verification record and the conformance report in its body. A failed conformance run opens nothing.
+
+Verification is the platform team's, in a separate pull request on the catalog: the publish only ever resets `verification.yaml` to unverified, and the stage runs as its own pod (`runtime: deployment`) whatever its verification.
+
+The workflow is off until the repository variable `FUSION_STAGE_CI` is `true`; every job checks it, so the workflow changes nothing until the stage implements the packaging contract. It needs two GitHub Apps beside the Azure login `publish-image.yaml` already uses: `pipeline-catalog-publisher` (`CATALOG_APP_ID` variable, `CATALOG_APP_PRIVATE_KEY` secret), installed on `pipeline-catalog` with contents and pull requests read and write, whose token is narrowed to read wherever a job only reads the catalog; and `pipeline-stages-reader` (`STAGES_APP_ID` variable, `STAGES_APP_PRIVATE_KEY` secret), with contents read on `pipeline-stages`, for the harness.
+
+`stage/publish.py` holds the few steps `pipeline-stages`' `scripts/publish_descriptor.py` cannot take for an image outside `pipeline-stages/`; the workflow runs that script, from its checkout, for the rest. To run conformance locally, build the image with `docker build --target stage -t context-foundry/fusion:local .`, install `pipeline-stages[conformance]` from a checkout, and run `pipeline-conformance --image context-foundry/fusion:local --stage-dir stage/fusion --catalog <pipeline-catalog checkout> --runtime docker`.
+
 
 
 Copyright 2026 Lempea Edge Oy / DEFINE AI Foundry. SPDX-License-Identifier: Apache-2.0

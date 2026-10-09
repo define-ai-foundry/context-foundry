@@ -41,6 +41,13 @@ ENTRYPOINT ["context-foundry-fusion"]
 CMD ["--replay-file", "data/examples/sapient_messages.json", \
      "--config", "config/sensors/joensuu.json", "--log-to-file", "--realtime-factor", "0"]
 
+# Pipeline stage: the runtime image started as a stage under the packaging contract.
+FROM runtime AS stage
+# TODO: run the stage entrypoint once the engine implements the packaging contract; until
+# then the image exits at start, so conformance fails.
+ENTRYPOINT ["sh", "-c", "echo 'fusion: the pipeline stage entrypoint is not implemented yet' >&2; exit 64"]
+CMD []
+
 # Dev stage: editable install with dev extras for in-container tests + lint (CI parity).
 # The worktree is bind-mounted over /app at run time; the venv lives outside /app.
 FROM python:3.13-slim AS dev
