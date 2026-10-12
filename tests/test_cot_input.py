@@ -107,3 +107,16 @@ def test_helpers():
     assert point_accuracy(None, None)["geometric_error"]["base_m"] == 50.0
     assert remarks_node({"detail": {"remarks": {"_text": "node= class=x"}}}) is None
     assert remarks_node({}) is None
+
+
+@pytest.mark.parametrize("bad", [{"lat": float("nan")}, {"lon": float("inf")}])
+def test_a_point_at_no_real_position_is_counted(bad):
+    reader = CotRecordReader()
+    record = _uav(point={**UAV["point"], **bad})
+    assert reader.detection(record) is None
+    assert reader.records_rejected == 1
+
+
+def test_a_nan_error_estimate_reads_as_unknown():
+    assert known(float("nan")) is None
+    assert known("Infinity") is None

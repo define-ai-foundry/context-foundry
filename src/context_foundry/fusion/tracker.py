@@ -189,6 +189,7 @@ class SapientAsynchronousTracker:
         max_coast_position_sigma: float = MAX_COAST_POSITION_SIGMA_M,
         confirm_hits: int = 1,
         confirm_window_seconds: float = CONFIRM_WINDOW_SECONDS,
+        id_namespace: str = "",
     ):
         """Builds the fusion engine.
 
@@ -211,6 +212,8 @@ class SapientAsynchronousTracker:
             raise ValueError("confirm_window_seconds must be > 0")
         self.confirm_hits = confirm_hits
         self.confirm_window_seconds = confirm_window_seconds
+        # What makes this tracker's track ids its own; see _seed_id.
+        self.id_namespace = id_namespace
         # Tentative track id -> [detections gathered, time of its first detection].
         self._tentative = {}
 
@@ -480,22 +483,26 @@ class SapientAsynchronousTracker:
         self._bind_object_id(detection, track)
 
     def _seed_id(self, detection) -> str:
-        """A track id fixed by the detection that starts the track.
+        """A track id fixed by the detection that starts the track, within `id_namespace`.
 
         Fed the same detections again -- a pipeline stage rebuilding its tracks from a
         re-read window after a restart -- the tracker gives each rebuilt track the id it
         had before, so what it publishes next continues that track rather than starting
-        a second one beside it. Two tracks seeded alike while both live are told apart
-        by a count, in the order they are seeded, which a replay repeats.
+        a second one beside it. The id is made of what identifies the report itself --
+        its sensor, object id, report id and time -- never its position, which is in a
+        tracking frame whose origin a restart moves. The namespace keeps two trackers fed
+        the same reports, such as two pipelines' fusion stages, from minting the same ids.
+        Two tracks seeded alike while both live are told apart by a count, in the order
+        they are seeded, which a replay repeats.
         """
         metadata = detection.metadata or {}
-        position = ",".join(f"{float(v):.2f}" for v in np.ravel(detection.state_vector))
         seed = "|".join(
             (
+                self.id_namespace,
                 str(metadata.get("nodeId")),
                 str(metadata.get("objectId")),
+                str(metadata.get("reportId")),
                 detection.timestamp.isoformat(),
-                position,
             )
         )
         live = {track.id for track in self.tracks}

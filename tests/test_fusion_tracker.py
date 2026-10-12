@@ -977,3 +977,28 @@ def test_two_live_tracks_seeded_alike_are_told_apart():
     tracker._initialize_new_track(_seeded())
     tracker._initialize_new_track(_seeded())
     assert len({track.id for track in tracker.tracks}) == 2
+
+
+def test_a_track_id_does_not_depend_on_where_the_tracking_frame_starts():
+    # The same report projected about another origin, as after a restart, keeps its id.
+    first = SapientAsynchronousTracker()
+    second = SapientAsynchronousTracker()
+    (a,) = first.process_async_event(T0, {_seeded(east=0.0)})
+    (b,) = second.process_async_event(T0, {_seeded(east=1234.5)})
+    assert a.id == b.id
+
+
+def test_two_trackers_in_different_namespaces_mint_different_ids():
+    one = SapientAsynchronousTracker(id_namespace="fusion-of-pipeline-a")
+    other = SapientAsynchronousTracker(id_namespace="fusion-of-pipeline-b")
+    (a,) = one.process_async_event(T0, {_seeded()})
+    (b,) = other.process_async_event(T0, {_seeded()})
+    assert a.id != b.id
+
+
+def test_a_reports_own_id_tells_two_reports_of_one_instant_apart():
+    tracker = SapientAsynchronousTracker()
+    first, second = _seeded(east=0.0), _seeded(east=8000.0)
+    first.metadata["reportId"], second.metadata["reportId"] = "r-1", "r-2"
+    tracks = tracker.process_async_event(T0, {first, second})
+    assert len({track.id for track in tracks}) == 2

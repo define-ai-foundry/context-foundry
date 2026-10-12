@@ -184,3 +184,11 @@ def test_node_location_is_read_from_a_status_report():
 )
 def test_an_unusable_node_location_is_left_out(location):
     assert node_location({"status_report": {"node_location": location}}) is None
+
+
+def test_a_nan_performance_value_is_not_an_accuracy():
+    error = {
+        "variation_type": "Constant",
+        "performance_value": [{"type": "Base", "units": "m", "unit_value": "NaN"}],
+    }
+    assert geometric_error_from({"geometric_error": error}) is None

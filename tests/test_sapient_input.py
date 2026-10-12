@@ -122,3 +122,28 @@ def test_a_status_report_without_a_usable_location_teaches_nothing():
     reader = SapientRecordReader()
     assert reader.learn(_record("status_report", {}))
     assert config.sensor_profile(RADAR) is None
+
+
+@pytest.mark.parametrize("bad", [{"y": "NaN"}, {"x": "Infinity"}, {"z": "NaN"}, {"y": 91.0}])
+def test_a_detection_at_no_real_position_is_rejected(bad):
+    reader = SapientRecordReader()
+    record = _detection()
+    record["message"]["detection_report"]["location"].update(bad)
+    assert reader.detection(record) is None
+    assert reader.records_rejected == 1
+
+
+def test_a_status_report_with_a_nan_height_places_nothing():
+    reader = SapientRecordReader()
+    status = _status(62.9, 29.8)
+    status["message"]["status_report"]["node_location"]["z"] = "NaN"
+    reader.learn(status)
+    assert config.sensor_profile(RADAR) is None
+
+
+def test_the_reports_own_id_reaches_the_detection():
+    reader = SapientRecordReader()
+    record = _detection()
+    record["message"]["detection_report"]["report_id"] = "rep-7"
+    _, _, detection = reader.detection(record)
+    assert detection.metadata["reportId"] == "rep-7"
