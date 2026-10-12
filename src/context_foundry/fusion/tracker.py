@@ -489,22 +489,28 @@ class SapientAsynchronousTracker:
         re-read window after a restart -- the tracker gives each rebuilt track the id it
         had before, so what it publishes next continues that track rather than starting
         a second one beside it. The id is made of what identifies the report itself --
-        its sensor, object id, report id and time -- never its position, which is in a
-        tracking frame whose origin a restart moves. The namespace keeps two trackers fed
+        its sensor, object id, report id and time, or for a sensor with stable object ids
+        its sensor and object id alone -- never its position, which is in a tracking frame
+        whose origin a restart moves. The namespace keeps two trackers fed
         the same reports, such as two pipelines' fusion stages, from minting the same ids.
         Two tracks seeded alike while both live are told apart by a count, in the order
         they are seeded, which a replay repeats.
         """
         metadata = detection.metadata or {}
-        seed = "|".join(
-            (
+        if metadata.get("stable_object_id") and metadata.get("objectId"):
+            # A sensor that keeps one object id for one object names the track by itself,
+            # so a track rebuilt from a later report of the same object keeps its id even
+            # when the report that first started it lies before the rebuild window.
+            parts = (self.id_namespace, str(metadata.get("nodeId")), str(metadata["objectId"]))
+        else:
+            parts = (
                 self.id_namespace,
                 str(metadata.get("nodeId")),
                 str(metadata.get("objectId")),
                 str(metadata.get("reportId")),
                 detection.timestamp.isoformat(),
             )
-        )
+        seed = "|".join(parts)
         live = {track.id for track in self.tracks}
         candidate = str(uuid.uuid5(uuid.NAMESPACE_URL, f"context-foundry-track:{seed}"))
         count = 1
