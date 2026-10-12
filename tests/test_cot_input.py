@@ -60,11 +60,13 @@ def test_an_unknown_height_and_error_fall_back():
     assert detection.measurement_model.noise_covar[0, 0] == pytest.approx(sigma**2)
 
 
-def test_the_sapient_node_in_the_remarks_is_the_sensor():
+def test_a_rendering_of_a_sapient_report_is_not_fused_again():
+    # sapient-to-cot names the SAPIENT node in the remarks; fusion reads that report itself.
+    reader = CotRecordReader(own_node_id="fusion-node")
     detail = {"remarks": {"_text": "node=RAD-7 det_conf=0.900 class=UAV"}}
-    _, sensor, detection = CotRecordReader().detection(_uav(detail=detail))
-    assert sensor == "RAD-7"
-    assert detection.metadata["nodeId"] == "RAD-7"
+    assert reader.detection(_uav(detail=detail)) is None
+    assert reader.renderings_skipped == 1
+    assert reader.own_records_skipped == 0
 
 
 def test_fusions_own_events_are_skipped():

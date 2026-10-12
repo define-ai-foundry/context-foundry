@@ -1002,3 +1002,24 @@ def test_a_reports_own_id_tells_two_reports_of_one_instant_apart():
     first.metadata["reportId"], second.metadata["reportId"] = "r-1", "r-2"
     tracks = tracker.process_async_event(T0, {first, second})
     assert len({track.id for track in tracks}) == 2
+
+
+def test_a_stable_object_id_names_the_track_whatever_report_started_it():
+    # After a restart a track is re-seeded from a later report of the same object.
+    first, later = _seeded(seconds=0.0), _seeded(seconds=600.0)
+    for det in (first, later):
+        det.metadata["stable_object_id"] = True
+    a = next(iter(SapientAsynchronousTracker().process_async_event(T0, {first})))
+    b = next(
+        iter(SapientAsynchronousTracker().process_async_event(T0 + timedelta(seconds=600), {later}))
+    )
+    assert a.id == b.id
+
+
+def test_without_a_stable_object_id_a_later_report_starts_a_new_id():
+    first, later = _seeded(seconds=0.0), _seeded(seconds=600.0)
+    a = next(iter(SapientAsynchronousTracker().process_async_event(T0, {first})))
+    b = next(
+        iter(SapientAsynchronousTracker().process_async_event(T0 + timedelta(seconds=600), {later}))
+    )
+    assert a.id != b.id

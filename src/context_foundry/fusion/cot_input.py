@@ -14,11 +14,13 @@ a sensor of unknown kind.
 
 A CoT event names the object, not the sensor that saw it, so the uid is the object id,
 and it is stable: a CoT emitter keeps one uid for one object, which is how TAK updates
-it in place. The sensor is the node `sapient-to-cot` names in the remarks
-(`node=<node_id>`) when the event came from a SAPIENT node, and otherwise "cot".
+it in place. The sensor is "cot".
 
-Events fusion produced itself, routed back through sapient-to-cot, carry fusion's own
-node in the remarks and are skipped, so its tracks are not fused again.
+An event whose remarks name a SAPIENT node (`node=<node_id>`) is `sapient-to-cot`'s
+rendering of a SAPIENT report, and is skipped: fusion reads SAPIENT itself, so that report
+reaches it on its `sapient` role, and fused again from its rendering it would count twice,
+confirming tracks too fast and making their accuracy look better than it is. Fusion's own
+tracks routed back through sapient-to-cot are skipped the same way.
 """
 
 import logging
@@ -80,16 +82,21 @@ class CotRecordReader:
         self.own_node_id = own_node_id
         self.records_rejected = 0
         self.own_records_skipped = 0
+        # sapient-to-cot renderings of SAPIENT reports, which fusion reads as SAPIENT.
+        self.renderings_skipped = 0
 
     def detection(self, record: dict):
         """(timestamp, sensor id, Detection) of a located cot-raw event, or None.
 
-        None for fusion's own events and for an event fusion cannot use: no uid, no
-        time, or no point with a latitude and longitude.
+        None for a rendering of a SAPIENT report, fusion's own included, and for an event
+        fusion cannot use: no uid, no time, or no point with a latitude and longitude.
         """
         node = remarks_node(record)
-        if self.own_node_id and node == self.own_node_id:
-            self.own_records_skipped += 1
+        if node is not None:
+            if node == self.own_node_id:
+                self.own_records_skipped += 1
+            else:
+                self.renderings_skipped += 1
             return None
         try:
             uid = str(record["uid"])
@@ -117,7 +124,7 @@ class CotRecordReader:
         detection = Detection(
             state_vector=state_vector, measurement_model=model, timestamp=timestamp
         )
-        sensor = node or COT_NODE
+        sensor = COT_NODE
         # The CoT type is the emitter's own label, kept under its own key: Stone Soup merges
         # a hit's metadata into the track, and a 2525 code in "classification" would
         # overwrite the real classification a SAPIENT sensor gave the same track.
