@@ -183,6 +183,17 @@ def fusion_main():
         "writes). Fused on the records' own event_time, like a replay.",
     )
     parser.add_argument(
+        "--records-file",
+        action="append",
+        default=[],
+        help="Read sapient-raw and cot-raw records from this file, one per line, as records or "
+        "as archive lines (repeatable): the whole input is fused by event_time, offline.",
+    )
+    parser.add_argument(
+        "--records-output",
+        help="Write each fused track as a sapient-raw record, one per line, to this file.",
+    )
+    parser.add_argument(
         "--kafka-bootstrap",
         default="localhost:9092",
         help="Kafka bootstrap servers for --kafka-topic (default: localhost:9092)",
@@ -419,6 +430,17 @@ def fusion_main():
             "does not share a timeline with live sensors. Run one or the other."
         )
 
+    if args.records_file and (
+        args.replay_file or args.kafka_topic or args.enable_sapient or args.enable_cot
+    ):
+        parser.error(
+            "--records-file cannot be combined with another source: it is fused offline, on "
+            "its records' own event_time. Run one or the other."
+        )
+
+    if args.records_output and args.kafka_output_topic:
+        parser.error("--records-output and --kafka-output-topic: choose one output for tracks.")
+
     if args.kafka_topic and (args.replay_file or args.enable_sapient or args.enable_cot):
         # Records on the topic carry the sensors' own event_time, which need not be
         # the present (a backlog, or a replayed scenario), so they share a timeline
@@ -510,6 +532,16 @@ def fusion_main():
         else:
             logger.info(f"Replaying {args.replay_file} unpaced, as fast as events can be fused")
         sources.append(replay_source)
+    if args.records_file:
+        from context_foundry.fusion.sapient_raw import fusion_node_id
+        from context_foundry.fusion.sources.records_file import RecordsFileSource
+
+        sources.append(
+            RecordsFileSource(
+                [Path(p) for p in args.records_file],
+                own_node_id=fusion_node_id(args.pipeline_id, args.producer_stage),
+            )
+        )
     if args.kafka_topic:
         from context_foundry.fusion.sapient_raw import fusion_node_id
         from context_foundry.fusion.sources.kafka import KafkaSapientSource
@@ -631,12 +663,20 @@ def fusion_main():
             args.producer_stage,
             security_protocol=args.kafka_security_protocol,
         )
+    if args.records_output:
+        from context_foundry.fusion.sapient_raw import fusion_node_id
+        from context_foundry.fusion.sinks.records_file import RecordsFileSink
+
+        kafka_sink = RecordsFileSink(
+            args.records_output, fusion_node_id(args.pipeline_id, args.producer_stage)
+        )
 
     if not sinks and kafka_sink is None:
         logger.error(
             "No output sink configured. Add --tak-tls-host <host> to stream CoT to a TAK Server "
             "over TLS, --tak-ws-host <host> for the group-tagged WebTAK WebSocket, "
             "--kafka-output-topic <topic> to publish fused tracks as sapient-raw, "
+            "--records-output <file> to write them as sapient-raw records, "
             "or --log-to-file to write CoT to a file for offline validation."
         )
         raise SystemExit(1)
@@ -657,7 +697,7 @@ def fusion_main():
     # runs ahead of the wall clock, and cannot be combined with a live source; Kafka
     # records keep their sensors' event_time, which a backlog or a replayed scenario
     # leaves far from the present. Both are gated on their own timestamps alone.
-    live = not (args.replay_file or args.kafka_topic)
+    live = not (args.replay_file or args.kafka_topic or args.records_file)
     try:
         while True:
             processed_any_events = False
@@ -724,6 +764,10 @@ def fusion_main():
             if args.enable_sapient or args.enable_cot:
                 logger.error("Every live source ended; nothing left to read. Exiting.")
                 raise SystemExit(1)
+
+            if args.records_file:
+                logger.info("Records files fused. Exiting.")
+                break
 
             # Exit logic for replay files
             if args.replay_file:
