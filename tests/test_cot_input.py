@@ -69,6 +69,22 @@ def test_a_rendering_of_a_sapient_report_is_not_fused_again():
     assert reader.own_records_skipped == 0
 
 
+def test_a_rendering_of_a_status_report_is_not_fused():
+    # A sensor's own marker, which fused would be an object standing at the sensor.
+    reader = CotRecordReader(own_node_id="fusion-node")
+    remarks = {"_text": "node=RAD-7 system=SYSTEM_OK mode=default info=INFO_NEW"}
+    marker = _uav(type="a-f-G-E-S", uid="RAD-7", detail={"remarks": remarks})
+    assert reader.detection(marker) is None
+    assert reader.renderings_skipped == 1
+
+
+def test_node_later_in_a_remark_is_the_emitters_own_text():
+    reader = CotRecordReader(own_node_id="fusion-node")
+    detail = {"remarks": {"_text": "relay at node=north-hill offline"}}
+    assert reader.detection(_uav(detail=detail)) is not None
+    assert reader.renderings_skipped == 0
+
+
 def test_fusions_own_events_are_skipped():
     reader = CotRecordReader(own_node_id="fusion-node")
     own = _uav(detail={"remarks": {"_text": "node=fusion-node class=UAV"}})

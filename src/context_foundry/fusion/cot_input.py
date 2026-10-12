@@ -16,11 +16,13 @@ A CoT event names the object, not the sensor that saw it, so the uid is the obje
 and it is stable: a CoT emitter keeps one uid for one object, which is how TAK updates
 it in place. The sensor is "cot".
 
-An event whose remarks name a SAPIENT node (`node=<node_id>`) is `sapient-to-cot`'s
-rendering of a SAPIENT report, and is skipped: fusion reads SAPIENT itself, so that report
+An event whose remarks begin `node=<node_id>` is `sapient-to-cot`'s rendering of a SAPIENT
+report, a detection's or a status report's, and is skipped: fusion reads SAPIENT itself, so that report
 reaches it on its `sapient` role, and fused again from its rendering it would count twice,
-confirming tracks too fast and making their accuracy look better than it is. Fusion's own
-tracks routed back through sapient-to-cot are skipped the same way.
+confirming tracks too fast and making their accuracy look better than it is, and a status
+report's marker would be fused as an object standing at the sensor. Fusion's own tracks
+routed back through sapient-to-cot are skipped the same way. Only the first word is read:
+`node=` later in a remark is an emitter's own text, such as ATAK's.
 """
 
 import logging
@@ -64,11 +66,11 @@ def point_accuracy(ce: float | None, le: float | None) -> dict:
 
 
 def remarks_node(record: dict) -> str | None:
-    """The node_id a `node=<node_id>` remark names, as sapient-to-cot writes it, or None."""
+    """The node_id the remarks begin with, `node=<node_id>` as sapient-to-cot writes it, or None."""
     remarks = ((record.get("detail") or {}).get("remarks") or {}).get("_text") or ""
-    for token in str(remarks).split():
-        if token.startswith("node=") and len(token) > len("node="):
-            return token[len("node=") :]
+    words = str(remarks).split(maxsplit=1)
+    if words and words[0].startswith("node=") and len(words[0]) > len("node="):
+        return words[0][len("node=") :]
     return None
 
 
