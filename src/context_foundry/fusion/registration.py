@@ -22,6 +22,7 @@ sapient-raw carries it.
 """
 
 import logging
+import math
 import re
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,8 @@ def geometric_error_from(definition: dict) -> dict | None:
             number = float(value.get("unit_value"))
         except (TypeError, ValueError):
             continue
+        if not math.isfinite(number) or number < 0:
+            continue  # "NaN" parses, and would make every error of the sensor NaN.
         if key and key not in values:
             values[key] = number
     stated = _letters(error.get("variation_type"))
@@ -167,6 +170,8 @@ def node_location(status_message: dict) -> dict | None:
         lat, lon = float(location["y"]), float(location["x"])
         alt = float(location.get("z") or 0.0)
     except (KeyError, TypeError, ValueError):
+        return None
+    if not all(math.isfinite(v) for v in (lat, lon, alt)):
         return None
     if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
         return None

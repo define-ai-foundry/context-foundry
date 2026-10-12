@@ -173,6 +173,14 @@ class SapientValidator(ProtocolValidator):
         else:
             raise ValueError("Detection missing both 'location' and 'range_bearing' fields.")
 
+        # A NaN or infinite double reaches here as such ("NaN" in the JSON mapping), and
+        # fused it turns the tracker's state into NaN for good; a position off the world
+        # is no better.
+        if not (_finite(lat) and _finite(lon) and (alt is None or _finite(alt))):
+            raise ValueError("Detection location is not a finite number.")
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+            raise ValueError(f"Detection location {lat}, {lon} is off the world.")
+
         # --- Classification and Return ---
         primary_class = flatten_classification(report.classification)
 
@@ -197,3 +205,8 @@ class SapientValidator(ProtocolValidator):
                 "original_report": MessageToDict(report, preserving_proto_field_name=False),
             },
         )
+
+
+def _finite(value) -> bool:
+    """Whether a coordinate is a real number: not None, NaN or infinite."""
+    return value is not None and math.isfinite(value)

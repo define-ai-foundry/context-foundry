@@ -22,6 +22,7 @@ node in the remarks and are skipped, so its tracks are not fused again.
 """
 
 import logging
+import math
 from datetime import datetime
 
 from stonesoup.types.detection import Detection
@@ -43,7 +44,8 @@ def known(value) -> float | None:
     if value is None:
         return None
     number = float(value)
-    return None if number >= COT_UNKNOWN else number
+    # NaN or infinity is no estimate at all, so it reads as unknown too.
+    return None if not math.isfinite(number) or number >= COT_UNKNOWN else number
 
 
 def point_accuracy(ce: float | None, le: float | None) -> dict:
@@ -94,6 +96,8 @@ class CotRecordReader:
             timestamp = datetime.fromisoformat(str(record["event_time"]).replace("Z", "+00:00"))
             point = record["point"]
             lat, lon = float(point["lat"]), float(point["lon"])
+            if not (math.isfinite(lat) and math.isfinite(lon)):
+                raise ValueError("point lat or lon is not a finite number")
             height = known(point.get("hae"))
             ce, le = known(point.get("ce")), known(point.get("le"))
         except (KeyError, TypeError, ValueError) as e:

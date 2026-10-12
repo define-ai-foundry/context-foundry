@@ -107,6 +107,8 @@ class SapientRecordReader:
         detection.metadata = {
             "nodeId": clean_det.sensor_id,
             "objectId": original_report.get("objectId"),
+            # The sensor's own id for this one report; part of a seeded track's id.
+            "reportId": original_report.get("reportId"),
             # Whether the tracker may follow this objectId from report to report.
             "stable_object_id": config.has_stable_object_ids(sensor_meta),
             "classification": clean_det.classification or "Unknown",
