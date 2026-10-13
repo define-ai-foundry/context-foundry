@@ -6,6 +6,7 @@
 import logging
 import time
 import uuid
+from collections import deque
 
 import numpy as np
 from stonesoup.dataassociator.neighbour import GNNWith2DAssignment
@@ -68,6 +69,13 @@ MAX_EVENT_DETECTIONS = 300
 # default for the tracker's max_coast_seconds. See the constructor for how to
 # size it against a sensor network's revisit interval.
 MAX_COAST_SECONDS = 45.0
+
+# How far back a track's swarm count reaches: the largest count any of its detections
+# gave within this many seconds. Sensors see a swarm differently -- one counts the swarm,
+# another each drone in it, a CoT event nothing at all -- so the latest detection's count
+# would flicker between them. Longer than a swarm-counting sensor's revisit (a strategic
+# radar's is about 18 s), short enough that a swarm that splits shows it within a minute.
+SWARM_COUNT_WINDOW_SECONDS = 60.0
 
 # Validation gate, in Mahalanobis distance (i.e. standard deviations of the
 # measurement prediction, measurement noise included). A true hit exceeds 5 in
@@ -276,6 +284,8 @@ class SapientAsynchronousTracker:
         # (nodeId, objectId) -> id of the track that sensor's object was last fused
         # into, for sensors whose objectId is stable. Pruned with the tracks.
         self._object_tracks = {}
+        # Track id -> (timestamp, swarm count) its detections gave within the window.
+        self._swarm_counts: dict[str, deque] = {}
         self._refused_tracks = 0
         self._next_track_limit_report = 0.0
         self._shed_detections = 0
@@ -290,6 +300,13 @@ class SapientAsynchronousTracker:
         """
         # Bound the width of this pass before anything iterates over it.
         detection_group = self._limit_detections(detection_group)
+
+        # Drop tracks already past their coast horizon before they can be matched: one
+        # silent that long has a covariance wide enough to win a detection of another
+        # object anywhere, which would inherit its id, classification and threat. Only
+        # that rule: a tentative track still gets this event's detection before it is
+        # judged unconfirmed, as before.
+        self._drop_coasted_out(timestamp)
 
         # If no tracks exist yet, bootstrap the tracking engine using current observations
         if not self.tracks:
@@ -341,6 +358,7 @@ class SapientAsynchronousTracker:
                 updated_state = self.updater.update(joint_hypothesis, **update_context)
                 track.append(updated_state)
                 self._last_update_time[track.id] = timestamp
+                self._hold_swarm_count(track, det, timestamp)
                 self._bind_object_id(det, track)
                 self._count_confirmation_hit(track)
 
@@ -478,9 +496,25 @@ class SapientAsynchronousTracker:
         self.tracks.add(track)
         # The seeding hit is a real detection, so it anchors staleness.
         self._last_update_time[track.id] = detection.timestamp
+        self._hold_swarm_count(track, detection, detection.timestamp)
         if self.confirm_hits > 1:
             self._tentative[track.id] = [1, detection.timestamp]
         self._bind_object_id(detection, track)
+
+    def _hold_swarm_count(self, track, detection, timestamp) -> None:
+        """Set the track's swarm count to the largest its detections gave within the window.
+
+        A detection without a count, a CoT event's, adds nothing and leaves the window's
+        largest in place.
+        """
+        seen = self._swarm_counts.setdefault(track.id, deque())
+        count = (detection.metadata or {}).get("swarm_count")
+        if isinstance(count, int) and not isinstance(count, bool):
+            seen.append((timestamp, count))
+        while seen and (timestamp - seen[0][0]).total_seconds() > SWARM_COUNT_WINDOW_SECONDS:
+            seen.popleft()
+        if seen:
+            track.metadata["swarm_count"] = max(c for _, c in seen)
 
     def _seed_id(self, detection) -> str:
         """A track id fixed by the detection that starts the track, within `id_namespace`.
@@ -576,6 +610,25 @@ class SapientAsynchronousTracker:
             del track.states[:excess]
             del track.metadatas[:excess]
 
+    def _drop_coasted_out(self, current_time) -> None:
+        """Drop the tracks silent for longer than max_coast_seconds, and what is kept of them."""
+        gone = {
+            track
+            for track in self.tracks
+            if (
+                current_time - self._last_update_time.get(track.id, track.states[0].timestamp)
+            ).total_seconds()
+            > self.max_coast_seconds
+        }
+        if not gone:
+            return
+        self.tracks -= gone
+        ids = {track.id for track in gone}
+        for book in (self._last_update_time, self._swarm_counts, self._tentative):
+            for track_id in ids:
+                book.pop(track_id, None)
+        self._object_tracks = {k: v for k, v in self._object_tracks.items() if v not in ids}
+
     def _prune_stale_tracks(self, current_time):
         """Purges tracks that have coasted too long, in time or in uncertainty.
 
@@ -622,6 +675,11 @@ class SapientAsynchronousTracker:
         }
         self._object_tracks = {
             key: track_id for key, track_id in self._object_tracks.items() if track_id in active_ids
+        }
+        self._swarm_counts = {
+            track_id: seen
+            for track_id, seen in self._swarm_counts.items()
+            if track_id in active_ids
         }
         self._tentative = {
             track_id: pending

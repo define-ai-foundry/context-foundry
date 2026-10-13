@@ -159,3 +159,25 @@ def test_a_real_classification_outranks_a_cot_type(augmentor):
     )
 
     assert augmentor.extract_tactical_track(track).classification == "UAV_DECOY"
+
+
+def test_a_hostile_track_stays_hostile_within_the_hold(augmentor):
+    from datetime import timedelta
+
+    from context_foundry.fusion.augmentor import HOSTILE_HOLD_SECONDS
+
+    config.set_reference_origin(62.9, 29.8, 0.0)
+    ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    fast, slow = np.zeros((9, 1)), np.zeros((9, 1))
+    fast[1, 0], slow[1, 0] = 25.0, 15.0
+    meta = {"classification": "UAS", "swarm_count": 1}
+    assert augmentor.extract_tactical_track(_make_track(fast, ts, meta)).threat_level == "hostile"
+    # Slowing below the limit for a moment does not flip it back to suspect...
+    soon = ts + timedelta(seconds=10)
+    assert augmentor.extract_tactical_track(_make_track(slow, soon, meta)).threat_level == "hostile"
+    # ...nor does it last forever.
+    late = ts + timedelta(seconds=HOSTILE_HOLD_SECONDS + 1)
+    assert augmentor.extract_tactical_track(_make_track(slow, late, meta)).threat_level == "suspect"
+    # Another track's judgement is its own.
+    other = _make_track(slow, soon, meta, track_id="track-2")
+    assert augmentor.extract_tactical_track(other).threat_level == "suspect"
