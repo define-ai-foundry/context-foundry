@@ -41,7 +41,7 @@ Supports validated tactical data flows including:
 
 Transforms sensor data into operational tracks by:
 - Converting kinematic vectors into WGS84 geospatial coordinates.
-- Adding contextual metadata.
+- Adding contextual metadata. A track's swarm count is the largest any of its detections gave within the last 60 s, since sensors see one swarm differently (one counts the swarm, another each drone, a CoT event nothing), and a track judged hostile stays hostile for 60 s, so neither flickers between updates.
 - Delivering standardized Cursor-on-Target (CoT) XML to a TAK Server — over the WebTAK streaming WebSocket (bearer-authenticated; tracks tagged with the producer's Keycloak groups) or a raw TCP+TLS stream — for dissemination to connected WebTAK/ATAK/WinTAK clients, or writing it to file for offline validation.
 
 ### Edge-Native Integration
@@ -194,7 +194,7 @@ The installation exposes the `context-foundry-fusion` command globally. `--confi
 | `--max-live-tracks` | `Integer` | Live tracks held at once. Detections that associate with nothing each start a track, so clutter or an injected feed grow the population; past this bound new tracks are refused and reported, which keeps the targets already being followed. | `120` |
 | `--max-track-history` | `Integer` | States retained per track. Nothing downstream reads history; it is history times the track bound that has to fit the memory limit. | `20` |
 | `--max-event-detections` | `Integer` | Largest number of detections one event carries into association — the only cost term a sender controls. Past it detections are shed in a deterministic order and reported. | `300` |
-| `--max-coast-seconds` | `Float` | How long a track may coast without a real detection before it is dropped. Must exceed the interval at which a target is re-detected, or tracks die between revisits (on the reference scenario, `20` gives 274 tracks against 88 at the default). | `45` |
+| `--max-coast-seconds` | `Float` | How long a track may coast without a real detection before it is dropped. Must exceed the interval at which a target is re-detected, or tracks die between revisits (on the reference scenario, `20` gives 274 tracks against 88 at the default). A track past it is dropped before the next detections are matched, so it cannot absorb another object. | `45` |
 | `--tak-tls-host` | `String` | TAK host to stream CoT to over raw TCP+TLS (port 8089); enables the TLS sink. | *One sink required* |
 | `--tak-tls-port` | `Integer` | TAK TLS port. | `8089` |
 | `--tak-tls-cert` | `String` | Client certificate (PEM) for mutual TLS. | *Optional* |

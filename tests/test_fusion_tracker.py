@@ -1023,3 +1023,42 @@ def test_without_a_stable_object_id_a_later_report_starts_a_new_id():
         iter(SapientAsynchronousTracker().process_async_event(T0 + timedelta(seconds=600), {later}))
     )
     assert a.id != b.id
+
+
+# --- staleness before association, swarm count over a window (I-64, I-63) --------
+
+
+def test_a_track_past_its_coast_horizon_does_not_take_a_far_away_detection():
+    # Silent longer than max_coast_seconds, the track's uncertainty has grown so wide
+    # that matching it first would let it absorb a new object hundreds of km away.
+    tracker = SapientAsynchronousTracker(confirm_hits=1)
+    tracker.process_async_event(T0, {_det(0.0, 0.0, 0.0, T0)})
+    (old,) = tracker.tracks
+    later = T0 + timedelta(seconds=tracker.max_coast_seconds + 155)
+    tracker.process_async_event(later, {_det(0.0, 333_000.0, 0.0, later)})
+    (new,) = tracker.tracks
+    assert new.id != old.id, "the new object starts a track of its own"
+
+
+def test_a_tracks_swarm_count_is_the_largest_seen_within_the_window():
+    tracker = SapientAsynchronousTracker(confirm_hits=1)
+    tracker.process_async_event(T0, {_det(0.0, 0.0, 0.0, T0, {"swarm_count": 10})})
+    soon = T0 + timedelta(seconds=5)
+    tracker.process_async_event(soon, {_det(50.0, 0.0, 0.0, soon, {"swarm_count": 1})})
+    (track,) = tracker.tracks
+    # A sensor that counts single drones does not shrink the swarm another just counted.
+    assert track.metadata["swarm_count"] == 10
+    late = soon + timedelta(seconds=tracker_module.SWARM_COUNT_WINDOW_SECONDS + 1)
+    tracker.process_async_event(late, {_det(100.0, 0.0, 0.0, late, {"swarm_count": 1})})
+    (track,) = tracker.tracks
+    assert track.metadata["swarm_count"] == 1, "past the window only what was seen since counts"
+
+
+def test_an_update_without_a_swarm_count_keeps_the_windows_largest():
+    # A CoT event carries no swarm count.
+    tracker = SapientAsynchronousTracker(confirm_hits=1)
+    tracker.process_async_event(T0, {_det(0.0, 0.0, 0.0, T0, {"swarm_count": 6})})
+    soon = T0 + timedelta(seconds=3)
+    tracker.process_async_event(soon, {_det(30.0, 0.0, 0.0, soon, {"cot_type": "a-u-A"})})
+    (track,) = tracker.tracks
+    assert track.metadata["swarm_count"] == 6

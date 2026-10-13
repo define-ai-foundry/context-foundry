@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+from datetime import timedelta
 
 from . import config
 from .schemas import TacticalTrack
@@ -9,6 +10,11 @@ from .schemas import TacticalTrack
 # WGS84 Ellipsoid Constants
 WGS84_A = 6378137.0
 WGS84_E2 = 0.00669437999014
+
+# How long a track judged hostile stays hostile: a track flying near the speed limit, or
+# one whose swarm count briefly reads small, would otherwise flip its affiliation between
+# hostile and suspect from one update to the next.
+HOSTILE_HOLD_SECONDS = 60.0
 
 
 class TacticalContextAugmentor:
@@ -18,7 +24,21 @@ class TacticalContextAugmentor:
     """
 
     def __init__(self):
-        pass
+        # Track id -> until when it stays hostile, from the last time it was judged so.
+        self._hostile_until = {}
+
+    def _held_threat(self, track_id, timestamp, hostile_now: bool) -> str:
+        """The more severe of now's judgement and a hostile one within HOSTILE_HOLD_SECONDS."""
+        if hostile_now:
+            self._hostile_until[track_id] = timestamp + timedelta(seconds=HOSTILE_HOLD_SECONDS)
+            # Bounded by the tracks still published: one expired long ago is forgotten.
+            if len(self._hostile_until) > 1000:
+                self._hostile_until = {
+                    k: until for k, until in self._hostile_until.items() if until >= timestamp
+                }
+            return "hostile"
+        until = self._hostile_until.get(track_id)
+        return "hostile" if until is not None and timestamp <= until else "suspect"
 
     def ecef_to_wgs84(self, x, y, z):
         """Converts ECEF Cartesian coordinates back to WGS84 Geodetic bounds."""
@@ -73,7 +93,7 @@ class TacticalContextAugmentor:
         # Core Rules Engine: Threat Assessment Logic
         is_fast = speed_m_s > 20.0
         is_swarm = swarm_count > 3
-        threat_level = "hostile" if (is_fast or is_swarm) else "suspect"
+        threat_level = self._held_threat(track.id, state.timestamp, is_fast or is_swarm)
 
         # Return the universal state object for the serializers to consume
         return TacticalTrack(
