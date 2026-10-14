@@ -1062,3 +1062,19 @@ def test_an_update_without_a_swarm_count_keeps_the_windows_largest():
     tracker.process_async_event(soon, {_det(30.0, 0.0, 0.0, soon, {"cot_type": "a-u-A"})})
     (track,) = tracker.tracks
     assert track.metadata["swarm_count"] == 6
+
+
+def test_a_swarm_count_ages_out_when_only_cot_updates_follow():
+    # Stone Soup carries a track's metadata forward on every update, so a count left in
+    # place would read 10 (and hostile) for as long as CoT events keep the track alive.
+    tracker = SapientAsynchronousTracker(confirm_hits=1)
+    tracker.process_async_event(T0, {_det(0.0, 0.0, 0.0, T0, {"swarm_count": 10})})
+    for step in range(1, 61):
+        moment = T0 + timedelta(seconds=5 * step)
+        tracker.process_async_event(
+            moment, {_det(5.0 * step, 0.0, 0.0, moment, {"cot_type": "a-u-A"})}
+        )
+        (track,) = tracker.tracks
+        if 5 * step <= tracker_module.SWARM_COUNT_WINDOW_SECONDS:
+            assert track.metadata["swarm_count"] == 10
+    assert "swarm_count" not in track.metadata, "past the window a CoT-only track has no count"

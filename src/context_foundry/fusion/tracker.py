@@ -505,7 +505,8 @@ class SapientAsynchronousTracker:
         """Set the track's swarm count to the largest its detections gave within the window.
 
         A detection without a count, a CoT event's, adds nothing and leaves the window's
-        largest in place.
+        largest in place. Once the window holds no count the track has none, so the
+        augmentor falls back to its default rather than an old count carried forward.
         """
         seen = self._swarm_counts.setdefault(track.id, deque())
         count = (detection.metadata or {}).get("swarm_count")
@@ -515,6 +516,8 @@ class SapientAsynchronousTracker:
             seen.popleft()
         if seen:
             track.metadata["swarm_count"] = max(c for _, c in seen)
+        else:
+            track.metadata.pop("swarm_count", None)
 
     def _seed_id(self, detection) -> str:
         """A track id fixed by the detection that starts the track, within `id_namespace`.
