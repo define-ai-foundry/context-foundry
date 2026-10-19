@@ -22,7 +22,7 @@ from stonesoup.types.prediction import Prediction
 from stonesoup.types.update import Update
 
 from .augmentor import TacticalContextAugmentor
-from .publish import PendingSources, PublishPolicy
+from .publish import PendingSources, PublishPolicy, source_key
 from .schemas import TacticalTrack
 from .tracker import SapientAsynchronousTracker
 
@@ -150,6 +150,8 @@ class FusionEngine:
             self.latest_timestamp = mark
             self.watermark_sensor = sensor_ids(detections)
 
+        # Each source is named at its report's own time, not the clamped one below.
+        reported = {source_key(d.metadata): d.timestamp for d in detections}
         if mark != timestamp:
             # The detections move with the event. Stone Soup predicts each hypothesis
             # to its detection's own timestamp, so a track updated by one ends up
@@ -162,7 +164,7 @@ class FusionEngine:
         # By identity, holding each track so no new one can reuse its address.
         held_before = {id(track): track for track in self.tracker.tracks}
         active = list(self.tracker.process_async_event(mark, fed))
-        self._note_sources(fed, held_before)
+        self._note_sources(fed, held_before, reported)
         published = []
         sources = {}
         for track in active:
@@ -179,13 +181,14 @@ class FusionEngine:
         self.pending_sources.forget_all_but(t.id for t in self.tracker.tracks)
         return EventResult(mark=mark, published=published, active=active, sources=sources)
 
-    def _note_sources(self, fed: set, held_before: dict) -> None:
+    def _note_sources(self, fed: set, held_before: dict, reported: dict) -> None:
         """Record the report each held track took in this event, if any.
 
         A track updated from one of `fed` holds an Update whose hypothesis carries the
         detection, whether it was matched by position or bound by its sensor's object
         id. A track this event started holds its seed's metadata as `init_metadata`. A
-        coasting track's Prediction names nothing.
+        coasting track's Prediction names nothing. `reported` holds each source's time as
+        its report gave it, before a live event was clamped to the present.
         """
         for track in self.tracker.tracks:
             state = track.state
@@ -193,10 +196,11 @@ class FusionEngine:
                 # A new track, possibly under the id of one just dropped.
                 self.pending_sources.forget(track.id)
                 if not isinstance(state, (Update, Prediction)):
-                    self.pending_sources.note(
-                        track.id, getattr(track, "init_metadata", None), state.timestamp
-                    )
+                    metadata = getattr(track, "init_metadata", None)
+                    moment = reported.get(source_key(metadata), state.timestamp)
+                    self.pending_sources.note(track.id, metadata, moment)
             if isinstance(state, Update):
                 detection = getattr(state.hypothesis, "measurement", None)
                 if detection is not None and detection in fed:
-                    self.pending_sources.note(track.id, detection.metadata, detection.timestamp)
+                    moment = reported.get(source_key(detection.metadata), detection.timestamp)
+                    self.pending_sources.note(track.id, detection.metadata, moment)
