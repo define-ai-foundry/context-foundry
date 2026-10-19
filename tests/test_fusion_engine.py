@@ -74,6 +74,15 @@ def test_a_live_event_from_the_future_is_dropped_and_a_near_one_clamped():
     assert detection.timestamp == T0
 
 
+def test_a_clamped_live_report_is_named_at_its_own_time():
+    engine = _engine()
+    seed = engine.process(T0 + timedelta(seconds=5), [_det(5)], now=T0)
+    ((track, _),) = seed.published
+    assert seed.sources[str(track.id)][0]["timestamp"] == T0 + timedelta(seconds=5)
+    update = engine.process(T0 + timedelta(seconds=9), [_det(9)], now=T0 + timedelta(seconds=6))
+    assert update.sources[str(track.id)][0]["timestamp"] == T0 + timedelta(seconds=9)
+
+
 def test_reset_starts_a_new_scenario():
     engine = _engine()
     engine.process(T0 + timedelta(seconds=60), [_det(60)])
