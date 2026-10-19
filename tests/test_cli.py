@@ -108,10 +108,12 @@ class _FakeTracker:
     def __init__(self, tracks_by_call):
         self._tracks_by_call = tracks_by_call
         self.calls = 0
+        self.tracks = []
 
     def process_async_event(self, timestamp, detection_group):
         tracks = self._tracks_by_call[min(self.calls, len(self._tracks_by_call) - 1)]
         self.calls += 1
+        self.tracks = list(tracks)
         return tracks
 
 
@@ -789,10 +791,12 @@ class _EchoTracker:
     def __init__(self, track_id):
         self.track_id = track_id
         self.seen = []
+        self.tracks = []
 
     def process_async_event(self, timestamp, detection_group):
         self.seen.append(timestamp)
-        return [_fake_track(self.track_id, timestamp)]
+        self.tracks = [_fake_track(self.track_id, timestamp)]
+        return self.tracks
 
 
 def test_default_offsets_replay_timestamps_and_still_broadcasts(monkeypatch, caplog, tmp_path):
@@ -1880,11 +1884,13 @@ class _DetectionStampedTracker:
     def __init__(self, track_id):
         self.track_id = track_id
         self.seen = []
+        self.tracks = []
 
     def process_async_event(self, timestamp, detection_group):
         self.seen.append(timestamp)
         stamp = next(iter(detection_group)).timestamp
-        return [_fake_track(self.track_id, stamp)]
+        self.tracks = [_fake_track(self.track_id, stamp)]
+        return self.tracks
 
 
 def test_a_fast_sensor_within_the_horizon_cannot_rewind_the_tracker(monkeypatch, caplog, tmp_path):
