@@ -147,3 +147,28 @@ def test_sources_become_associated_detection():
     assert (
         "associated_detection" not in sapient_raw.track_message(_track(), NODE)["detection_report"]
     )
+
+
+def test_cot_source_ids_are_a_uuid_and_a_ulid_fixed_by_the_uid():
+    node = sapient_raw.cot_node_id()
+    assert str(uuid.UUID(node)) == node == sapient_raw.cot_node_id()
+    assert node == str(uuid.uuid5(uuid.NAMESPACE_URL, "context-foundry-cot"))
+    one = sapient_raw.cot_object_ulid("ANDROID-1")
+    assert ULID.match(one)
+    assert one == sapient_raw.cot_object_ulid("ANDROID-1")
+    assert one != sapient_raw.cot_object_ulid("ANDROID-2")
+    assert one == sapient_raw.ulid_text(
+        uuid.uuid5(uuid.NAMESPACE_URL, "context-foundry-cot:ANDROID-1").int
+    )
+
+
+def test_a_cot_source_round_trips_through_the_sapient_definition():
+    source = {
+        "node_id": sapient_raw.cot_node_id(),
+        "object_id": sapient_raw.cot_object_ulid("ANDROID-1"),
+        "timestamp": _track().timestamp,
+    }
+    report = sapient_raw.track_message(_track(), NODE, sources=[source])["detection_report"]
+    (entry,) = report["associated_detection"]
+    assert entry["node_id"] == source["node_id"]
+    assert entry["object_id"] == source["object_id"]

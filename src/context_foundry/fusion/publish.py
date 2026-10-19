@@ -23,8 +23,13 @@ predicted positions that read like sightings. The policy picks what goes out:
            reports come in and no prediction is ever sent
 """
 
+from datetime import datetime
+
 from stonesoup.types.prediction import Prediction
 from stonesoup.types.update import Update
+
+from .cot_input import COT_NODE
+from .sapient_raw import cot_node_id, cot_object_ulid
 
 POLICIES = ("all", "updates", "coast", "predicted", "window")
 DEFAULT_COAST_SECONDS = 5.0
@@ -81,6 +86,41 @@ class PublishPolicy:
             del self._last_sent[track_id]
 
 
+def source_key(metadata) -> tuple[str, str | None] | None:
+    """(node_id, object_id) naming the sensor report a detection came from, or None.
+
+    A SAPIENT report is named by its own node_id and object_id. A CoT event has no
+    SAPIENT identity, so it is named by ids derived from it: `cot_node_id()` for every
+    CoT source and `cot_object_ulid(uid)` for its object. The detection's own metadata
+    keeps "cot" and the uid, which the tracker and the sensor registry key on.
+    """
+    metadata = metadata or {}
+    node_id = metadata.get("nodeId")
+    if not node_id:
+        return None
+    object_id = metadata.get("objectId")
+    if node_id == COT_NODE:
+        return cot_node_id(), cot_object_ulid(str(object_id)) if object_id else None
+    return node_id, object_id
+
+
+def _note(found: dict, metadata, moment) -> None:
+    """Record one sighting in `found`, keeping each source's newest time."""
+    key = source_key(metadata)
+    if key is None or moment is None:
+        return
+    if key not in found or moment > found[key]:
+        found[key] = moment
+
+
+def _listed(found: dict) -> list[dict]:
+    """Sources as associated_detection entries, oldest first."""
+    return [
+        {"node_id": node_id, "object_id": object_id, "timestamp": moment}
+        for (node_id, object_id), moment in sorted(found.items(), key=lambda kv: kv[1])
+    ]
+
+
 def recent_sources(track) -> list[dict]:
     """The sensor reports behind a track, from the history it still holds.
 
@@ -90,25 +130,42 @@ def recent_sources(track) -> list[dict]:
     that started the track -- so it covers the recent past, not the whole life.
     """
     found = {}
-
-    def note(metadata, moment):
-        node_id = (metadata or {}).get("nodeId")
-        if not node_id or moment is None:
-            return
-        key = (node_id, (metadata or {}).get("objectId"))
-        if key not in found or moment > found[key]:
-            found[key] = moment
-
     states = list(track.states)
     for index, state in enumerate(states):
         if isinstance(state, Update):
             detection = getattr(state.hypothesis, "measurement", None)
             if detection is not None:
-                note(detection.metadata, detection.timestamp)
+                _note(found, detection.metadata, detection.timestamp)
         elif index == 0 and not isinstance(state, Prediction):
-            note(getattr(track, "init_metadata", None), state.timestamp)
+            _note(found, getattr(track, "init_metadata", None), state.timestamp)
+    return _listed(found)
 
-    return [
-        {"node_id": node_id, "object_id": object_id, "timestamp": moment}
-        for (node_id, object_id), moment in sorted(found.items(), key=lambda kv: kv[1])
-    ]
+
+class PendingSources:
+    """The sensor reports each track took since its previous published record.
+
+    A record within the publish window stands for every update since the last one, so
+    it names the sources of all of them, not only the latest; taking a track's list
+    for a record starts the next one empty.
+    """
+
+    def __init__(self):
+        self._pending: dict[str, dict[tuple[str, str | None], datetime]] = {}
+
+    def note(self, track_id, metadata, moment) -> None:
+        """A report `track_id` took at `moment`, from the detection's `metadata`."""
+        _note(self._pending.setdefault(track_id, {}), metadata, moment)
+
+    def take(self, track_id) -> list[dict]:
+        """The track's pending sources, oldest first, and clear them."""
+        return _listed(self._pending.pop(track_id, {}))
+
+    def forget(self, track_id) -> None:
+        """Drop one track's pending sources, as for a track started again under its id."""
+        self._pending.pop(track_id, None)
+
+    def forget_all_but(self, live_track_ids) -> None:
+        """Drop the pending sources of tracks that are no longer held."""
+        live = set(live_track_ids)
+        for track_id in [t for t in self._pending if t not in live]:
+            del self._pending[track_id]

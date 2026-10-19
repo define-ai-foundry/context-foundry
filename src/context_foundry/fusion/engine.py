@@ -18,8 +18,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from stonesoup.types.prediction import Prediction
+from stonesoup.types.update import Update
+
 from .augmentor import TacticalContextAugmentor
-from .publish import PublishPolicy
+from .publish import PendingSources, PublishPolicy
 from .schemas import TacticalTrack
 from .tracker import SapientAsynchronousTracker
 
@@ -55,12 +58,17 @@ class EventResult:
 
     `skew` says why it was dropped, None when it was fused. `published` holds each
     track to publish with its tactical form; `active` every live track after it.
+    `sources` holds, by `str(track.id)` for every published track, the sensor reports
+    the track took since its previous published record (node_id, object_id, timestamp
+    each, oldest first): what its record names as associated_detection. It is empty
+    only for a predicted state published with nothing measured since the last record.
     """
 
     mark: datetime | None = None
     skew: str | None = None
     published: list[tuple[Any, TacticalTrack]] = field(default_factory=list)
     active: list[Any] = field(default_factory=list)
+    sources: dict[str, list[dict]] = field(default_factory=dict)
 
     @property
     def dropped(self) -> bool:
@@ -92,11 +100,15 @@ class FusionEngine:
         # Which sensor's event set the current watermark, so a drop report can name
         # the sensor that caused it and not only the one that suffered it.
         self.watermark_sensor = "no event accepted yet"
+        # Kept here rather than read from track history: history is capped, and a
+        # record must name every report since the previous one, however many.
+        self.pending_sources = PendingSources()
 
     def reset(self, tracker: SapientAsynchronousTracker) -> None:
         """Start again with a new tracker: a new scenario, not a continuation."""
         self.tracker = tracker
         self.latest_timestamp = None
+        self.pending_sources = PendingSources()
 
     def process(self, timestamp: datetime, detections, now: datetime | None = None) -> EventResult:
         """Fuse one event, or drop it when its timestamp is out of step with the rest.
@@ -146,13 +158,45 @@ class FusionEngine:
             for detection in detections:
                 detection.timestamp = mark
 
-        active = list(self.tracker.process_async_event(mark, set(detections)))
+        fed = set(detections)
+        # By identity, holding each track so no new one can reuse its address.
+        held_before = {id(track): track for track in self.tracker.tracks}
+        active = list(self.tracker.process_async_event(mark, fed))
+        self._note_sources(fed, held_before)
         published = []
+        sources = {}
         for track in active:
             # Only a track this event updated, and only when the publish rule lets it
             # out (by default: a state a sensor report made, at most once per track per
             # window), so tracks that have not changed are not sent again.
             if track.state.timestamp == mark and self.publish_policy.should_publish(track, mark):
                 published.append((track, self.augmentor.extract_tactical_track(track)))
+                # Taken whether or not the caller writes the record: a rebuild's
+                # re-read publishes nothing, and its sources are behind it.
+                sources[str(track.id)] = self.pending_sources.take(track.id)
         self.publish_policy.forget_all_but(t.id for t in active)
-        return EventResult(mark=mark, published=published, active=active)
+        # Tentative tracks keep theirs: their seed is named once they are published.
+        self.pending_sources.forget_all_but(t.id for t in self.tracker.tracks)
+        return EventResult(mark=mark, published=published, active=active, sources=sources)
+
+    def _note_sources(self, fed: set, held_before: dict) -> None:
+        """Record the report each held track took in this event, if any.
+
+        A track updated from one of `fed` holds an Update whose hypothesis carries the
+        detection, whether it was matched by position or bound by its sensor's object
+        id. A track this event started holds its seed's metadata as `init_metadata`. A
+        coasting track's Prediction names nothing.
+        """
+        for track in self.tracker.tracks:
+            state = track.state
+            if held_before.get(id(track)) is not track:
+                # A new track, possibly under the id of one just dropped.
+                self.pending_sources.forget(track.id)
+                if not isinstance(state, (Update, Prediction)):
+                    self.pending_sources.note(
+                        track.id, getattr(track, "init_metadata", None), state.timestamp
+                    )
+            if isinstance(state, Update):
+                detection = getattr(state.hypothesis, "measurement", None)
+                if detection is not None and detection in fed:
+                    self.pending_sources.note(track.id, detection.metadata, detection.timestamp)

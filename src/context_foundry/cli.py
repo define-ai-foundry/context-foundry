@@ -18,7 +18,6 @@ from context_foundry.fusion.publish import (
     POLICIES,
     PublishPolicy,
     is_predicted,
-    recent_sources,
 )
 from context_foundry.fusion.serializers import (
     DEFAULT_STALE_SECONDS,
@@ -237,7 +236,8 @@ def fusion_main():
         "--list-sources",
         action="store_true",
         help="List the sensor reports behind each published track (associated_detection): "
-        "each sensor and sensor object id in the track's retained history, newest sighting.",
+        "every report the track took since its previous record, one per sensor and sensor "
+        "object id with its newest sighting; a CoT source under ids derived from its uid.",
     )
     parser.add_argument(
         "--label-predicted",
@@ -736,7 +736,9 @@ def fusion_main():
                                 tactical_track,
                                 track.metadata,
                                 predicted=is_predicted(track) if args.label_predicted else None,
-                                sources=recent_sources(track) if args.list_sources else None,
+                                sources=result.sources[str(track.id)]
+                                if args.list_sources
+                                else None,
                             )
                         counters["cot"] += 1
                         # Per track per event: 20 lines a second on a busy picture,

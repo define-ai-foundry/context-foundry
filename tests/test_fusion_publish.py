@@ -10,7 +10,14 @@ from stonesoup.types.state import GaussianState
 from stonesoup.types.track import Track
 from stonesoup.types.update import GaussianStateUpdate
 
-from context_foundry.fusion.publish import PublishPolicy, is_predicted, recent_sources
+from context_foundry.fusion.publish import (
+    PendingSources,
+    PublishPolicy,
+    is_predicted,
+    recent_sources,
+    source_key,
+)
+from context_foundry.fusion.sapient_raw import cot_node_id, cot_object_ulid
 
 T0 = datetime(2026, 11, 15, 3, 0, 0, tzinfo=timezone.utc)
 
@@ -141,3 +148,48 @@ def test_window_sends_only_measured_states_at_most_once_per_window():
 def test_rejects_a_window_that_is_not_positive():
     with pytest.raises(ValueError):
         PublishPolicy("window", window_seconds=0)
+
+
+def test_recent_sources_names_a_cot_source_by_its_derived_ids():
+    track = Track(
+        [GaussianState([[0.0]], [[1.0]], timestamp=_at(0)), _update(_detection("cot", "U-1", 4))],
+        init_metadata={"nodeId": "cot", "objectId": "U-1"},
+    )
+    assert recent_sources(track) == [
+        {"node_id": cot_node_id(), "object_id": cot_object_ulid("U-1"), "timestamp": _at(4)}
+    ]
+
+
+def test_source_key_maps_cot_and_passes_sapient_through():
+    assert source_key({"nodeId": "cot", "objectId": "U-1"}) == (
+        cot_node_id(),
+        cot_object_ulid("U-1"),
+    )
+    assert source_key({"nodeId": "cot"}) == (cot_node_id(), None)
+    assert source_key({"nodeId": "N", "objectId": "O"}) == ("N", "O")
+    assert source_key({"nodeId": "N", "objectId": ""}) == ("N", "")
+    assert source_key({"objectId": "O"}) is None
+    assert source_key(None) is None
+
+
+def test_pending_sources_keep_the_newest_sighting_and_clear_on_take():
+    pending = PendingSources()
+    pending.note("t", {"nodeId": "B", "objectId": "2"}, _at(3))
+    pending.note("t", {"nodeId": "A", "objectId": "1"}, _at(5))
+    pending.note("t", {"nodeId": "B", "objectId": "2"}, _at(1))
+    pending.note("t", {"objectId": "x"}, _at(2))
+    pending.note("t", {"nodeId": "C"}, None)
+    assert pending.take("t") == [
+        {"node_id": "B", "object_id": "2", "timestamp": _at(3)},
+        {"node_id": "A", "object_id": "1", "timestamp": _at(5)},
+    ]
+    assert pending.take("t") == []
+
+
+def test_pending_sources_forget_tracks_no_longer_held():
+    pending = PendingSources()
+    pending.note("a", {"nodeId": "N"}, _at(0))
+    pending.note("b", {"nodeId": "N"}, _at(0))
+    pending.forget_all_but(["b"])
+    assert pending.take("a") == []
+    assert len(pending.take("b")) == 1

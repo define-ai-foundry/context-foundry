@@ -64,6 +64,25 @@ def fusion_node_id(pipeline_id: str, stage: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"context-foundry-fusion:{pipeline_id}:{stage}"))
 
 
+def cot_node_id() -> str:
+    """The SAPIENT node_id naming a CoT source of a fused track, one for every CoT source.
+
+    A CoT event names the object, not the sensor, and has no SAPIENT identity, while
+    associated_detection's node_id must be a UUID: uuid5 of "context-foundry-cot" in the
+    URL namespace.
+    """
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, "context-foundry-cot"))
+
+
+def cot_object_ulid(uid: str) -> str:
+    """The SAPIENT object_id naming a CoT event's object, the same for every report of its uid.
+
+    uuid5 of "context-foundry-cot:<uid>" in the URL namespace, as a ULID, so a consumer
+    holding a CoT uid derives the object_id a fused track names it by.
+    """
+    return ulid_text(uuid.uuid5(uuid.NAMESPACE_URL, f"context-foundry-cot:{uid}").int)
+
+
 def uuid7() -> str:
     """A version 7 UUID in canonical lowercase form, the platform's message_id."""
     ms = time.time_ns() // 1_000_000
