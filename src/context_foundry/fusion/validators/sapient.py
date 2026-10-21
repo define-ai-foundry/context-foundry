@@ -86,11 +86,16 @@ def flatten_classification(classification) -> str:
 
 
 def class_confidences(classification) -> list[float | None]:
-    """The confidence of each level `flatten_classification` names, None where a level has none."""
+    """The confidence of each level `flatten_classification` names, None where a level has none
+    or one that is not a number in [0, 1]."""
     return [
-        node.confidence if node.HasField("confidence") else None
+        _bounded(node.confidence) if node.HasField("confidence") else None
         for node in _primary_chain(classification)
     ]
+
+
+def _bounded(confidence: float) -> float | None:
+    return confidence if math.isfinite(confidence) and 0.0 <= confidence <= 1.0 else None
 
 
 def _primary_chain(classification) -> list:

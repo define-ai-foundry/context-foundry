@@ -180,6 +180,29 @@ def test_extract_tactical_track_latest_detection_without_confidences_leaves_none
     assert result.class_confidences == []
 
 
+def test_extract_tactical_track_cot_type_fallback_carries_no_class_confidences(augmentor):
+    config.set_reference_origin(62.9, 29.8, 0.0)
+    ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    metadata = {"classification": "Unknown", "class_confidences": [0.3], "cot_type": "a-h-A"}
+
+    result = augmentor.extract_tactical_track(_make_track(np.zeros((9, 1)), ts, metadata=metadata))
+    assert result.classification == "a-h-A"
+    assert result.class_confidences == []
+
+
+def test_extract_tactical_track_a_cot_hit_keeps_the_sapient_confidences(augmentor):
+    config.set_reference_origin(62.9, 29.8, 0.0)
+    track = _updated_track(
+        {"classification": "Vehicle", "detection_confidence": 0.8, "class_confidences": [0.6]},
+        {"nodeId": "cot", "type": "CoT", "cot_type": "a-h-A"},
+    )
+
+    result = augmentor.extract_tactical_track(track)
+    assert result.classification == "Vehicle"
+    assert result.detection_confidence == pytest.approx(0.8)
+    assert result.class_confidences == pytest.approx([0.6])
+
+
 def test_extract_tactical_track_heading_wraps_to_0_360(augmentor):
     config.set_reference_origin(62.9, 29.8, 0.0)
     ts = datetime(2026, 1, 1, tzinfo=timezone.utc)

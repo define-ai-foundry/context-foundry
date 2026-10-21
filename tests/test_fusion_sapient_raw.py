@@ -124,6 +124,19 @@ def test_a_level_without_a_confidence_has_no_confidence_key():
     assert top["sub_class"][0]["sub_class"][0]["confidence"] == pytest.approx(0.3)
 
 
+def test_a_nan_class_confidence_is_written_as_none_not_raised(sapient_detection_report_message):
+    from context_foundry.fusion.validators.sapient import SapientValidator
+
+    payload = json.loads(json.dumps(sapient_detection_report_message))
+    report = payload["sapientMessage"]["detectionReport"]
+    report["classification"] = [{"type": "Air Vehicle", "confidence": "NaN"}]
+    det = SapientValidator().normalize(payload)
+    track = _track(classification=det.classification, class_confidences=det.class_confidences)
+
+    top = _record(track)[1]["message"]["detection_report"]["classification"][0]
+    assert top == {"type": "Air Vehicle"}
+
+
 def test_no_confidences_written_when_the_track_has_none():
     report = _record()[1]["message"]["detection_report"]
     assert "detection_confidence" not in report

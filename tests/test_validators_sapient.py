@@ -267,6 +267,25 @@ def test_normalize_class_confidence_absent_on_a_level(validator, sapient_detecti
     assert det.class_confidences[1] is None
 
 
+@pytest.mark.parametrize("bad", ["NaN", "Infinity", "-Infinity", 87.0, -0.1])
+def test_normalize_class_confidence_outside_zero_to_one_is_dropped(
+    validator, sapient_detection_report_message, bad
+):
+    payload = _with_classification(
+        sapient_detection_report_message,
+        [
+            {
+                "type": "Vehicle",
+                "confidence": bad,
+                "subClass": [{"type": "Drone", "confidence": 0.4, "level": 1}],
+            }
+        ],
+    )
+    det = validator.normalize(payload)
+    assert det.class_confidences[0] is None
+    assert det.class_confidences[1] == pytest.approx(0.4)
+
+
 def test_normalize_class_confidences_empty_without_classification(
     validator, sapient_detection_report_message
 ):
