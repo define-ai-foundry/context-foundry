@@ -105,6 +105,8 @@ class TacticalContextAugmentor:
             speed_mps=speed_m_s,
             heading_deg=heading_deg,
             classification=classification,
+            detection_confidence=metadata.get("detection_confidence"),
+            class_confidences=metadata.get("class_confidences") or [],
             swarm_count=swarm_count,
             threat_level=threat_level,
             velocity=[float(ve), float(vn), float(vu)],

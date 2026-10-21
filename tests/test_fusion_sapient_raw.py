@@ -5,6 +5,8 @@ import re
 import uuid
 from datetime import datetime, timezone
 
+import pytest
+
 from context_foundry.fusion import sapient_raw
 from context_foundry.fusion.schemas import TacticalTrack
 
@@ -100,6 +102,34 @@ def test_two_component_velocity_and_confidence():
     report = message["detection_report"]
     assert report["enu_velocity"] == {"east_rate": 1.0, "north_rate": 2.0}
     assert report["classification"][0]["confidence"] == 0.8
+
+
+def test_detection_confidence_written_from_the_track():
+    report = _record(_track(detection_confidence=0.8))[1]["message"]["detection_report"]
+    assert report["detection_confidence"] == pytest.approx(0.8)
+
+
+def test_class_confidence_written_on_every_level():
+    track = _track(class_confidences=[0.62, 0.4, 0.3])
+    top = _record(track)[1]["message"]["detection_report"]["classification"][0]
+    assert top["confidence"] == pytest.approx(0.62)
+    assert top["sub_class"][0]["confidence"] == pytest.approx(0.4)
+    assert top["sub_class"][0]["sub_class"][0]["confidence"] == pytest.approx(0.3)
+
+
+def test_a_level_without_a_confidence_has_no_confidence_key():
+    track = _track(class_confidences=[0.62, None, 0.3])
+    top = _record(track)[1]["message"]["detection_report"]["classification"][0]
+    assert "confidence" not in top["sub_class"][0]
+    assert top["sub_class"][0]["sub_class"][0]["confidence"] == pytest.approx(0.3)
+
+
+def test_no_confidences_written_when_the_track_has_none():
+    report = _record()[1]["message"]["detection_report"]
+    assert "detection_confidence" not in report
+    top = report["classification"][0]
+    assert "confidence" not in top
+    assert "confidence" not in top["sub_class"][0]
 
 
 def test_fusion_node_id_is_fixed_per_pipeline_stage():

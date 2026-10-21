@@ -172,6 +172,17 @@ def test_iter_events_yields_detection_for_valid_packet(monkeypatch):
         next(gen)
 
 
+def test_iter_events_carries_the_reports_confidences(monkeypatch):
+    config.load_sensor_network(
+        sensor_network_list=[{"id": NODE_A, "lat": 62.9, "lon": 29.8, "alt": 100.0}]
+    )
+    stream = _make_stream(monkeypatch, [_packet(), TimeoutError(), _Stop()])
+
+    _, (det,) = next(stream.iter_events())
+    assert det.metadata["detection_confidence"] is None
+    assert det.metadata["class_confidences"] == pytest.approx([0.9])
+
+
 def test_iter_events_reads_a_full_size_datagram(monkeypatch):
     """A report larger than 4096 bytes must not be truncated into a DecodeError."""
     payload_dict = _valid_detection_report_payload()

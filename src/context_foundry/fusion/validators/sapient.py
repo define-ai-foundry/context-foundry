@@ -82,13 +82,29 @@ def flatten_classification(classification) -> str:
     if not classification:
         return "Unknown"
 
+    return CLASS_PATH_SEPARATOR.join(node.type for node in _primary_chain(classification))
+
+
+def class_confidences(classification) -> list[float | None]:
+    """The confidence of each level `flatten_classification` names, None where a level has none."""
+    return [
+        node.confidence if node.HasField("confidence") else None
+        for node in _primary_chain(classification)
+    ]
+
+
+def _primary_chain(classification) -> list:
+    """The first entry at every level of a classification, the levels without a type left out."""
+    if not classification:
+        return []
+
     node = classification[0]
-    parts = [node.type]
+    chain = [node]
     while node.sub_class:
         node = node.sub_class[0]
-        parts.append(node.type)
+        chain.append(node)
 
-    return CLASS_PATH_SEPARATOR.join(part for part in parts if part)
+    return [node for node in chain if node.type]
 
 
 class SapientValidator(ProtocolValidator):
@@ -196,6 +212,7 @@ class SapientValidator(ProtocolValidator):
             confidence=report.detection_confidence
             if report.HasField("detection_confidence")
             else None,
+            class_confidences=class_confidences(report.classification),
             # Sources read the detection report out of "original_report" for the
             # fields the universal schema does not carry (objectId, swarm count).
             # Rendered back from the parsed message rather than picked out of the

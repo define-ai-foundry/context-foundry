@@ -125,6 +125,61 @@ def test_extract_tactical_track_reads_metadata_off_a_real_stonesoup_track(augmen
     assert result.threat_level == "hostile"
 
 
+def test_extract_tactical_track_carries_the_confidences(augmentor):
+    config.set_reference_origin(62.9, 29.8, 0.0)
+    ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    metadata = {"classification": "Vehicle > Drone", "class_confidences": [0.62, None]}
+    track = _make_track(np.zeros((9, 1)), ts, metadata={**metadata, "detection_confidence": 0.8})
+
+    result = augmentor.extract_tactical_track(track)
+    assert result.detection_confidence == pytest.approx(0.8)
+    assert result.class_confidences == [pytest.approx(0.62), None]
+
+
+def _updated_track(first, latest):
+    """A real Stone Soup track started with metadata `first`, then updated by a detection
+    carrying `latest`."""
+    from stonesoup.types.detection import Detection
+    from stonesoup.types.hypothesis import SingleHypothesis
+    from stonesoup.types.prediction import GaussianStatePrediction
+    from stonesoup.types.state import GaussianState
+    from stonesoup.types.track import Track
+    from stonesoup.types.update import GaussianStateUpdate
+
+    ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    zeros, eye = np.zeros((9, 1)), np.eye(9)
+    track = Track([GaussianState(zeros, eye, timestamp=ts)], init_metadata=first)
+    prediction = GaussianStatePrediction(zeros, eye, timestamp=ts)
+    detection = Detection(np.zeros((3, 1)), timestamp=ts, metadata=latest)
+    hypothesis = SingleHypothesis(prediction, detection)
+    track.append(GaussianStateUpdate(zeros, eye, hypothesis=hypothesis, timestamp=ts))
+    return track
+
+
+def test_extract_tactical_track_takes_the_latest_detections_confidences(augmentor):
+    config.set_reference_origin(62.9, 29.8, 0.0)
+    track = _updated_track(
+        {"detection_confidence": 0.4, "class_confidences": [0.4]},
+        {"detection_confidence": 0.7, "class_confidences": [0.7]},
+    )
+
+    result = augmentor.extract_tactical_track(track)
+    assert result.detection_confidence == pytest.approx(0.7)
+    assert result.class_confidences == pytest.approx([0.7])
+
+
+def test_extract_tactical_track_latest_detection_without_confidences_leaves_none(augmentor):
+    config.set_reference_origin(62.9, 29.8, 0.0)
+    track = _updated_track(
+        {"detection_confidence": 0.4, "class_confidences": [0.4]},
+        {"detection_confidence": None, "class_confidences": []},
+    )
+
+    result = augmentor.extract_tactical_track(track)
+    assert result.detection_confidence is None
+    assert result.class_confidences == []
+
+
 def test_extract_tactical_track_heading_wraps_to_0_360(augmentor):
     config.set_reference_origin(62.9, 29.8, 0.0)
     ts = datetime(2026, 1, 1, tzinfo=timezone.utc)

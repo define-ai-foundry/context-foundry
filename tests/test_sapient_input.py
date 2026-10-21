@@ -82,6 +82,31 @@ def test_a_detection_is_measured_from_the_sensor_its_status_report_placed():
     assert detection.measurement_model.noise_covar[0, 0] == pytest.approx(35.0**2)
 
 
+def test_a_detection_carries_its_confidences():
+    reader = SapientRecordReader()
+    reader.learn(_registration(error=_linear()))
+    reader.learn(_status(62.9, 29.8))
+    record = _detection()
+    report = record["message"]["detection_report"]
+    report["detection_confidence"] = 0.8
+    report["classification"] = [
+        {"type": "Vehicle", "confidence": 0.62, "sub_class": [{"type": "Drone", "level": 1}]}
+    ]
+    _, _, detection = reader.detection(record)
+    assert detection.metadata["detection_confidence"] == pytest.approx(0.8)
+    assert detection.metadata["class_confidences"][0] == pytest.approx(0.62)
+    assert detection.metadata["class_confidences"][1] is None
+
+
+def test_a_detection_without_confidences_carries_none():
+    reader = SapientRecordReader()
+    reader.learn(_registration(error=_linear()))
+    reader.learn(_status(62.9, 29.8))
+    _, _, detection = reader.detection(_detection())
+    assert detection.metadata["detection_confidence"] is None
+    assert detection.metadata["class_confidences"] == []
+
+
 def test_without_a_status_report_the_error_is_taken_at_its_far_end():
     reader = SapientRecordReader()
     reader.learn(_registration(error=_linear()))
