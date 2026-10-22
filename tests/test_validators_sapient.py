@@ -234,6 +234,66 @@ def test_normalize_detection_confidence_absent(validator, sapient_detection_repo
     assert det.confidence is None
 
 
+def test_normalize_class_confidences_at_every_level(validator, sapient_detection_report_message):
+    payload = _with_classification(
+        sapient_detection_report_message,
+        [
+            {
+                "type": "Vehicle",
+                "confidence": 0.62,
+                "subClass": [
+                    {
+                        "type": "Drone",
+                        "confidence": 0.4,
+                        "level": 1,
+                        "subClass": [{"type": "Military", "confidence": 0.3, "level": 2}],
+                    }
+                ],
+            }
+        ],
+    )
+    det = validator.normalize(payload)
+    assert det.classification == "Vehicle > Drone > Military"
+    assert det.class_confidences == pytest.approx([0.62, 0.4, 0.3])
+
+
+def test_normalize_class_confidence_absent_on_a_level(validator, sapient_detection_report_message):
+    payload = _with_classification(
+        sapient_detection_report_message,
+        [{"type": "Vehicle", "confidence": 0.62, "subClass": [{"type": "Drone", "level": 1}]}],
+    )
+    det = validator.normalize(payload)
+    assert det.class_confidences[0] == pytest.approx(0.62)
+    assert det.class_confidences[1] is None
+
+
+@pytest.mark.parametrize("bad", ["NaN", "Infinity", "-Infinity", 87.0, -0.1])
+def test_normalize_class_confidence_outside_zero_to_one_is_dropped(
+    validator, sapient_detection_report_message, bad
+):
+    payload = _with_classification(
+        sapient_detection_report_message,
+        [
+            {
+                "type": "Vehicle",
+                "confidence": bad,
+                "subClass": [{"type": "Drone", "confidence": 0.4, "level": 1}],
+            }
+        ],
+    )
+    det = validator.normalize(payload)
+    assert det.class_confidences[0] is None
+    assert det.class_confidences[1] == pytest.approx(0.4)
+
+
+def test_normalize_class_confidences_empty_without_classification(
+    validator, sapient_detection_report_message
+):
+    payload = _with_classification(sapient_detection_report_message, [])
+    det = validator.normalize(payload)
+    assert det.class_confidences == []
+
+
 def test_normalize_location_ignores_the_sensor_registry(
     validator, registry, sapient_detection_report_message
 ):

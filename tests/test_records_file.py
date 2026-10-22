@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from context_foundry.fusion import config
 from context_foundry.fusion.sinks.records_file import RecordsFileSink
 from context_foundry.fusion.sources.records_file import RecordsFileSource
@@ -65,6 +67,45 @@ def test_lines_that_are_not_records_are_counted(tmp_path):
     source = RecordsFileSource([path])
     assert list(source.iter_events()) == []
     assert source.unreadable == 3
+
+
+def test_a_fused_record_carries_its_detections_confidences(tmp_path):
+    from context_foundry.fusion import sapient_raw
+    from context_foundry.fusion.engine import FusionEngine
+    from context_foundry.fusion.publish import PublishPolicy
+    from context_foundry.fusion.tracker import SapientAsynchronousTracker
+
+    config.reset_registry()
+    record = _detection("2026-11-15T03:00:01Z")
+    report = record["message"]["detection_report"]
+    report["detection_confidence"] = 0.8
+    report["classification"] = [
+        {
+            "type": "Vehicle",
+            "confidence": 0.6,
+            "sub_class": [
+                {
+                    "type": "Drone",
+                    "confidence": 0.5,
+                    "level": 1,
+                    "sub_class": [{"type": "Military", "confidence": 0.4, "level": 2}],
+                }
+            ],
+        }
+    ]
+    path = _write(tmp_path / "in.jsonl", [record])
+    engine = FusionEngine(SapientAsynchronousTracker(confirm_hits=1), PublishPolicy("window"))
+
+    ((timestamp, detections),) = list(RecordsFileSource([path]).iter_events())
+    ((_, tactical),) = engine.process(timestamp, detections).published
+    _, value, _ = sapient_raw.track_record(tactical, "fusion-node")
+
+    fused = json.loads(value)["message"]["detection_report"]
+    assert fused["detection_confidence"] == pytest.approx(0.8)
+    top = fused["classification"][0]
+    assert top["confidence"] == pytest.approx(0.6)
+    assert top["sub_class"][0]["confidence"] == pytest.approx(0.5)
+    assert top["sub_class"][0]["sub_class"][0]["confidence"] == pytest.approx(0.4)
 
 
 def test_the_sink_writes_sapient_raw_records(tmp_path):

@@ -86,8 +86,11 @@ class TacticalContextAugmentor:
         # classification, so treat it as absent: a CoT hit's 2525 type code is
         # the only label such a track has.
         classification = metadata.get("classification")
+        class_confidences = metadata.get("class_confidences") or []
         if not classification or classification == "Unknown":
             classification = metadata.get("cot_type") or "Unknown"
+            if classification != "Unknown":
+                class_confidences = []
         swarm_count = metadata.get("swarm_count", 1)
 
         # Core Rules Engine: Threat Assessment Logic
@@ -105,6 +108,8 @@ class TacticalContextAugmentor:
             speed_mps=speed_m_s,
             heading_deg=heading_deg,
             classification=classification,
+            detection_confidence=metadata.get("detection_confidence"),
+            class_confidences=class_confidences,
             swarm_count=swarm_count,
             threat_level=threat_level,
             velocity=[float(ve), float(vn), float(vu)],

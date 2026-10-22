@@ -13,6 +13,7 @@ with the proto field names, and is round-tripped through the SapientMessage
 definition so it can only hold what the definition allows.
 """
 
+import itertools
 import json
 import os
 import time
@@ -92,20 +93,21 @@ def uuid7() -> str:
     return str(uuid.UUID(int=value))
 
 
-def _classification(path: str | None, confidence: float | None) -> list[dict]:
-    """A flattened class path ("Air vehicle > UAV rotary wing") as nested sub_class levels."""
+def _classification(path: str | None, confidences: list[float | None]) -> list[dict]:
+    """A flattened class path ("Air vehicle > UAV rotary wing") as nested sub_class levels,
+    each with its confidence from `confidences` where that has one."""
     parts = [p for p in (path or "").split(CLASS_PATH_SEPARATOR) if p]
     if not parts:
         return []
-    top = {"type": parts[0]}
-    if confidence is not None:
-        top["confidence"] = confidence
-    node = top
-    for level, part in enumerate(parts[1:], start=1):
-        child = {"type": part, "level": level}
-        node["sub_class"] = [child]
-        node = child
-    return [top]
+    levels = []
+    for level, part in enumerate(parts):
+        node = {"type": part} if level == 0 else {"type": part, "level": level}
+        if level < len(confidences) and confidences[level] is not None:
+            node["confidence"] = confidences[level]
+        levels.append(node)
+    for parent, child in itertools.pairwise(levels):
+        parent["sub_class"] = [child]
+    return [levels[0]]
 
 
 # object_info type naming how a published track state was reached: "measured" when
@@ -171,7 +173,12 @@ def track_message(
         report["enu_velocity"] = velocity
     if sources:
         report["associated_detection"] = [_associated(source) for source in sources]
-    classification = _classification(track.classification, confidence)
+    if track.detection_confidence is not None:
+        report["detection_confidence"] = track.detection_confidence
+    confidences = list(track.class_confidences)
+    if confidence is not None:
+        confidences[:1] = [confidence]
+    classification = _classification(track.classification, confidences)
     if classification:
         report["classification"] = classification
 

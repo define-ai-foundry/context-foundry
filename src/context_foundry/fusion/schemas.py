@@ -35,6 +35,10 @@ class InternalDetection(BaseModel):
     confidence: float | None = Field(
         None, ge=0.0, le=1.0, description="Detection confidence (0.0 to 1.0)"
     )
+    class_confidences: list[float | None] = Field(
+        default_factory=list,
+        description="The confidence of each level of `classification`, None where a level has none",
+    )
 
     # Escape Hatch for protocol-specific data that serializers might need later
     raw_metadata: dict[str, Any] = Field(
@@ -73,6 +77,8 @@ class TacticalTrack(BaseModel):
     speed_mps: float | None = None
     heading_deg: float | None = None
     classification: str | None = None
+    detection_confidence: float | None = None
+    class_confidences: list[float | None] = Field(default_factory=list)
     swarm_count: int = 1
     threat_level: str = "unknown"
 

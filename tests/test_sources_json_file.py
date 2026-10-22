@@ -150,6 +150,19 @@ def test_iter_events_reads_swarm_count_from_the_report(tmp_path):
     assert dets[0].metadata["swarm_count"] == 7
 
 
+def test_iter_events_carries_the_reports_confidences(tmp_path):
+    ts = "2026-01-01T00:00:00.000000Z"
+    message = _msg("node-A", ts, "obj-1")
+    message["sapientMessage"]["detectionReport"]["detectionConfidence"] = 0.8
+    path = tmp_path / "scenario.json"
+    path.write_text(json.dumps([message]), encoding="utf-8")
+
+    source = JsonSapientSource(path)
+    ((_, dets),) = list(source.iter_events())
+    assert dets[0].metadata["detection_confidence"] == pytest.approx(0.8)
+    assert dets[0].metadata["class_confidences"] == pytest.approx([0.9])
+
+
 def test_iter_events_default_swarm_count_is_one(tmp_path):
     ts = "2026-01-01T00:00:00.000000Z"
     messages = [_msg("node-A", ts, "obj-1")]
