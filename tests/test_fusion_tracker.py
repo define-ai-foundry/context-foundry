@@ -1078,3 +1078,72 @@ def test_a_swarm_count_ages_out_when_only_cot_updates_follow():
         if 5 * step <= tracker_module.SWARM_COUNT_WINDOW_SECONDS:
             assert track.metadata["swarm_count"] == 10
     assert "swarm_count" not in track.metadata, "past the window a CoT-only track has no count"
+
+
+# --- Linear paths -----------------------------------------------------------------------
+
+
+def test_linear_measurement_prediction_and_update_match_the_unscented_ones():
+    from datetime import datetime
+
+    import numpy as np
+    from stonesoup.types.detection import Detection
+    from stonesoup.types.hypothesis import SingleHypothesis
+    from stonesoup.types.prediction import GaussianStatePrediction
+    from stonesoup.updater.kalman import UnscentedKalmanUpdater
+
+    from context_foundry.fusion.measurement import DEFAULT_MEASUREMENT_MODEL
+    from context_foundry.fusion.tracker import _LinearWhereLinearUpdater
+
+    t = datetime(2026, 10, 27)
+    state = GaussianStatePrediction(
+        np.arange(9.0).reshape(9, 1) * 10, np.diag(np.arange(1.0, 10)) * 50 + 1, timestamp=t
+    )
+    det = Detection(
+        np.array([[5.0], [33.0], [62.0]]), timestamp=t, measurement_model=DEFAULT_MEASUREMENT_MODEL
+    )
+    unscented, linear = UnscentedKalmanUpdater(), _LinearWhereLinearUpdater()
+    a = unscented.predict_measurement(state, DEFAULT_MEASUREMENT_MODEL)
+    b = linear.predict_measurement(state, DEFAULT_MEASUREMENT_MODEL)
+    np.testing.assert_allclose(a.state_vector, b.state_vector, atol=1e-9)
+    np.testing.assert_allclose(a.covar, b.covar, atol=1e-9)
+    np.testing.assert_allclose(a.cross_covar, b.cross_covar, atol=1e-9)
+    ua, ub = (
+        unscented.update(SingleHypothesis(state, det)),
+        linear.update(SingleHypothesis(state, det)),
+    )
+    np.testing.assert_allclose(ua.state_vector, ub.state_vector, atol=1e-9)
+    np.testing.assert_allclose(ua.covar, ub.covar, atol=1e-9)
+
+
+def test_a_non_linear_measurement_model_keeps_the_unscented_transform():
+    from datetime import datetime
+    from unittest import mock
+
+    import numpy as np
+    from stonesoup.models.measurement.nonlinear import CartesianToBearingRange
+    from stonesoup.types.prediction import GaussianStatePrediction
+    from stonesoup.updater.kalman import KalmanUpdater
+
+    from context_foundry.fusion.tracker import _LinearWhereLinearUpdater
+
+    model = CartesianToBearingRange(ndim_state=9, mapping=(0, 3), noise_covar=np.diag([0.01, 25.0]))
+    state = GaussianStatePrediction(
+        np.array([[100.0], [0], [0], [50.0], [0], [0], [10.0], [0], [0]]),
+        np.eye(9) * 10,
+        timestamp=datetime(2026, 10, 27),
+    )
+    with mock.patch.object(KalmanUpdater, "predict_measurement") as linear:
+        prediction = _LinearWhereLinearUpdater().predict_measurement(state, model)
+    linear.assert_not_called()
+    assert prediction.state_vector.shape == (2, 1)
+
+
+def test_the_tracker_predicts_with_the_linear_kalman_predictor():
+    from stonesoup.predictor.kalman import KalmanPredictor, UnscentedKalmanPredictor
+
+    from context_foundry.fusion.tracker import SapientAsynchronousTracker
+
+    predictor = SapientAsynchronousTracker().predictor
+    assert isinstance(predictor, KalmanPredictor)
+    assert not isinstance(predictor, UnscentedKalmanPredictor)

@@ -12,12 +12,13 @@ import numpy as np
 from stonesoup.dataassociator.neighbour import GNNWith2DAssignment
 from stonesoup.hypothesiser.distance import DistanceHypothesiser
 from stonesoup.measures import Mahalanobis
-from stonesoup.predictor.kalman import UnscentedKalmanPredictor
+from stonesoup.models.base import LinearModel
+from stonesoup.predictor.kalman import KalmanPredictor
 from stonesoup.types.array import StateVector
 from stonesoup.types.hypothesis import SingleDistanceHypothesis
 from stonesoup.types.state import GaussianState
 from stonesoup.types.track import Track
-from stonesoup.updater.kalman import UnscentedKalmanUpdater
+from stonesoup.updater.kalman import KalmanUpdater, UnscentedKalmanUpdater
 
 from .models import create_9d_constant_acceleration_model
 
@@ -168,6 +169,27 @@ def _position_sigma(state):
     return float(np.sqrt(max(covar[0, 0], covar[3, 3], covar[6, 6])))
 
 
+class _LinearWhereLinearUpdater(UnscentedKalmanUpdater):
+    """Unscented where a measurement model is not linear, the Kalman equations where it is.
+
+    Every position report is a linear model of the track's position, and for a linear
+    model the unscented transform gives the same measurement prediction through 19 sigma
+    points. Association predicts a measurement for every track and detection of an event,
+    so this was the second largest cost of fusing. A non-linear model, a bearing-only
+    sensor's, still goes through the unscented transform.
+    """
+
+    def predict_measurement(
+        self, predicted_state, measurement_model=None, measurement_noise=True, **kwargs
+    ):
+        model = self._check_measurement_model(measurement_model)
+        if isinstance(model, LinearModel):
+            return KalmanUpdater.predict_measurement(
+                self, predicted_state, model, measurement_noise, **kwargs
+            )
+        return super().predict_measurement(predicted_state, model, measurement_noise, **kwargs)
+
+
 class SapientAsynchronousTracker:
     """Fuses asynchronous multi-sensor detections into 9D tracks.
 
@@ -228,9 +250,13 @@ class SapientAsynchronousTracker:
         # 1. Instantiate the high-order Constant Acceleration transition model
         self.transition_model = create_9d_constant_acceleration_model(q_process_noise=q_noise)
 
-        # 2. Setup Unscented Kalman Components to manage non-linear kinematics safely
-        self.predictor = UnscentedKalmanPredictor(self.transition_model)
-        self.updater = UnscentedKalmanUpdater(
+        # 2. Predict with the linear Kalman equations: the transition model is linear,
+        # so the unscented transform gives the same mean and covariance through 19
+        # sigma points, and it was the largest single cost of association -- every
+        # event predicts every live track. The update stays unscented, since a
+        # sensor's measurement model need not be linear.
+        self.predictor = KalmanPredictor(self.transition_model)
+        self.updater = _LinearWhereLinearUpdater(
             measurement_model=None
         )  # Assigned dynamically via Detections
 
