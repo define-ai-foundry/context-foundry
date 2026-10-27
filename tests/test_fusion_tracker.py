@@ -1213,3 +1213,45 @@ def test_a_track_out_of_reach_still_coasts(tracker):
     tracker.process_async_event(later, {_det(90_000.0, 0.0, 100.0, later)})
     assert track.state.timestamp == later
     assert len(track.states) == 2
+
+
+# --- Constant-acceleration predictor -------------------------------------------------------
+
+
+def test_the_constant_acceleration_predictor_matches_the_general_kalman_predictor():
+    from stonesoup.predictor.kalman import KalmanPredictor
+    from stonesoup.types.state import GaussianState
+
+    from context_foundry.fusion.models import create_9d_constant_acceleration_model
+    from context_foundry.fusion.tracker import _ConstantAccelerationPredictor
+
+    model = create_9d_constant_acceleration_model(q_process_noise=0.2)
+    general, fast = KalmanPredictor(model), _ConstantAccelerationPredictor(model)
+    rng = np.random.default_rng(11)
+    for _ in range(500):
+        root = rng.normal(0, 1, (9, 9)) * rng.uniform(0.5, 50)
+        prior = GaussianState(rng.normal(0, 500, (9, 1)), root @ root.T + np.eye(9), timestamp=T0)
+        # Backwards too: a late event predicts a track back to it, and the noise still grows.
+        when = T0 + timedelta(seconds=float(rng.uniform(-2, 8)))
+        a, b = general.predict(prior, timestamp=when), fast.predict(prior, timestamp=when)
+        np.testing.assert_allclose(b.state_vector, a.state_vector, rtol=1e-12, atol=1e-9)
+        np.testing.assert_allclose(b.covar, a.covar, rtol=1e-12, atol=1e-9)
+        assert b.timestamp == when
+
+
+def test_the_constant_acceleration_predictor_takes_the_general_path_with_extra_arguments():
+    from stonesoup.predictor.kalman import KalmanPredictor
+    from stonesoup.types.state import GaussianState
+
+    from context_foundry.fusion.models import create_9d_constant_acceleration_model
+    from context_foundry.fusion.tracker import _ConstantAccelerationPredictor
+
+    model = create_9d_constant_acceleration_model()
+    prior = GaussianState(np.ones((9, 1)), np.eye(9), timestamp=T0)
+    when = T0 + timedelta(seconds=2)
+    expected = KalmanPredictor(model).predict(prior, timestamp=when, measurement=None)
+    prediction = _ConstantAccelerationPredictor(model).predict(
+        prior, timestamp=when, measurement=None
+    )
+    np.testing.assert_allclose(prediction.state_vector, expected.state_vector)
+    np.testing.assert_allclose(prediction.covar, expected.covar)
