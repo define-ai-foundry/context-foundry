@@ -14,9 +14,11 @@ from stonesoup.hypothesiser.distance import DistanceHypothesiser
 from stonesoup.measures import Mahalanobis
 from stonesoup.models.base import LinearModel
 from stonesoup.models.measurement.linear import LinearGaussian
+from stonesoup.predictor._utils import predict_lru_cache
 from stonesoup.predictor.kalman import KalmanPredictor
-from stonesoup.types.array import StateVector
+from stonesoup.types.array import CovarianceMatrix, StateVector
 from stonesoup.types.hypothesis import SingleDistanceHypothesis
+from stonesoup.types.prediction import Prediction
 from stonesoup.types.state import GaussianState
 from stonesoup.types.track import Track
 from stonesoup.updater.kalman import KalmanUpdater, UnscentedKalmanUpdater
@@ -191,6 +193,57 @@ class _LinearWhereLinearUpdater(UnscentedKalmanUpdater):
         return super().predict_measurement(predicted_state, model, measurement_noise, **kwargs)
 
 
+class _ConstantAccelerationPredictor(KalmanPredictor):
+    """The Kalman predictor for three constant-acceleration axes, in plain numpy.
+
+    Coasting predicts every live track the event does not update, so prediction is most
+    of what an event costs, and the general path rebuilt the 9x9 transition matrix and
+    noise covariance through each axis model and scipy's block_diag on every call. For
+    this model both are fixed formulas of the time step, so they are written out here:
+    per axis F = [[1, dt, dt^2/2], [0, 1, dt], [0, 0, 1]] and Q = q [[dt^5/20, dt^4/8,
+    dt^3/6], [dt^4/8, dt^3/3, dt^2/2], [dt^3/6, dt^2/2, dt]], with dt the absolute step
+    in Q as in Stone Soup's ConstantNthDerivative. A prediction without a time step,
+    with a control input or extra arguments takes the general path.
+    """
+
+    def __init__(self, transition_model, *args, **kwargs):
+        super().__init__(transition_model, *args, **kwargs)
+        self._noise = [model.noise_diff_coeff for model in transition_model.model_list]
+
+    @predict_lru_cache()
+    def predict(self, prior, timestamp=None, control_input=None, **kwargs):
+        if timestamp is None or prior.timestamp is None or control_input is not None or kwargs:
+            return super().predict(
+                prior, timestamp=timestamp, control_input=control_input, **kwargs
+            )
+        dt = (timestamp - prior.timestamp).total_seconds()
+        step = abs(dt)
+        f = np.array([[1.0, dt, 0.5 * dt * dt], [0.0, 1.0, dt], [0.0, 0.0, 1.0]])
+        q = np.array(
+            [
+                [step**5 / 20.0, step**4 / 8.0, step**3 / 6.0],
+                [step**4 / 8.0, step**3 / 3.0, step**2 / 2.0],
+                [step**3 / 6.0, step**2 / 2.0, step],
+            ]
+        )
+        transition = np.zeros((9, 9))
+        noise = np.zeros((9, 9))
+        for axis in range(3):
+            block = slice(3 * axis, 3 * axis + 3)
+            transition[block, block] = f
+            noise[block, block] = self._noise[axis] * q
+        mean = transition @ np.asarray(prior.state_vector, dtype=float)
+        covar = transition @ np.asarray(prior.covar, dtype=float) @ transition.T + noise
+        return Prediction.from_state(
+            prior,
+            StateVector(mean),
+            CovarianceMatrix(covar),
+            timestamp=timestamp,
+            transition_model=self.transition_model,
+            prior=prior,
+        )
+
+
 class SapientAsynchronousTracker:
     """Fuses asynchronous multi-sensor detections into 9D tracks.
 
@@ -259,7 +312,7 @@ class SapientAsynchronousTracker:
         # sigma points, and it was the largest single cost of association -- every
         # event predicts every live track. The update stays unscented, since a
         # sensor's measurement model need not be linear.
-        self.predictor = KalmanPredictor(self.transition_model)
+        self.predictor = _ConstantAccelerationPredictor(self.transition_model)
         self.updater = _LinearWhereLinearUpdater(
             measurement_model=None
         )  # Assigned dynamically via Detections
