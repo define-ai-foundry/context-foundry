@@ -36,7 +36,7 @@ from stonesoup.types.track import Track
 from stonesoup.types.update import GaussianStateUpdate
 
 from context_foundry.fusion import tracker as tracker_module
-from context_foundry.fusion.tracker import SapientAsynchronousTracker
+from context_foundry.fusion.tracker import GATE_MAHALANOBIS_DISTANCE, SapientAsynchronousTracker
 
 MEAS_MODEL = LinearGaussian(
     ndim_state=9, mapping=(0, 3, 6), noise_covar=np.diag([25.0, 25.0, 100.0])
@@ -1147,3 +1147,69 @@ def test_the_tracker_predicts_with_the_linear_kalman_predictor():
     predictor = SapientAsynchronousTracker().predictor
     assert isinstance(predictor, KalmanPredictor)
     assert not isinstance(predictor, UnscentedKalmanPredictor)
+
+
+# --- Pre-gate ---------------------------------------------------------------------------
+
+
+def _random_track(rng, timestamp):
+    from stonesoup.types.state import GaussianState
+    from stonesoup.types.track import Track
+
+    sv = np.zeros((9, 1))
+    for i in (0, 3, 6):
+        sv[i, 0] = rng.uniform(-3000, 3000)
+        sv[i + 1, 0] = rng.normal(0, 60)
+        sv[i + 2, 0] = rng.normal(0, 2)
+    root = rng.normal(0, 1, (9, 9)) * rng.uniform(0.5, 60)
+    return Track([GaussianState(sv, root @ root.T + np.eye(9), timestamp=timestamp)])
+
+
+def test_the_pre_gate_never_leaves_out_a_track_inside_the_gate(tracker):
+    from stonesoup.types.detection import Detection
+
+    rng = np.random.default_rng(7)
+    left_out = 0
+    for _ in range(3000):
+        track = _random_track(rng, T0)
+        when = T0 + timedelta(seconds=float(rng.uniform(0, 6)))
+        z = np.array(
+            [[rng.uniform(-3500, 3500)], [rng.uniform(-3500, 3500)], [rng.uniform(-500, 500)]]
+        )
+        det = Detection(z, measurement_model=MEAS_MODEL, timestamp=when)
+        prediction = tracker.predictor.predict(track, timestamp=when)
+        measurement = tracker.updater.predict_measurement(prediction, MEAS_MODEL)
+        distance = tracker.hypothesiser.measure(measurement, det)
+        if not tracker._may_gate(track, {det}):
+            left_out += 1
+            assert distance > GATE_MAHALANOBIS_DISTANCE
+    assert left_out > 1000  # the bound does leave far tracks out
+
+
+def test_the_pre_gate_keeps_a_near_track_and_leaves_out_a_far_one(tracker):
+    tracker.process_async_event(T0, {_det(0.0, 0.0, 100.0, T0)})
+    (track,) = tracker.tracks
+    later = T0 + timedelta(seconds=1)
+    assert tracker._may_gate(track, {_det(10.0, -5.0, 100.0, later)})
+    assert not tracker._may_gate(track, {_det(50_000.0, 0.0, 100.0, later)})
+    assert tracker._may_gate(
+        track, {_det(50_000.0, 0.0, 100.0, later), _det(3.0, 0.0, 100.0, later)}
+    )
+    assert not tracker._may_gate(track, {_det_without_height(80_000.0, 0.0, later)})
+
+
+def test_the_pre_gate_keeps_what_it_cannot_bound(tracker):
+    tracker.process_async_event(T0, {_det(0.0, 0.0, 100.0, T0)})
+    (track,) = tracker.tracks
+    earlier = T0 - timedelta(seconds=1)
+    assert tracker._may_gate(track, {_det(50_000.0, 0.0, 100.0, earlier)})
+    assert tracker._may_gate(track, {_FakeBearingOnlyDetection(np.array([1.23]), {}, T0)})
+
+
+def test_a_track_out_of_reach_still_coasts(tracker):
+    tracker.process_async_event(T0, {_det(0.0, 0.0, 100.0, T0)})
+    (track,) = tracker.tracks
+    later = T0 + timedelta(seconds=2)
+    tracker.process_async_event(later, {_det(90_000.0, 0.0, 100.0, later)})
+    assert track.state.timestamp == later
+    assert len(track.states) == 2
