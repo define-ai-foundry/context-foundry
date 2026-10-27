@@ -4,6 +4,7 @@
 # src/context_foundry/fusion/models.py
 
 import math
+from collections import OrderedDict
 
 import numpy as np
 from stonesoup.models.measurement.base import MeasurementModel
@@ -117,12 +118,50 @@ def project_geodetic_to_local_enu(lat, lon, alt):
 # --- HIGH-FIDELITY STONE SOUP KINEMATICS MATRIX FACTORY ---
 
 
+# Time steps whose transition matrix and covariance are kept; see _IntervalCachedTransitionModel.
+TRANSITION_CACHE_INTERVALS = 256
+
+
+class _IntervalCachedTransitionModel(CombinedLinearGaussianTransitionModel):
+    """The combined constant-acceleration model, its matrices kept per time step.
+
+    F and Q depend on the time step alone, and the combined model rebuilds both on every
+    call: each axis's matrices, then scipy's block_diag over them. Association predicts
+    every live track on every event, and the tracks that coasted on the last event all
+    step by the same interval, so the same matrices were rebuilt dozens of times an event.
+    The kept matrices are read-only: a caller that changed one would change it for every
+    later prediction, so that fails instead.
+    """
+
+    def matrix(self, **kwargs):
+        return self._kept("matrix", super().matrix, kwargs)
+
+    def covar(self, **kwargs):
+        return self._kept("covar", super().covar, kwargs)
+
+    def _kept(self, kind, build, kwargs):
+        if set(kwargs) != {"time_interval"}:
+            return build(**kwargs)
+        kept = self.__dict__.setdefault("_kept_matrices", OrderedDict())
+        key = (kind, kwargs["time_interval"])
+        value = kept.get(key)
+        if value is None:
+            value = build(**kwargs)
+            value.setflags(write=False)
+            kept[key] = value
+            if len(kept) > 2 * TRANSITION_CACHE_INTERVALS:
+                kept.popitem(last=False)
+        else:
+            kept.move_to_end(key)
+        return value
+
+
 def create_9d_constant_acceleration_model(q_process_noise=0.1):
     """
     Constructs a unified 3D Constant Acceleration transition model (9D State Vector).
     State space: [x, vx, ax, y, vy, ay, z, vz, az]^T
     """
-    return CombinedLinearGaussianTransitionModel(
+    return _IntervalCachedTransitionModel(
         [
             ConstantAcceleration(q_process_noise),  # X axis tracking
             ConstantAcceleration(q_process_noise),  # Y axis tracking

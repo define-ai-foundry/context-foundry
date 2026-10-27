@@ -184,3 +184,38 @@ class _FakeState:
 
     def __init__(self, state_vector):
         self.state_vector = state_vector
+
+
+# --- Transition matrices kept per time step ------------------------------------------
+
+
+def test_kept_transition_matrices_match_the_combined_model_and_are_read_only():
+    from datetime import timedelta
+
+    from stonesoup.models.transition.linear import ConstantAcceleration
+
+    kept = create_9d_constant_acceleration_model(q_process_noise=0.2)
+    plain = CombinedLinearGaussianTransitionModel([ConstantAcceleration(0.2)] * 3)
+    for seconds in (0.25, 0.25, 3.0):
+        step = timedelta(seconds=seconds)
+        np.testing.assert_array_equal(
+            kept.matrix(time_interval=step), plain.matrix(time_interval=step)
+        )
+        np.testing.assert_array_equal(
+            kept.covar(time_interval=step), plain.covar(time_interval=step)
+        )
+    step = timedelta(seconds=1.5)
+    assert kept.matrix(time_interval=step) is kept.matrix(time_interval=step)
+    with pytest.raises(ValueError):
+        kept.covar(time_interval=step)[0, 0] = 1.0
+
+
+def test_kept_transition_matrices_are_bounded():
+    from datetime import timedelta
+
+    from context_foundry.fusion.models import TRANSITION_CACHE_INTERVALS
+
+    model = create_9d_constant_acceleration_model()
+    for ms in range(3 * TRANSITION_CACHE_INTERVALS):
+        model.matrix(time_interval=timedelta(milliseconds=ms + 1))
+    assert len(model._kept_matrices) <= 2 * TRANSITION_CACHE_INTERVALS
