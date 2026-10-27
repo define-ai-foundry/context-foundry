@@ -13,6 +13,7 @@ from stonesoup.dataassociator.neighbour import GNNWith2DAssignment
 from stonesoup.hypothesiser.distance import DistanceHypothesiser
 from stonesoup.measures import Mahalanobis
 from stonesoup.models.base import LinearModel
+from stonesoup.models.measurement.linear import LinearGaussian
 from stonesoup.predictor.kalman import KalmanPredictor
 from stonesoup.types.array import StateVector
 from stonesoup.types.hypothesis import SingleDistanceHypothesis
@@ -249,6 +250,9 @@ class SapientAsynchronousTracker:
 
         # 1. Instantiate the high-order Constant Acceleration transition model
         self.transition_model = create_9d_constant_acceleration_model(q_process_noise=q_noise)
+        # Each axis's process noise, for the pre-gate, which predicts a position and its
+        # variance without building a prediction.
+        self._axis_noise = [model.noise_diff_coeff for model in self.transition_model.model_list]
 
         # 2. Predict with the linear Kalman equations: the transition model is linear,
         # so the unscented transform gives the same mean and covariance through 19
@@ -345,16 +349,22 @@ class SapientAsynchronousTracker:
         associations = self._associate_by_object_id(detection_group)
         bound_detections = {hypothesis.measurement for hypothesis in associations.values()}
         remaining_tracks = self.tracks - associations.keys()
+        remaining_detections = detection_group - bound_detections
 
-        # Gate every remaining track against every remaining detection, then take the
-        # assignment with the lowest total distance. Each track dynamically
-        # calculates its own unique Delta-t prediction internally.
-        if remaining_tracks:
+        # Gate the remaining tracks that can reach a remaining detection, then take the
+        # assignment with the lowest total distance. A track that provably reaches none
+        # could only be assigned its missed-detection column, so leaving it out changes
+        # no assignment; it is what keeps an event's cost to the tracks near it rather
+        # than every track in the picture.
+        reachable = {
+            track for track in remaining_tracks if self._may_gate(track, remaining_detections)
+        }
+        if reachable:
             associations.update(
-                self.data_associator.associate(
-                    remaining_tracks, detection_group - bound_detections, timestamp
-                )
+                self.data_associator.associate(reachable, remaining_detections, timestamp)
             )
+        for track in remaining_tracks - reachable:
+            track.append(self.predictor.predict(track.state, timestamp=timestamp))
 
         associated_detections = set()
 
@@ -404,6 +414,51 @@ class SapientAsynchronousTracker:
         self._prune_stale_tracks(timestamp)
 
         return self.confirmed_tracks()
+
+    def _may_gate(self, track, detections):
+        """Whether a track could fall inside the validation gate of any of the detections.
+
+        A conservative bound, never a false no: the squared Mahalanobis distance is at
+        least the squared innovation over the largest eigenvalue of its covariance, and
+        that eigenvalue is at most the trace. So a track whose squared distance from a
+        detection exceeds the gate squared times that trace (its predicted position
+        variance plus the detection's noise, on the measured axes) is outside the gate.
+        Worked in plain floats from the track's state, without building a prediction.
+        A detection whose model is not a linear position model, or that is older than
+        the track's state, is always gated.
+        """
+        state = track.state
+        sv = state.state_vector.ravel().tolist()
+        covar = state.covar.tolist()
+        limit = GATE_MAHALANOBIS_DISTANCE**2 * (1.0 + 1e-6)
+        for det in detections:
+            model = getattr(det, "measurement_model", None)
+            mapping = getattr(model, "mapping", None)
+            if not isinstance(model, LinearGaussian) or any(m not in (0, 3, 6) for m in mapping):
+                return True
+            dt = (det.timestamp - state.timestamp).total_seconds()
+            if dt < 0:
+                return True
+            measured = det.state_vector.ravel().tolist()
+            noise = model.noise_covar
+            miss = spread = 0.0
+            for row, index in enumerate(mapping):
+                position, variance = self._predicted_axis(sv, covar, index, dt)
+                miss += (measured[row] - position) ** 2
+                spread += variance + float(noise[row, row])
+            if miss <= limit * spread:
+                return True
+        return False
+
+    def _predicted_axis(self, sv, covar, index, dt):
+        """Predicted position and its variance on one axis, `dt` seconds on."""
+        h = (1.0, dt, 0.5 * dt * dt)
+        position = sv[index] + sv[index + 1] * dt + sv[index + 2] * h[2]
+        variance = sum(
+            h[i] * h[j] * covar[index + i][index + j] for i in range(3) for j in range(3)
+        )
+        variance += self._axis_noise[index // 3] * dt**5 / 20.0
+        return position, variance
 
     def confirmed_tracks(self):
         """The live tracks that have passed confirmation; tentative ones are held back."""
