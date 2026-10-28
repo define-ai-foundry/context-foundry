@@ -69,6 +69,7 @@ def test_normalize_extracts_internal_detection(validator):
     assert det.raw_metadata == {
         "original_xml": VALID_COT_XML,
         "how": "m-g",
+        "stale": "2026-01-01T00:00:15.000Z",
         "ce": 10.0,
         "le": 10.0,
     }

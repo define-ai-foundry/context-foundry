@@ -7,7 +7,7 @@ from datetime import timedelta
 
 from . import config
 from .schemas import TacticalTrack
-from .tracker import DECLARATION_FRESH_SECONDS, DECLARATIONS_KEY, SENSOR_HIT_AT_KEY
+from .tracker import DECLARATION_KEY, SENSOR_HIT_AT_KEY
 
 # WGS84 Ellipsoid Constants
 WGS84_A = 6378137.0
@@ -20,9 +20,6 @@ HOSTILE_HOLD_SECONDS = 60.0
 
 # How recent a sensor's (non-CoT) hit must be for a swarm to overrule a declaration.
 SENSOR_HIT_RECENT_SECONDS = 60.0
-
-# Which of several fresh declarations on one track stands: the most severe.
-DECLARED_SEVERITY = {"hostile": 0, "suspect": 1, "neutral": 2, "friend": 3}
 
 # The affiliation letter of a CoT atom type, `a-<letter>-...`.
 COT_AFFILIATION = re.compile(r"^a-([a-z])-")
@@ -51,21 +48,26 @@ def _within(timestamp, moment, seconds: float) -> bool:
     return (timestamp - moment).total_seconds() <= seconds
 
 
-def _standing_declaration(declarations, timestamp):
-    """(threat, CoT type) of the most severe declaration fresh at `timestamp`, or (None, None).
+def _standing_declaration(declaration, timestamp, east, north):
+    """(threat, CoT type) of the track's declaration if it stands, else (None, None).
 
-    Between equally severe ones the latest report stands, then the type, so the choice
-    depends only on the reports and not on the order the uids first came in.
+    `declaration` is the tracker's (CoT type, fresh until, east, north, radius, made at,
+    velocity east, velocity north). It stands while fresh at `timestamp` and while the
+    track, at (`east`, `north`), is within `radius` metres of where the report placed it
+    carried on at the track's velocity then, and only if its type declares an affiliation.
+    So a vehicle keeps its mark between reports, while an object that takes over a track
+    whose reporter stood still, or that turns away from where it was going, does not.
     """
-    fresh = [
-        (DECLARED_SEVERITY[threat], -(timestamp - at).total_seconds(), cot_type, threat)
-        for cot_type, at in declarations or ()
-        if (threat := declared_threat(cot_type)) is not None
-        and _within(timestamp, at, DECLARATION_FRESH_SECONDS)
-    ]
-    if not fresh:
+    if not declaration:
         return None, None
-    *_, cot_type, threat = min(fresh)
+    cot_type, until, at_east, at_north, radius, made, v_east, v_north = declaration
+    threat = declared_threat(cot_type)
+    if threat is None or timestamp > until:
+        return None, None
+    elapsed = (timestamp - made).total_seconds()
+    expected_east, expected_north = at_east + v_east * elapsed, at_north + v_north * elapsed
+    if math.hypot(east - expected_east, north - expected_north) > radius:
+        return None, None
     return threat, cot_type
 
 
@@ -103,18 +105,21 @@ class TacticalContextAugmentor:
             return "hostile"
         return "hostile" if self._holding(self._hostile_until, track_id, timestamp) else "suspect"
 
-    def _threat(self, track_id, timestamp, metadata, is_fast: bool, is_swarm: bool):
-        """(threat level, declared CoT type or None) from the rule and the fresh declarations.
+    def _threat(self, track_id, timestamp, metadata, position, is_fast: bool, is_swarm: bool):
+        """(threat level, declared CoT type or None) from the rule and the declaration.
 
-        Without a fresh declaration the rule decides: fast or a swarm is hostile, held. The
-        most severe fresh declaration otherwise stands, a hostile one held like the rule's.
+        Without a standing declaration (fresh, and the track at `position`, its east and
+        north, near where it was made) the rule decides: fast or a swarm is hostile, held.
+        A standing declaration otherwise stands, a hostile one held like the rule's.
         A friend, neutral or suspect one is overruled only by a swarm a sensor other than
         CoT backs: a non-CoT hit within SENSOR_HIT_RECENT_SECONDS and a swarm count now or
         within its hold. Speed never overrules it. An overruled one gives no declared type.
         """
         if is_swarm:
             self._swarm_until = self._hold(self._swarm_until, track_id, timestamp)
-        declared, declared_type = _standing_declaration(metadata.get(DECLARATIONS_KEY), timestamp)
+        declared, declared_type = _standing_declaration(
+            metadata.get(DECLARATION_KEY), timestamp, *position
+        )
         if declared is None:
             return self._held_threat(track_id, timestamp, is_fast or is_swarm), None
         if declared == "hostile":
@@ -182,7 +187,7 @@ class TacticalContextAugmentor:
         is_fast = speed_m_s > 20.0
         is_swarm = swarm_count > 3
         threat_level, declared_type = self._threat(
-            track.id, state.timestamp, metadata, is_fast, is_swarm
+            track.id, state.timestamp, metadata, (float(e), float(n)), is_fast, is_swarm
         )
 
         # Return the universal state object for the serializers to consume

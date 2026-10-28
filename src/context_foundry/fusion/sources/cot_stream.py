@@ -139,6 +139,7 @@ class CotNetworkStream(SapientSource):
             "type": "CoT",
             "cot_type": clean_det.classification,
             "how": clean_det.raw_metadata.get("how"),
+            "stale": clean_det.raw_metadata.get("stale"),
         }
 
         # The port is left out: an emitter may send from a fresh ephemeral port

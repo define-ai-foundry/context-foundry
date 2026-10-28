@@ -45,6 +45,7 @@ class CotValidator(ProtocolValidator):
             raw_metadata={
                 "original_xml": raw_xml_string,
                 "how": root.get("how"),
+                "stale": root.get("stale"),
                 # The point's own circular (horizontal) and linear (vertical) error,
                 # in metres; None where the sender marked it unknown.
                 "ce": known(point.get("ce")),
