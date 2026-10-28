@@ -1,15 +1,21 @@
 """Tests for context_foundry.fusion.augmentor."""
 
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from stonesoup.models.measurement.linear import LinearGaussian
+from stonesoup.types.detection import Detection
 
 from context_foundry.fusion import config
-from context_foundry.fusion.augmentor import TacticalContextAugmentor
+from context_foundry.fusion.augmentor import TacticalContextAugmentor, declared_threat
+from context_foundry.fusion.engine import FusionEngine
+from context_foundry.fusion.publish import PublishPolicy
 from context_foundry.fusion.schemas import TacticalTrack
+from context_foundry.fusion.serializers import CotSerializer
+from context_foundry.fusion.tracker import SapientAsynchronousTracker
 
 
 @pytest.fixture
@@ -262,28 +268,251 @@ def test_a_hostile_track_stays_hostile_within_the_hold(augmentor):
 
 
 # --- declared affiliation ------------------------------------------------------
+#
+# Hits run through the real tracker, so the track metadata the augmentor reads is what
+# Stone Soup's merge of every hit's metadata and the tracker's own bookkeeping leave.
+
+T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+_MODEL = LinearGaussian(ndim_state=9, mapping=(0, 3, 6), noise_covar=np.diag([25.0, 25.0, 100.0]))
 
 
-def _moving(speed_east):
-    vec = np.zeros((9, 1))
-    vec[1, 0] = speed_east
-    return vec
+def _at(seconds):
+    return T0 + timedelta(seconds=seconds)
 
 
-def test_a_friendly_cot_track_stays_friend_when_fast(augmentor):
+def _sapient(t, east, swarm_count=1):
+    det = Detection(np.array([[east], [0.0], [100.0]]), measurement_model=_MODEL, timestamp=t)
+    det.metadata = {
+        "nodeId": "RAD-1",
+        "objectId": f"o-{t.isoformat()}",
+        "stable_object_id": False,
+        "classification": "UAS",
+        "swarm_count": swarm_count,
+        "sensor_geodetic": None,
+    }
+    return det
+
+
+def _cot(t, east, uid="ATAK-1", cot_type="a-f-G-U-C", how="m-g"):
+    det = Detection(np.array([[east], [0.0], [100.0]]), measurement_model=_MODEL, timestamp=t)
+    det.metadata = {
+        "nodeId": "cot",
+        "objectId": uid,
+        "stable_object_id": True,
+        "type": "CoT",
+        "cot_type": cot_type,
+        "how": how,
+        "sensor_geodetic": None,
+    }
+    return det
+
+
+class _Fusion:
+    """The tracker and the augmentor, one event at a time."""
+
+    def __init__(self):
+        config.set_reference_origin(62.9, 29.8, 0.0)
+        self.tracker = SapientAsynchronousTracker()
+        self.augmentor = TacticalContextAugmentor()
+
+    def hit(self, det):
+        tracks = self.tracker.process_async_event(det.timestamp, {det})
+        assert len(tracks) == 1, "every hit here is of one object"
+        (track,) = tracks
+        return track, self.augmentor.extract_tactical_track(track)
+
+
+def _cot_type(result):
+    """The CoT type the serializer draws a tactical track as."""
+    return CotSerializer().serialize(result).split('type="')[1].split('"')[0]
+
+
+def test_one_friendly_cot_hit_does_not_make_a_hostile_swarm_friend():
+    fusion = _Fusion()
+    results = []
+    for i in range(12):
+        t = _at(2 * i)
+        if i == 3:
+            track, result = fusion.hit(_cot(t, 60.0 * i))
+            # Stone Soup merged the friendly type into the track's metadata.
+            assert track.metadata["cot_type"] == "a-f-G-U-C"
+        else:
+            track, result = fusion.hit(_sapient(t, 60.0 * i, swarm_count=5))
+        results.append(result)
+    assert [r.threat_level for r in results] == ["hostile"] * 12
+    # The overruled declaration does not lend the track its ground dimension either.
+    assert {_cot_type(r) for r in results} == {"a-h-A-M-F"}
+
+
+def test_a_fast_friendly_vehicle_one_radar_plot_sees_stays_friend():
+    fusion = _Fusion()
+    results = []
+    for second in range(0, 90, 2):
+        if second == 30:
+            det = _sapient(_at(second), 25.0 * second)
+        else:
+            det = _cot(_at(second), 25.0 * second, cot_type="a-f-G-E-V")
+        results.append(fusion.hit(det)[1])
+    assert results[-1].speed_mps > 20.0
+    assert {r.threat_level for r in results} == {"friend"}
+    assert {_cot_type(r) for r in results} == {"a-f-G"}
+
+
+def test_a_hand_placed_marker_on_a_self_reporting_user_never_declares():
+    fusion = _Fusion()
+    threats = []
+    for i in range(8):
+        t = _at(5 * i)
+        if i % 2 == 0:
+            det = _cot(t, 20.0, uid="MARKER-1", cot_type="a-h-G", how="h-g-i-g-o")
+        else:
+            det = _cot(t, 0.0, uid="ATAK-ME", cot_type="a-f-G-U-C", how="m-g")
+        _, result = fusion.hit(det)
+        threats.append(result.threat_level)
+    # The marker came first and declared nothing; the user's own reports do.
+    assert threats == ["suspect"] + ["friend"] * 7
+
+
+def test_a_hand_placed_marker_on_a_sensors_track_declares_nothing():
+    fusion = _Fusion()
+    threats = []
+    for i in range(6):
+        t = _at(5 * i)
+        if i == 2:
+            det = _cot(t, 0.0, uid="MARKER-1", cot_type="a-f-G", how="h-g-i-g-o")
+        else:
+            det = _sapient(t, 0.0)
+        threats.append(fusion.hit(det)[1].threat_level)
+    assert threats == ["suspect"] * 6
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "standing"),
+    [
+        ("a-f-G", "a-n-G", "neutral"),
+        ("a-n-G", "a-f-G", "neutral"),
+        ("a-n-G", "a-s-G", "suspect"),
+        ("a-h-G", "a-s-G", "hostile"),
+        ("a-f-G", "a-h-G", "hostile"),
+    ],
+)
+def test_the_most_severe_of_two_fresh_self_reports_stands(first, second, standing):
+    fusion = _Fusion()
+    threats = []
+    for i in range(6):
+        uid, cot_type = ("ATAK-A", first) if i % 2 == 0 else ("ATAK-B", second)
+        _, result = fusion.hit(_cot(_at(5 * i), 0.0, uid=uid, cot_type=cot_type))
+        threats.append(result.threat_level)
+    assert threats[1:] == [standing] * 5
+
+
+def _published_marks(hits, start):
+    """Second after T0 -> (threat, drawn CoT type) of every record published from `start`."""
+    engine = FusionEngine(
+        SapientAsynchronousTracker(confirm_hits=3, id_namespace="n"),
+        PublishPolicy("window", window_seconds=5.0),
+    )
+    marks = {}
+    for det in hits:
+        second = (det.timestamp - T0).total_seconds()
+        if second < start:
+            continue
+        for _, result in engine.process(det.timestamp, {det}).published:
+            marks[second] = (result.threat_level, _cot_type(result))
+    return marks
+
+
+def test_a_rebuild_from_a_later_start_publishes_the_same_marks():
     config.set_reference_origin(62.9, 29.8, 0.0)
-    ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    meta = {"cot_type": "a-f-A-M-F-Q", "swarm_count": 5}
-    result = augmentor.extract_tactical_track(_make_track(_moving(40.0), ts, meta))
-    assert result.threat_level == "friend"
+    # A friend and a hostile both report themselves on one track, the friend first.
+    hits = []
+    for k in range(40):
+        hits.append(_cot(_at(5.0 * k), 0.0, uid="BLUE-1", cot_type="a-f-G-U-C"))
+        hits.append(_cot(_at(5.0 * k + 2.5), 3.0, uid="RED-1", cot_type="a-h-G-U-C"))
+    full = _published_marks(hits, 0.0)
+    # A rebuild whose window starts on the hostile's report.
+    rebuilt = _published_marks(hits, 102.5)
+    # The two publish on different window phases, so compare what each draws from then on.
+    from_full = {mark for s, mark in full.items() if s >= 112.5}
+    from_rebuild = {mark for s, mark in rebuilt.items() if s >= 112.5}
+    assert from_rebuild == from_full == {("hostile", "a-h-G")}
 
 
-def test_a_hostile_declared_cot_track_stays_hostile_when_slow(augmentor):
-    config.set_reference_origin(62.9, 29.8, 0.0)
-    ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    meta = {"cot_type": "a-h-G"}
-    result = augmentor.extract_tactical_track(_make_track(_moving(1.0), ts, meta))
-    assert result.threat_level == "hostile"
+def test_a_fast_friendly_user_reporting_only_itself_stays_friend():
+    fusion = _Fusion()
+    results = [fusion.hit(_cot(_at(2 * i), 80.0 * i))[1] for i in range(15)]
+    assert results[-1].speed_mps > 20.0
+    assert [r.threat_level for r in results] == ["friend"] * 15
+    assert all(r.declared_type == "a-f-G-U-C" for r in results)
+
+
+def test_a_declaration_expires_sixty_seconds_after_its_last_report():
+    fusion = _Fusion()
+    for second in (0, 5, 10):
+        assert fusion.hit(_cot(_at(second), 0.0))[1].threat_level == "friend"
+    # Only a sensor sees it from here, slow and alone: the rule would say suspect.
+    threats = {}
+    for second in range(15, 95, 5):
+        threats[second] = fusion.hit(_sapient(_at(second), 0.0))[1].threat_level
+    assert all(threats[s] == "friend" for s in threats if s <= 70)
+    assert all(threats[s] == "suspect" for s in threats if s > 70)
+
+
+def test_a_declared_hostile_is_held_after_the_declaration_ends():
+    fusion = _Fusion()
+    for second in (0, 5, 10):
+        assert fusion.hit(_cot(_at(second), 0.0, cot_type="a-h-G"))[1].threat_level == "hostile"
+    # The same user now declares nothing: the hold from its last hostile report stands.
+    threats = {}
+    for second in range(15, 95, 5):
+        threats[second] = fusion.hit(_cot(_at(second), 0.0, cot_type="a-u-G"))[1].threat_level
+    assert all(threats[s] == "hostile" for s in threats if s <= 70)
+    assert all(threats[s] == "suspect" for s in threats if s > 70)
+
+
+def test_a_stale_declaration_leaves_a_swarms_hold_in_place():
+    fusion = _Fusion()
+    fusion.hit(_cot(_at(0), 0.0))
+    _, swarm = fusion.hit(_sapient(_at(5), 0.0, swarm_count=5))
+    assert swarm.threat_level == "hostile"
+    # The swarm count lasts to 65 s and the hold 60 s past that; from 70 s only the hold
+    # keeps it hostile, with the friend's declaration stale since 60 s.
+    threats = {}
+    for second in range(10, 145, 5):
+        threats[second] = fusion.hit(_sapient(_at(second), 0.0))[1].threat_level
+    assert all(threats[s] == "hostile" for s in threats if s <= 125)
+    assert all(threats[s] == "suspect" for s in threats if s > 125)
+
+
+def test_a_fresh_friend_overrides_a_hold_but_does_not_end_it():
+    fusion = _Fusion()
+    fusion.hit(_sapient(_at(0), 0.0, swarm_count=5))
+    # The user's own reports keep the track; the swarm count lasts to 60 s, the hold past it.
+    for second in range(5, 65, 5):
+        assert fusion.hit(_cot(_at(second), 0.0, cot_type="a-u-G"))[1].threat_level == "hostile"
+    # No sensor for over 60 s: the user's friendly declaration stands.
+    assert fusion.hit(_cot(_at(65), 0.0, cot_type="a-f-G"))[1].threat_level == "friend"
+    # It stops declaring: the hold, until 120 s, is still there.
+    assert fusion.hit(_cot(_at(75), 0.0, cot_type="a-u-G"))[1].threat_level == "hostile"
+    assert fusion.hit(_cot(_at(125), 0.0, cot_type="a-u-G"))[1].threat_level == "suspect"
+
+
+def test_the_judgement_depends_only_on_the_hits():
+    def run():
+        fusion = _Fusion()
+        hits = [_cot(_at(0), 0.0), _sapient(_at(5), 0.0, swarm_count=5)]
+        hits += [_sapient(_at(s), 0.0) for s in range(10, 80, 10)]
+        return [fusion.hit(det)[1].threat_level for det in hits]
+
+    assert run() == run()
+
+
+def test_declared_threat_reads_only_a_cot_atom_types_affiliation():
+    assert declared_threat("a-f-G-U-C") == "friend"
+    assert declared_threat("a-F-G") is None
+    assert declared_threat("b-f-G") is None
+    assert declared_threat(None) is None
+    assert declared_threat(7) is None
 
 
 @pytest.mark.parametrize(
@@ -296,72 +525,12 @@ def test_a_hostile_declared_cot_track_stays_hostile_when_slow(augmentor):
         ("a-k-G", "hostile"),
         ("a-s-G", "suspect"),
         ("a-n-G", "neutral"),
+        ("a-u-G", "suspect"),
+        ("a-p-G", "suspect"),
+        ("a-o-G", "suspect"),
+        ("a-x-G", "suspect"),
     ],
 )
-def test_each_declared_affiliation_maps_to_its_threat(augmentor, cot_type, threat):
-    config.set_reference_origin(62.9, 29.8, 0.0)
-    ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    track = _make_track(_moving(40.0), ts, {"cot_type": cot_type})
-    assert augmentor.extract_tactical_track(track).threat_level == threat
-
-
-def test_declared_threat_reads_only_a_cot_atom_types_affiliation():
-    from context_foundry.fusion.augmentor import declared_threat
-
-    assert declared_threat("a-f-G-U-C") == "friend"
-    assert declared_threat("a-F-G") is None
-    assert declared_threat("b-f-G") is None
-    assert declared_threat(None) is None
-    assert declared_threat(7) is None
-
-
-@pytest.mark.parametrize("cot_type", ["a-u-A", "a-p-A", "a-o-A", "a-x-A", "a-f", "b-m-p-s-m"])
-def test_an_undeclared_affiliation_keeps_the_rule_and_its_hold(augmentor, cot_type):
-    from datetime import timedelta
-
-    config.set_reference_origin(62.9, 29.8, 0.0)
-    ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    meta = {"cot_type": cot_type}
-    fast = augmentor.extract_tactical_track(_make_track(_moving(25.0), ts, meta))
-    assert fast.threat_level == "hostile"
-    soon = ts + timedelta(seconds=10)
-    slow = augmentor.extract_tactical_track(_make_track(_moving(1.0), soon, meta))
-    assert slow.threat_level == "hostile"
-
-
-def test_a_sapient_only_track_keeps_the_rule_and_its_hold(augmentor):
-    from datetime import timedelta
-
-    config.set_reference_origin(62.9, 29.8, 0.0)
-    ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    meta = {"classification": "UAS", "swarm_count": 1}
-    assert augmentor.extract_tactical_track(_make_track(_moving(1.0), ts, meta)).threat_level == (
-        "suspect"
-    )
-    swarm = {"classification": "UAS", "swarm_count": 4}
-    assert augmentor.extract_tactical_track(_make_track(_moving(1.0), ts, swarm)).threat_level == (
-        "hostile"
-    )
-    soon = ts + timedelta(seconds=10)
-    assert augmentor.extract_tactical_track(_make_track(_moving(1.0), soon, meta)).threat_level == (
-        "hostile"
-    )
-
-
-def test_a_declared_affiliation_clears_the_hostile_hold(augmentor):
-    from datetime import timedelta
-
-    config.set_reference_origin(62.9, 29.8, 0.0)
-    ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    undeclared = {"cot_type": "a-u-A"}
-    fast = augmentor.extract_tactical_track(_make_track(_moving(25.0), ts, undeclared))
-    assert fast.threat_level == "hostile"
-    # The sender declares it friendly: the hold no longer applies...
-    soon = ts + timedelta(seconds=5)
-    friendly = {"cot_type": "a-f-A"}
-    declared = augmentor.extract_tactical_track(_make_track(_moving(1.0), soon, friendly))
-    assert declared.threat_level == "friend"
-    # ...nor comes back when the declaration is gone, within what would have been the hold.
-    later = ts + timedelta(seconds=10)
-    after = augmentor.extract_tactical_track(_make_track(_moving(1.0), later, undeclared))
-    assert after.threat_level == "suspect"
+def test_each_affiliation_of_a_self_report_maps_to_its_threat(cot_type, threat):
+    fusion = _Fusion()
+    assert fusion.hit(_cot(_at(0), 0.0, cot_type=cot_type))[1].threat_level == threat

@@ -66,7 +66,12 @@ def test_normalize_extracts_internal_detection(validator):
     assert det.longitude == pytest.approx(29.8)
     assert det.altitude == pytest.approx(100.0)
     assert det.classification == "a-f-A-M-F"
-    assert det.raw_metadata == {"original_xml": VALID_COT_XML, "ce": 10.0, "le": 10.0}
+    assert det.raw_metadata == {
+        "original_xml": VALID_COT_XML,
+        "how": "m-g",
+        "ce": 10.0,
+        "le": 10.0,
+    }
     assert det.timestamp.year == 2026
 
 

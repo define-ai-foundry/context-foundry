@@ -7,6 +7,7 @@ from datetime import timedelta
 
 from . import config
 from .schemas import TacticalTrack
+from .tracker import DECLARATION_FRESH_SECONDS, DECLARATIONS_KEY, SENSOR_HIT_AT_KEY
 
 # WGS84 Ellipsoid Constants
 WGS84_A = 6378137.0
@@ -16,6 +17,12 @@ WGS84_E2 = 0.00669437999014
 # one whose swarm count briefly reads small, would otherwise flip its affiliation between
 # hostile and suspect from one update to the next.
 HOSTILE_HOLD_SECONDS = 60.0
+
+# How recent a sensor's (non-CoT) hit must be for a swarm to overrule a declaration.
+SENSOR_HIT_RECENT_SECONDS = 60.0
+
+# Which of several fresh declarations on one track stands: the most severe.
+DECLARED_SEVERITY = {"hostile": 0, "suspect": 1, "neutral": 2, "friend": 3}
 
 # The affiliation letter of a CoT atom type, `a-<letter>-...`.
 COT_AFFILIATION = re.compile(r"^a-([a-z])-")
@@ -39,6 +46,29 @@ def declared_threat(cot_type) -> str | None:
     return DECLARED_THREAT.get(match.group(1)) if match else None
 
 
+def _within(timestamp, moment, seconds: float) -> bool:
+    """Whether `moment` is no more than `seconds` before `timestamp`."""
+    return (timestamp - moment).total_seconds() <= seconds
+
+
+def _standing_declaration(declarations, timestamp):
+    """(threat, CoT type) of the most severe declaration fresh at `timestamp`, or (None, None).
+
+    Between equally severe ones the latest report stands, then the type, so the choice
+    depends only on the reports and not on the order the uids first came in.
+    """
+    fresh = [
+        (DECLARED_SEVERITY[threat], -(timestamp - at).total_seconds(), cot_type, threat)
+        for cot_type, at in declarations or ()
+        if (threat := declared_threat(cot_type)) is not None
+        and _within(timestamp, at, DECLARATION_FRESH_SECONDS)
+    ]
+    if not fresh:
+        return None, None
+    *_, cot_type, threat = min(fresh)
+    return threat, cot_type
+
+
 class TacticalContextAugmentor:
     """
     Acts as the format-independent bridge between the mathematical tracking
@@ -48,19 +78,53 @@ class TacticalContextAugmentor:
     def __init__(self):
         # Track id -> until when it stays hostile, from the last time it was judged so.
         self._hostile_until = {}
+        # Track id -> until when a swarm overrules a declaration, from its last swarm count.
+        self._swarm_until = {}
+
+    @staticmethod
+    def _hold(holds: dict, track_id, timestamp) -> dict:
+        """`holds` with the track's hold renewed for HOSTILE_HOLD_SECONDS from `timestamp`."""
+        holds[track_id] = timestamp + timedelta(seconds=HOSTILE_HOLD_SECONDS)
+        # Bounded by the tracks still published: one expired long ago is forgotten.
+        if len(holds) > 1000:
+            holds = {k: until for k, until in holds.items() if until >= timestamp}
+        return holds
+
+    @staticmethod
+    def _holding(holds: dict, track_id, timestamp) -> bool:
+        """Whether the track's hold in `holds` still runs at `timestamp`."""
+        until = holds.get(track_id)
+        return until is not None and timestamp <= until
 
     def _held_threat(self, track_id, timestamp, hostile_now: bool) -> str:
         """The more severe of now's judgement and a hostile one within HOSTILE_HOLD_SECONDS."""
         if hostile_now:
-            self._hostile_until[track_id] = timestamp + timedelta(seconds=HOSTILE_HOLD_SECONDS)
-            # Bounded by the tracks still published: one expired long ago is forgotten.
-            if len(self._hostile_until) > 1000:
-                self._hostile_until = {
-                    k: until for k, until in self._hostile_until.items() if until >= timestamp
-                }
+            self._hostile_until = self._hold(self._hostile_until, track_id, timestamp)
             return "hostile"
-        until = self._hostile_until.get(track_id)
-        return "hostile" if until is not None and timestamp <= until else "suspect"
+        return "hostile" if self._holding(self._hostile_until, track_id, timestamp) else "suspect"
+
+    def _threat(self, track_id, timestamp, metadata, is_fast: bool, is_swarm: bool):
+        """(threat level, declared CoT type or None) from the rule and the fresh declarations.
+
+        Without a fresh declaration the rule decides: fast or a swarm is hostile, held. The
+        most severe fresh declaration otherwise stands, a hostile one held like the rule's.
+        A friend, neutral or suspect one is overruled only by a swarm a sensor other than
+        CoT backs: a non-CoT hit within SENSOR_HIT_RECENT_SECONDS and a swarm count now or
+        within its hold. Speed never overrules it. An overruled one gives no declared type.
+        """
+        if is_swarm:
+            self._swarm_until = self._hold(self._swarm_until, track_id, timestamp)
+        declared, declared_type = _standing_declaration(metadata.get(DECLARATIONS_KEY), timestamp)
+        if declared is None:
+            return self._held_threat(track_id, timestamp, is_fast or is_swarm), None
+        if declared == "hostile":
+            return self._held_threat(track_id, timestamp, True), declared_type
+        sensor_at = metadata.get(SENSOR_HIT_AT_KEY)
+        sensed = sensor_at is not None and _within(timestamp, sensor_at, SENSOR_HIT_RECENT_SECONDS)
+        if sensed and self._holding(self._swarm_until, track_id, timestamp):
+            self._held_threat(track_id, timestamp, is_swarm)
+            return "hostile", None
+        return declared, declared_type
 
     def ecef_to_wgs84(self, x, y, z):
         """Converts ECEF Cartesian coordinates back to WGS84 Geodetic bounds."""
@@ -115,14 +179,11 @@ class TacticalContextAugmentor:
                 class_confidences = []
         swarm_count = metadata.get("swarm_count", 1)
 
-        # A CoT sender's declared affiliation wins over the rule and ends any hostile hold.
-        threat_level = declared_threat(metadata.get("cot_type"))
-        if threat_level is not None:
-            self._hostile_until.pop(track.id, None)
-        else:
-            is_fast = speed_m_s > 20.0
-            is_swarm = swarm_count > 3
-            threat_level = self._held_threat(track.id, state.timestamp, is_fast or is_swarm)
+        is_fast = speed_m_s > 20.0
+        is_swarm = swarm_count > 3
+        threat_level, declared_type = self._threat(
+            track.id, state.timestamp, metadata, is_fast, is_swarm
+        )
 
         # Return the universal state object for the serializers to consume
         return TacticalTrack(
@@ -138,5 +199,6 @@ class TacticalContextAugmentor:
             class_confidences=class_confidences,
             swarm_count=swarm_count,
             threat_level=threat_level,
+            declared_type=declared_type,
             velocity=[float(ve), float(vn), float(vu)],
         )

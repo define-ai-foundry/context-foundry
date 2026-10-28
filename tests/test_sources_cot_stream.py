@@ -9,11 +9,12 @@ advance, so nothing here depends on wall-clock timing.
 """
 
 import itertools
+import logging
 from unittest.mock import MagicMock, call
 
 import pytest
 
-from context_foundry.fusion.sources import frames
+from context_foundry.fusion.sources import cot_stream, frames
 from context_foundry.fusion.sources.cot_stream import CotNetworkStream
 
 TIME_A = "2026-01-01T00:00:00.000Z"
@@ -22,11 +23,11 @@ SENDER_1 = ("10.0.0.1", 4242)
 SENDER_2 = ("10.0.0.2", 4242)
 
 
-def _cot_xml(uid="COT-SENSOR-1", time=TIME_A, hae='hae="100.0" ', cot_type="a-f-A-M-F"):
+def _cot_xml(uid="COT-SENSOR-1", time=TIME_A, hae='hae="100.0" ', cot_type="a-f-A-M-F", lon=29.8):
     return (
         f'<event version="2.0" uid="{uid}" type="{cot_type}" '
         f'time="{time}" start="{time}" stale="2026-01-01T00:00:15.000Z" how="m-g">'
-        f'<point lat="62.900000" lon="29.800000" {hae}ce="10.0" le="10.0"/>'
+        f'<point lat="62.900000" lon="{lon:.6f}" {hae}ce="10.0" le="10.0"/>'
         f"</event>"
     ).encode()
 
@@ -91,9 +92,12 @@ def test_iter_events_yields_detection_for_valid_packet(monkeypatch):
     assert len(detections) == 1
     det = detections[0]
     assert det.metadata == {
-        "nodeId": "COT-SENSOR-1",
+        "nodeId": "cot",
+        "objectId": "COT-SENSOR-1",
+        "stable_object_id": True,
         "type": "CoT",
         "cot_type": "a-f-A-M-F",
+        "how": "m-g",
     }
     assert timestamp.year == 2026
 
@@ -109,14 +113,17 @@ def test_iter_events_drops_schema_invalid_packet(monkeypatch):
         next(gen)
 
 
-def test_iter_events_drops_an_event_that_is_not_an_object(monkeypatch):
+def test_iter_events_drops_an_event_that_is_not_an_object(monkeypatch, caplog):
     marker = _cot_xml(cot_type="b-m-p-s-m")
     stream = _make_stream(
         monkeypatch, [(marker, SENDER_1), (VALID_COT_XML, SENDER_1), TimeoutError(), _Stop()]
     )
     gen = stream.iter_events()
-    _, detections = next(gen)
+    with caplog.at_level(logging.DEBUG, logger=cot_stream.__name__):
+        _, detections = next(gen)
     assert [d.metadata["cot_type"] for d in detections] == ["a-f-A-M-F"]
+    assert stream.not_objects_skipped == 1
+    assert "not an object" in caplog.text
 
 
 def test_iter_events_generic_exception_is_caught_and_logged(monkeypatch, caplog):
@@ -139,7 +146,7 @@ def test_iter_events_batches_one_senders_instant_into_a_single_event(monkeypatch
     gen = stream.iter_events()
 
     timestamp, detections = next(gen)
-    assert [d.metadata["nodeId"] for d in detections] == ["OBJ-1", "OBJ-2"]
+    assert [d.metadata["objectId"] for d in detections] == ["OBJ-1", "OBJ-2"]
     assert all(d.timestamp == timestamp for d in detections)
 
     with pytest.raises(_Stop):
@@ -190,10 +197,10 @@ def test_iter_events_a_new_instant_does_not_close_the_previous_frame(monkeypatch
 
     first_ts, first = next(gen)
     # OBJ-3 joined the frame OBJ-1 opened rather than finding it already handed on.
-    assert [d.metadata["nodeId"] for d in first] == ["OBJ-1", "OBJ-3"]
+    assert [d.metadata["objectId"] for d in first] == ["OBJ-1", "OBJ-3"]
 
     second_ts, second = next(gen)
-    assert [d.metadata["nodeId"] for d in second] == ["OBJ-2"]
+    assert [d.metadata["objectId"] for d in second] == ["OBJ-2"]
     assert second_ts > first_ts
 
     with pytest.raises(_Stop):
@@ -213,7 +220,7 @@ def test_iter_events_invalid_packet_flood_still_releases_the_open_frame(monkeypa
 
     _timestamp, detections = next(stream.iter_events())
 
-    assert [d.metadata["nodeId"] for d in detections] == ["OBJ-1"]
+    assert [d.metadata["objectId"] for d in detections] == ["OBJ-1"]
 
 
 def test_iter_events_window_expiry_emits_frame_without_logging(monkeypatch, caplog):
@@ -262,8 +269,8 @@ def test_iter_events_detection_for_an_emitted_instant_becomes_its_own_event(monk
     ts_first, first = next(gen)
     ts_late, late = next(gen)
 
-    assert [d.metadata["nodeId"] for d in first] == ["OBJ-1"]
-    assert [d.metadata["nodeId"] for d in late] == ["OBJ-LATE"]
+    assert [d.metadata["objectId"] for d in first] == ["OBJ-1"]
+    assert [d.metadata["objectId"] for d in late] == ["OBJ-LATE"]
     assert ts_first == ts_late
 
     with pytest.raises(_Stop):
@@ -277,3 +284,47 @@ def test_point_accuracy_uses_the_points_own_error_or_the_cautious_default():
     assert (declared["base_m"], declared["vertical_m"]) == (12.0, 30.0)
     unknown = _point_accuracy({"ce": None, "le": None})["geometric_error"]
     assert (unknown["base_m"], unknown["vertical_m"]) == (50.0, 50.0)
+
+
+# About one metre east of the reference point, in degrees of longitude at 62.9 N.
+_METRE_EAST = 1.0 / 50_710.0
+
+
+def _live_frames(monkeypatch, positions):
+    """The events a stream yields for one datagram per (uid, metres east) per second."""
+    packets = []
+    for second, reports in enumerate(positions):
+        time = f"2026-01-01T00:00:{second:02d}.000Z"
+        for uid, east in reports:
+            packets.append(_packet(uid=uid, time=time, lon=29.8 + east * _METRE_EAST))
+        packets.append(TimeoutError())
+    stream = _make_stream(monkeypatch, [*packets, _Stop()])
+    gen = stream.iter_events()
+    return [next(gen) for _ in positions]
+
+
+def test_a_live_cot_source_is_named_by_the_derived_cot_ids(monkeypatch):
+    from context_foundry.fusion.publish import source_key
+    from context_foundry.fusion.sapient_raw import cot_node_id, cot_object_ulid
+
+    ((_, (det,)),) = _live_frames(monkeypatch, [[("OBJ-1", 0.0)]])
+    assert source_key(det.metadata) == (cot_node_id(), cot_object_ulid("OBJ-1"))
+
+
+def test_live_cot_reports_keep_their_uids_tracks_when_two_objects_swap_places(monkeypatch):
+    from context_foundry.fusion import config
+    from context_foundry.fusion.tracker import SapientAsynchronousTracker
+
+    config.set_reference_origin(62.9, 29.8, 0.0)
+    # Two objects 30 m apart for four seconds, then each next to where the other was.
+    positions = [[("OBJ-A", 0.0), ("OBJ-B", 30.0)]] * 4 + [[("OBJ-A", 25.0), ("OBJ-B", 5.0)]]
+    tracker = SapientAsynchronousTracker()
+    track_of = {}
+    for timestamp, detections in _live_frames(monkeypatch, positions):
+        for track in tracker.process_async_event(timestamp, set(detections)):
+            hypothesis = getattr(track.state, "hypothesis", None)
+            if hypothesis is not None and track.state.timestamp == timestamp:
+                uid = hypothesis.measurement.metadata["objectId"]
+                track_of.setdefault(uid, set()).add(track.id)
+    assert {uid: len(ids) for uid, ids in track_of.items()} == {"OBJ-A": 1, "OBJ-B": 1}
+    assert track_of["OBJ-A"] != track_of["OBJ-B"]

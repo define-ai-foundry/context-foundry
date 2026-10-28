@@ -119,6 +119,23 @@ def test_cot_serializer_identity_follows_the_threat_level(threat, cot_type):
     assert root.get("type") == cot_type
 
 
+@pytest.mark.parametrize(
+    ("threat", "declared", "cot_type"),
+    [
+        ("friend", "a-f-G-U-C", "a-f-G"),
+        ("hostile", "a-f-G-U-C", "a-h-G"),
+        ("neutral", "a-n-S", "a-n-S"),
+        ("friend", "a-f-A-C-F", "a-f-A-M-F"),
+        ("friend", "a-f", "a-f-A-M-F"),
+        ("friend", None, "a-f-A-M-F"),
+    ],
+)
+def test_cot_serializer_takes_the_dimension_from_a_declared_type(threat, declared, cot_type):
+    track = _track(threat_level=threat, declared_type=declared)
+    root = etree.fromstring(CotSerializer().serialize(track).encode("utf-8"))
+    assert root.get("type") == cot_type
+
+
 def test_cot_serializer_default_node_id_argument_accepted():
     # node_id has a default, so calling with a single positional arg (as cli.py does) works.
     xml_str = CotSerializer().serialize(_track())
