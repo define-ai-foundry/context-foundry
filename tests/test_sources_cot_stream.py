@@ -99,6 +99,7 @@ def test_iter_events_yields_detection_for_valid_packet(monkeypatch):
         "cot_type": "a-f-A-M-F",
         "how": "m-g",
         "stale": "2026-01-01T00:00:15.000Z",
+        "speed": None,
     }
     assert timestamp.year == 2026
 

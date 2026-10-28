@@ -34,6 +34,7 @@ class CotValidator(ProtocolValidator):
         # Since we know it's valid, we can safely extract the data
         root = etree.fromstring(raw_xml_string.encode("utf-8"))
         point = root.find("point")
+        motion = root.find("detail/track")
 
         return InternalDetection(
             sensor_id=root.get("uid"),
@@ -46,6 +47,7 @@ class CotValidator(ProtocolValidator):
                 "original_xml": raw_xml_string,
                 "how": root.get("how"),
                 "stale": root.get("stale"),
+                "speed": motion.get("speed") if motion is not None else None,
                 # The point's own circular (horizontal) and linear (vertical) error,
                 # in metres; None where the sender marked it unknown.
                 "ce": known(point.get("ce")),

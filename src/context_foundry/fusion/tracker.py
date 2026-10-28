@@ -9,7 +9,7 @@ import uuid
 from collections import deque
 from collections.abc import Callable
 from datetime import datetime, timedelta
-from typing import NamedTuple
+from typing import ClassVar, NamedTuple
 
 import numpy as np
 from stonesoup.base import Property
@@ -114,6 +114,35 @@ STILL_HOW = "m-i"
 STILL_PROCESS_NOISE = 1e-10
 STILL_VELOCITY_VARIANCE = 1e-6
 STILL_ACCELERATION_VARIANCE = 1e-8
+
+# Any other self-report that gives its own speed (the CoT detail's track speed) below
+# STANDING_SPEED_MPS is of an object standing or walking, as an ATAK user does most of the
+# time. Its track is held as such: no faster, and its velocity no more uncertain, than a
+# walking pace, without acceleration, and with little process noise, so between reports a
+# minute or two apart its gate stays a few hundred metres wide instead of growing to
+# kilometres and taking in other objects' plots. The speed is taken at its word only while
+# the positions agree: a report further from where the current run of held reports began
+# than its declaration radius plus STANDING_SPEED_MPS for every second since is of an
+# object moving, whatever speed it gives. A held track whose uid reports itself moving, or
+# misses its gate, is gated from where its last report left it as if its speed were not
+# known, so one that has driven off, or gave a wrong speed, still continues it.
+STANDING_SPEED_MPS = 1.0
+STANDING_PROCESS_NOISE = 1e-4
+STANDING_VELOCITY_VARIANCE = 1.0
+STANDING_ACCELERATION_VARIANCE = 1e-3
+
+# How a self-report holds its track: (velocity variance, acceleration variance, process
+# noise) by motion.
+STILL = "still"
+STANDING = "standing"
+MOTION_HOLDS = {
+    STILL: (STILL_VELOCITY_VARIANCE, STILL_ACCELERATION_VARIANCE, STILL_PROCESS_NOISE),
+    STANDING: (
+        STANDING_VELOCITY_VARIANCE,
+        STANDING_ACCELERATION_VARIANCE,
+        STANDING_PROCESS_NOISE,
+    ),
+}
 
 # The CoT `how` of an object reporting its own position: from its GPS (`m-g`), fused from
 # its own sensors (`m-f`), surveyed, as an emplaced sensor reports itself (`m-i`), or
@@ -231,6 +260,13 @@ def _object_key(detection):
     return metadata.get("nodeId"), object_id
 
 
+def _cot_key(detection):
+    """The object key of a CoT event with a stable uid, else None."""
+    if (detection.metadata or {}).get("type") != "CoT":
+        return None
+    return _object_key(detection)
+
+
 def _self_report_key(detection):
     """The object key of a CoT self-report with a stable uid, else None."""
     metadata = detection.metadata or {}
@@ -239,14 +275,24 @@ def _self_report_key(detection):
     return _object_key(detection)
 
 
-def _is_still_report(detection) -> bool:
-    """Whether a detection is a self-report of an emplaced sensor's surveyed position."""
-    how = (detection.metadata or {}).get("how")
-    return (
-        _self_report_key(detection) is not None
-        and isinstance(how, str)
-        and (how == STILL_HOW or how.startswith(STILL_HOW + "-"))
-    )
+def _reported_motion(detection):
+    """STILL, STANDING or None: how a self-report says its object moves.
+
+    STILL for an emplaced sensor's surveyed position (see STILL_HOW), STANDING for any
+    other self-report giving a speed below STANDING_SPEED_MPS, None otherwise.
+    """
+    if _self_report_key(detection) is None:
+        return None
+    metadata = detection.metadata or {}
+    how = metadata["how"]
+    if how == STILL_HOW or how.startswith(STILL_HOW + "-"):
+        return STILL
+    speed = metadata.get("speed")
+    try:
+        speed = float(speed)
+    except (TypeError, ValueError):
+        return None
+    return STANDING if 0.0 <= speed < STANDING_SPEED_MPS else None
 
 
 class _Declaration(NamedTuple):
@@ -258,22 +304,42 @@ class _Declaration(NamedTuple):
     east: float
     north: float
     radius: float
-    still: bool
+    motion: str | None
     # When the report was made, and when the uid's first self-report on this track was.
     at: datetime
     since: datetime
+    # Where and when the current run of reports held STANDING began, if this one is held so.
+    rest: tuple | None = None
 
 
-def _hold_still(state) -> None:
-    """Sets a 9D state's velocity and acceleration to zero, known to near certainty."""
+def _hold(state, motion) -> None:
+    """Holds a 9D state's velocity and acceleration as `motion` says, in place.
+
+    STILL sets them to zero, known to near certainty. STANDING keeps the velocity, but no
+    faster than STANDING_SPEED_MPS, sets the acceleration to zero, and caps how uncertain
+    both are: a wrong velocity from a far report or another object's hit is not kept.
+    """
+    velocity_variance, acceleration_variance, _ = MOTION_HOLDS[motion]
+    if motion == STANDING:
+        velocity = [float(state.state_vector[index, 0]) for index in (1, 4, 7)]
+        speed = float(np.sqrt(sum(v * v for v in velocity)))
+        scale = STANDING_SPEED_MPS / speed if speed > STANDING_SPEED_MPS else 1.0
+        for index in (1, 4, 7):
+            state.state_vector[index, 0] *= scale
+        for index in (2, 5, 8):
+            state.state_vector[index, 0] = 0.0
     for index in (1, 2, 4, 5, 7, 8):
-        state.state_vector[index, 0] = 0.0
-        state.covar[index, :] = 0.0
-        state.covar[:, index] = 0.0
-        acceleration = index in (2, 5, 8)
-        state.covar[index, index] = (
-            STILL_ACCELERATION_VARIANCE if acceleration else STILL_VELOCITY_VARIANCE
-        )
+        cap = acceleration_variance if index in (2, 5, 8) else velocity_variance
+        if motion == STILL:
+            state.state_vector[index, 0] = 0.0
+            state.covar[index, :] = 0.0
+            state.covar[:, index] = 0.0
+            state.covar[index, index] = cap
+        elif state.covar[index, index] > cap:
+            # Scaling a row and its column keeps the covariance positive definite.
+            scale = float(np.sqrt(cap / state.covar[index, index]))
+            state.covar[index, :] *= scale
+            state.covar[:, index] *= scale
 
 
 def _position_sigma(state):
@@ -374,18 +440,20 @@ class _ConstantAccelerationPredictor(KalmanPredictor):
 
 
 class _TrackwisePredictor(_ConstantAccelerationPredictor):
-    """Predicts a track `is_still(track)` names with `still`, anything else as usual.
+    """Predicts a track with the predictor of the motion `motion_of(track)` names, if any.
 
-    Both are set once built. Only a Track, as association and coasting pass it, is told
-    apart; a bare state is predicted as usual.
+    `by_motion` and `motion_of` are set once built. Only a Track, as association and
+    coasting pass it, is told apart; a bare state is predicted as usual.
     """
 
-    still = None
-    is_still = None
+    by_motion: ClassVar[dict] = {}
+    motion_of = None
 
     def predict(self, prior, *args, **kwargs):
-        if isinstance(prior, Track) and self.is_still is not None and self.is_still(prior):
-            return self.still.predict(prior, *args, **kwargs)
+        if isinstance(prior, Track) and self.motion_of is not None:
+            motion = self.motion_of(prior)
+            if motion is not None:
+                return self.by_motion[motion].predict(prior, *args, **kwargs)
         return super().predict(prior, *args, **kwargs)
 
 
@@ -457,15 +525,21 @@ class SapientAsynchronousTracker:
         # sigma points, and it was the largest single cost of association -- every
         # event predicts every live track. The update stays unscented, since a
         # sensor's measurement model need not be linear.
-        # A track an emplaced sensor's self-report holds still is predicted with almost no
-        # process noise; see STILL_HOW.
-        self._still_model = create_9d_constant_acceleration_model(
-            q_process_noise=STILL_PROCESS_NOISE
-        )
-        self._still_noise = [model.noise_diff_coeff for model in self._still_model.model_list]
+        # A track a self-report holds still or standing is predicted with that motion's
+        # process noise; see MOTION_HOLDS.
+        motion_models = {
+            motion: create_9d_constant_acceleration_model(q_process_noise=noise)
+            for motion, (_, _, noise) in MOTION_HOLDS.items()
+        }
+        self._motion_noise = {
+            motion: [axis.noise_diff_coeff for axis in model.model_list]
+            for motion, model in motion_models.items()
+        }
         self.predictor = _TrackwisePredictor(self.transition_model)
-        self.predictor.still = _ConstantAccelerationPredictor(self._still_model)
-        self.predictor.is_still = self._is_still
+        self.predictor.by_motion = {
+            motion: _ConstantAccelerationPredictor(model) for motion, model in motion_models.items()
+        }
+        self.predictor.motion_of = self._motion
         self.updater = _LinearWhereLinearUpdater(
             measurement_model=None
         )  # Assigned dynamically via Detections
@@ -499,8 +573,8 @@ class SapientAsynchronousTracker:
         # per-object identity does not, so treat a track id inside a swarm as
         # provisional.
         #
-        # Two uids reporting their own positions are two objects, however close, so a
-        # track bound to one never takes the other's self-report; see _excluded.
+        # Two CoT uids are two objects, however close, so a track bound to one never
+        # takes the other's events; see _excluded.
         self.hypothesiser = _ExcludingHypothesiser(
             predictor=self.predictor,
             updater=self.updater,
@@ -526,8 +600,14 @@ class SapientAsynchronousTracker:
         self._object_tracks = {}
         # Track id -> (timestamp, swarm count) its detections gave within the window.
         self._swarm_counts: dict[str, deque] = {}
-        # Track id -> (object key, CoT type, fresh until) of the one self-reporting uid
-        # bound to the track and its latest self-report; see _note_threat_evidence.
+        # Track id -> (object key, time) of the latest CoT uid's event the track took.
+        self._cot_uids: dict[str, tuple] = {}
+        # Track id -> its state as its latest detection left it, before any coasting.
+        self._posteriors = {}
+        # CoT object key -> time of its latest event fused; see _binding_lapsed.
+        self._cot_seen: dict[tuple, datetime] = {}
+        # Track id -> the latest self-report of the self-reporting uid bound to the track;
+        # see _note_threat_evidence.
         self._declarations: dict[str, tuple] = {}
         self._refused_tracks = 0
         self._next_track_limit_report = 0.0
@@ -606,12 +686,14 @@ class SapientAsynchronousTracker:
                     update_context["sensor_geodetic"] = det.metadata["sensor_geodetic"]
 
                 updated_state = self.updater.update(joint_hypothesis, **update_context)
-                if _is_still_report(det):
-                    _hold_still(updated_state)
+                motion = self._report_motion(track, det, timestamp)
+                if motion is not None:
+                    _hold(updated_state, motion)
                 track.append(updated_state)
+                self._posteriors[track.id] = updated_state
                 self._last_update_time[track.id] = timestamp
                 self._hold_swarm_count(track, det, timestamp)
-                self._note_threat_evidence(track, det, timestamp)
+                self._note_threat_evidence(track, det, timestamp, motion)
                 self._bind_object_id(det, track)
                 self._count_confirmation_hit(track)
 
@@ -647,7 +729,8 @@ class SapientAsynchronousTracker:
         state = track.state
         sv = state.state_vector.ravel().tolist()
         covar = state.covar.tolist()
-        axis_noise = self._still_noise if self._is_still(track) else self._axis_noise
+        motion = self._motion(track)
+        axis_noise = self._axis_noise if motion is None else self._motion_noise[motion]
         limit = GATE_MAHALANOBIS_DISTANCE**2 * (1.0 + 1e-6)
         for det in detections:
             model = getattr(det, "measurement_model", None)
@@ -712,34 +795,94 @@ class SapientAsynchronousTracker:
             key = _object_key(det)
             if key is None:
                 continue
+            if self._binding_lapsed(key, det):
+                continue
             track = tracks_by_id.get(self._object_tracks.get(key))
             if track is None or track in bound or self._excluded(track, det):
                 continue
-            prediction = self.predictor.predict(track, timestamp=det.timestamp)
-            measurement_prediction = self.updater.predict_measurement(
-                prediction, det.measurement_model
-            )
-            distance = self.hypothesiser.measure(measurement_prediction, det)
-            if distance > OBJECT_ID_GATE_MAHALANOBIS_DISTANCE:
-                continue
-            bound[track] = SingleDistanceHypothesis(
-                prediction, det, distance, measurement_prediction
-            )
+            priors = [track]
+            declared = self._declarations.get(track.id)
+            if declared is not None and declared.key == _self_report_key(det):
+                # A self-reporter's track that misses its own uid's report, as one held
+                # standing does once it drives off: gated again at a speed not known, from
+                # where its last report left it, not from its latest coasted state. A held
+                # track whose uid now reports itself moving is gated, and updated, only so,
+                # or its near-certain stillness would turn the jump into acceleration.
+                unheld = self._unheld(self._posteriors.get(track.id, track.state))
+                if declared.motion is not None and _reported_motion(det) is None:
+                    priors = [unheld]
+                else:
+                    priors.append(unheld)
+            for prior in priors:
+                prediction = self.predictor.predict(prior, timestamp=det.timestamp)
+                measurement_prediction = self.updater.predict_measurement(
+                    prediction, det.measurement_model
+                )
+                distance = self.hypothesiser.measure(measurement_prediction, det)
+                if distance <= OBJECT_ID_GATE_MAHALANOBIS_DISTANCE:
+                    bound[track] = SingleDistanceHypothesis(
+                        prediction, det, distance, measurement_prediction
+                    )
+                    break
         return bound
+
+    def _unheld(self, state):
+        """A copy of a 9D state with no acceleration, and velocity and acceleration as
+        uncertain as a new track's; a bare state, so it is predicted as moving."""
+        covar = np.array(state.covar, dtype=float)
+        mean = np.array(state.state_vector, dtype=float)
+        mean[[2, 5, 8], 0] = 0.0
+        for index, variance in (
+            (1, self.initial_velocity_variance),
+            (2, self.p_init_val / 2.0),
+            (4, self.initial_velocity_variance),
+            (5, self.p_init_val / 2.0),
+            (7, self.p_init_val / 2.0),
+            (8, self.p_init_val / 4.0),
+        ):
+            covar[index, :] = 0.0
+            covar[:, index] = 0.0
+            covar[index, index] = variance
+        return GaussianState(StateVector(mean), CovarianceMatrix(covar), timestamp=state.timestamp)
+
+    def _binding_lapsed(self, key, detection) -> bool:
+        """Whether a CoT uid that is not reporting itself has been silent past its binding.
+
+        Such a uid -- a relay, a marker someone placed -- holds the track it was fused into
+        only until it has been silent for max_coast_seconds: past that, its next event is
+        associated by position like a new one. The coast time, not a rebuild's window:
+        a pipeline stage re-reads more than it (it would rebuild no track otherwise), so a
+        binding a live run still holds was made inside the window and a rebuild makes it
+        too, and a run started at any point fuses the uid's next event the same way.
+        A self-reporting uid's binding lasts as its declaration does; see _release_expired.
+        """
+        if _cot_key(detection) is None or _self_report_key(detection) is not None:
+            return False
+        seen = self._cot_seen.get(key)
+        return (
+            seen is not None
+            and (detection.timestamp - seen).total_seconds() > self.max_coast_seconds
+        )
 
     def _bind_object_id(self, detection, track):
         """Remembers which track a stable objectId was fused into.
 
-        Only a self-report moves a self-reporting uid: another party's report of it, such
-        as a relay, updates whichever track it went to and leaves the uid bound where it is.
-        An object moving to another track takes its declaration with it: the track it left
-        is no longer bound to it, so it no longer speaks for that track, and the track may
-        take another uid's self-reports.
+        The track remembers the latest CoT uid it took, for _excluded. Only a self-report
+        moves a self-reporting uid: another party's report of it, such as a relay, leaves
+        the uid bound where it is. An object moving to another track takes its declaration
+        with it, and the track it left is free for another uid. A uid whose binding has
+        lapsed (see _binding_lapsed) is bound afresh to the track it now joins.
         """
         key = _object_key(detection)
         if key is None:
             return
+        cot = _cot_key(detection) is not None
         previous = self._object_tracks.get(key)
+        if cot:
+            if self._binding_lapsed(key, detection):
+                previous = None
+            self._cot_uids[track.id] = (key, detection.timestamp)
+            self._cot_seen[key] = detection.timestamp
         if previous is None or previous == track.id:
             self._object_tracks[key] = track.id
             return
@@ -748,6 +891,8 @@ class SapientAsynchronousTracker:
             if _self_report_key(detection) is None:
                 return
             self._undeclare(previous)
+        if cot and self._cot_uids.get(previous, (None,))[0] == key:
+            del self._cot_uids[previous]
         self._object_tracks[key] = track.id
 
     def _undeclare(self, track_id) -> None:
@@ -758,23 +903,64 @@ class SapientAsynchronousTracker:
                 live.metadata.pop(DECLARATION_KEY, None)
 
     def _excluded(self, track, detection) -> bool:
-        """Whether the track is bound to a self-reporting uid other than the detection's.
+        """Whether a CoT event of one uid is kept off a track because of another uid.
 
-        Only a self-report is kept off such a track: a sensor's detection, or a CoT event
-        that is another party's report of an object, may still go to it.
+        A track bound to a self-reporting uid takes no other uid's CoT event, whatever its
+        `how`; and a self-report never joins a track that took another uid's CoT event
+        within max_coast_seconds. Other parties' reports of different uids -- a C2 relaying
+        one object under uids that change, two relays of it -- may share a track, and a
+        sensor's detection is never kept off one.
         """
-        declared = self._declarations.get(track.id)
-        if declared is None:
+        key = _cot_key(detection)
+        if key is None:
             return False
-        key = _self_report_key(detection)
-        return key is not None and key != declared.key
-
-    def _is_still(self, track) -> bool:
-        """Whether the track is held still by its uid's latest self-report; see STILL_HOW."""
         declared = self._declarations.get(track.id)
-        return declared is not None and declared.still
+        if declared is not None and key != declared.key:
+            return True
+        if _self_report_key(detection) is None:
+            return False
+        bound, seen = self._cot_uids.get(track.id, (None, None))
+        return (
+            bound is not None
+            and bound != key
+            and (detection.timestamp - seen).total_seconds() <= self.max_coast_seconds
+        )
 
-    def _note_threat_evidence(self, track, detection, timestamp) -> None:
+    def _standing_run(self, track, detection):
+        """Where and when the run of STANDING reports this one would continue began, if any."""
+        previous = self._declarations.get(track.id)
+        if previous is None or previous.key != _object_key(detection):
+            return None
+        return previous.rest if previous.motion == STANDING else None
+
+    def _report_motion(self, track, detection, timestamp):
+        """How a self-report holds the track it updates: as it reports, if its position agrees.
+
+        A run of reports held STANDING begins with the first standing-speed report on the
+        track, or after one that is not held. A standing-speed report further from where the
+        run began than its declaration radius plus STANDING_SPEED_MPS for every second since
+        is of an object moving, whatever speed it gives: it is not held, and ends the run.
+        """
+        motion = _reported_motion(detection)
+        rest = self._standing_run(track, detection)
+        if motion != STANDING or rest is None:
+            return motion
+        rest_east, rest_north, rest_at = rest
+        noise = detection.measurement_model.noise_covar
+        error = float(np.sqrt(max(noise[0, 0], noise[1, 1])))
+        elapsed = (timestamp - rest_at).total_seconds()
+        reach = max(DECLARATION_RADIUS_ERRORS * error, DECLARATION_MIN_RADIUS_M)
+        reach += STANDING_SPEED_MPS * max(elapsed, 0.0)
+        east, north = float(detection.state_vector[0, 0]), float(detection.state_vector[1, 0])
+        moved = float(np.hypot(east - rest_east, north - rest_north))
+        return STANDING if moved <= reach else None
+
+    def _motion(self, track):
+        """How its uid's latest self-report holds the track, STILL or STANDING, or None."""
+        declared = self._declarations.get(track.id)
+        return None if declared is None else declared.motion
+
+    def _note_threat_evidence(self, track, detection, timestamp, motion=None) -> None:
         """Record what a hit tells the threat judgement: a declaration or a sensor's sighting.
 
         A hit from anything but CoT is a sensor's sighting. A CoT hit is a declaration only
@@ -800,6 +986,9 @@ class SapientAsynchronousTracker:
         east, north = float(detection.state_vector[0, 0]), float(detection.state_vector[1, 0])
         previous = self._declarations.get(track.id)
         since = previous.since if previous is not None and previous.key == key else timestamp
+        rest = None
+        if motion == STANDING:
+            rest = self._standing_run(track, detection) or (east, north, timestamp)
         self._declarations[track.id] = _Declaration(
             key,
             cot_type,
@@ -807,9 +996,10 @@ class SapientAsynchronousTracker:
             east,
             north,
             radius,
-            _is_still_report(detection),
+            motion,
             timestamp,
             since,
+            rest,
         )
         velocity = track.state.state_vector
         track.metadata[DECLARATION_KEY] = (
@@ -846,6 +1036,8 @@ class SapientAsynchronousTracker:
             self._undeclare(track_id)
             if self._object_tracks.get(declared.key) == track_id:
                 del self._object_tracks[declared.key]
+            if self._cot_uids.get(track_id, (None,))[0] == declared.key:
+                del self._cot_uids[track_id]
             if track_id in tracks_by_id:
                 released.append((tracks_by_id[track_id], declared.at))
         reporting = [
@@ -934,17 +1126,19 @@ class SapientAsynchronousTracker:
         )
 
         prior = GaussianState(state_vector=state_vector, covar=covar, timestamp=detection.timestamp)
-        if _is_still_report(detection):
-            _hold_still(prior)
+        motion = _reported_motion(detection)
+        if motion is not None:
+            _hold(prior, motion)
         # Seed the track's metadata from the hit that spawned it: Stone Soup only
         # accumulates metadata from Updates, so without this the track is
         # unclassified until its second detection.
         track = Track([prior], id=self._seed_id(detection), init_metadata=dict(detection.metadata))
         self.tracks.add(track)
+        self._posteriors[track.id] = prior
         # The seeding hit is a real detection, so it anchors staleness.
         self._last_update_time[track.id] = detection.timestamp
         self._hold_swarm_count(track, detection, detection.timestamp)
-        self._note_threat_evidence(track, detection, detection.timestamp)
+        self._note_threat_evidence(track, detection, detection.timestamp, motion)
         if self.confirm_hits > 1 and track.id not in self._declarations:
             self._tentative[track.id] = [1, detection.timestamp]
         self._bind_object_id(detection, track)
@@ -1083,11 +1277,14 @@ class SapientAsynchronousTracker:
             self._swarm_counts,
             self._tentative,
             self._declarations,
+            self._cot_uids,
+            self._posteriors,
         )
         for book in books:
             for track_id in ids:
                 book.pop(track_id, None)
         self._object_tracks = {k: v for k, v in self._object_tracks.items() if v not in ids}
+        self._cot_seen = {k: seen for k, seen in self._cot_seen.items() if k in self._object_tracks}
 
     def _prune_stale_tracks(self, current_time):
         """Purges tracks that have coasted too long, in time or in uncertainty.
@@ -1151,3 +1348,12 @@ class SapientAsynchronousTracker:
             for track_id, declared in self._declarations.items()
             if track_id in active_ids
         }
+        self._cot_uids = {
+            track_id: bound for track_id, bound in self._cot_uids.items() if track_id in active_ids
+        }
+        self._posteriors = {
+            track_id: state
+            for track_id, state in self._posteriors.items()
+            if track_id in active_ids
+        }
+        self._cot_seen = {k: seen for k, seen in self._cot_seen.items() if k in self._object_tracks}

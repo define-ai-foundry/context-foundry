@@ -47,6 +47,7 @@ def test_a_located_event_is_a_detection_of_the_object_its_uid_names():
     assert detection.metadata["cot_type"] == "a-h-A-M-H-Q"
     assert detection.metadata["how"] == "m-r"
     assert detection.metadata["stale"] == "2026-10-05T08:14:33.512Z"
+    assert detection.metadata["speed"] == "17.8"
     assert "classification" not in detection.metadata
     # Three-dimensional, with the point's own error: 5 m across, 2.5 m in height.
     assert detection.state_vector.shape == (3, 1)
