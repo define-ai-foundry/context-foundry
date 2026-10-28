@@ -160,6 +160,8 @@ class CotRecordReader:
             "stable_object_id": True,
             "type": "CoT",
             "cot_type": record.get("type"),
+            # How the position was made; a self-report declares the object's affiliation.
+            "how": record.get("how"),
             "sensor_geodetic": None,
             **record.get("_lineage", {}),
         }

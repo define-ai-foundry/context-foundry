@@ -36,7 +36,11 @@ from stonesoup.types.track import Track
 from stonesoup.types.update import GaussianStateUpdate
 
 from context_foundry.fusion import tracker as tracker_module
-from context_foundry.fusion.tracker import GATE_MAHALANOBIS_DISTANCE, SapientAsynchronousTracker
+from context_foundry.fusion.tracker import (
+    DECLARATIONS_KEY,
+    GATE_MAHALANOBIS_DISTANCE,
+    SapientAsynchronousTracker,
+)
 
 MEAS_MODEL = LinearGaussian(
     ndim_state=9, mapping=(0, 3, 6), noise_covar=np.diag([25.0, 25.0, 100.0])
@@ -1255,3 +1259,92 @@ def test_the_constant_acceleration_predictor_takes_the_general_path_with_extra_a
     )
     np.testing.assert_allclose(prediction.state_vector, expected.state_vector)
     np.testing.assert_allclose(prediction.covar, expected.covar)
+
+
+def _self_report(east, timestamp, uid="ATAK-1", cot_type="a-f-G", how="m-g"):
+    det = Detection(StateVector([[east], [0.0], [0.0]]), measurement_model=MEAS_MODEL)
+    det.timestamp = timestamp
+    det.metadata = {
+        "nodeId": "cot",
+        "objectId": uid,
+        "stable_object_id": True,
+        "type": "CoT",
+        "cot_type": cot_type,
+        "how": how,
+    }
+    return det
+
+
+@pytest.mark.parametrize(
+    ("how", "declares"),
+    [
+        ("m-g", True),
+        ("m-g-l", True),
+        ("m-f", True),
+        ("h-e", True),
+        ("m-r", False),
+        ("m-p", False),
+        ("m-s", False),
+        ("h-g-i-g-o", False),
+        ("m-gx", False),
+        ("m", False),
+        (None, False),
+    ],
+)
+def test_only_an_objects_own_position_is_a_self_report(how, declares):
+    tracker = SapientAsynchronousTracker()
+    (track,) = tracker.process_async_event(T0, {_self_report(0.0, T0, how=how)})
+    assert (DECLARATIONS_KEY in track.metadata) is declares
+
+
+def test_a_self_report_records_its_declaration_on_the_track():
+    tracker = SapientAsynchronousTracker()
+    (track,) = tracker.process_async_event(T0, {_self_report(0.0, T0)})
+    assert track.metadata[DECLARATIONS_KEY] == (("a-f-G", T0),)
+
+
+def test_each_uids_latest_self_report_is_kept_and_a_stale_one_dropped():
+    tracker = SapientAsynchronousTracker()
+    tracker.process_async_event(T0, {_self_report(0.0, T0, uid="A", cot_type="a-f-G")})
+    later = T0 + timedelta(seconds=30)
+    tracker.process_async_event(later, {_self_report(0.0, later, uid="B", cot_type="a-h-G")})
+    last = T0 + timedelta(seconds=70)
+    (track,) = tracker.process_async_event(last, {_self_report(0.0, last, uid="B")})
+    assert track.metadata[DECLARATIONS_KEY] == (("a-f-G", last),)
+    assert list(tracker._declarations[track.id]) == [("cot", "B")]
+
+
+def test_an_object_moving_to_another_track_takes_its_declaration_along():
+    tracker = SapientAsynchronousTracker()
+    (first,) = tracker.process_async_event(T0, {_self_report(0.0, T0)})
+    # A sensor keeps the first track alive; the same uid reappears far out of its gate.
+    sensor = Detection(StateVector([[0.0], [0.0], [0.0]]), measurement_model=MEAS_MODEL)
+    sensor.timestamp = T0 + timedelta(seconds=1)
+    sensor.metadata = {"nodeId": "RAD-1", "objectId": "o1"}
+    tracker.process_async_event(sensor.timestamp, {sensor})
+    later = T0 + timedelta(seconds=2)
+    tracks = tracker.process_async_event(later, {_self_report(50_000.0, later)})
+    (second,) = [t for t in tracks if t.id != first.id]
+    assert first in tracks
+    assert first.metadata[DECLARATIONS_KEY] == ()
+    assert first.id not in tracker._declarations
+    assert second.metadata[DECLARATIONS_KEY] == (("a-f-G", later),)
+
+
+def test_a_track_dropped_for_coasting_out_takes_its_declarations_along():
+    tracker = SapientAsynchronousTracker(max_coast_seconds=10.0)
+    (track,) = tracker.process_async_event(T0, {_self_report(0.0, T0)})
+    assert track.id in tracker._declarations
+    # Another object far away is all that is seen from here; the first coasts out.
+    later = T0 + timedelta(seconds=11)
+    tracker.process_async_event(later, {_self_report(50_000.0, later, uid="OTHER")})
+    assert track not in tracker.tracks
+    assert track.id not in tracker._declarations
+
+
+def test_a_pruned_track_takes_its_declarations_along():
+    tracker = SapientAsynchronousTracker(max_coast_seconds=10.0)
+    (track,) = tracker.process_async_event(T0, {_self_report(0.0, T0)})
+    tracker._prune_stale_tracks(T0 + timedelta(seconds=11))
+    assert track not in tracker.tracks
+    assert track.id not in tracker._declarations

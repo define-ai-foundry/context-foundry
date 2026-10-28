@@ -81,6 +81,31 @@ MAX_COAST_SECONDS = 45.0
 # radar's is about 18 s), short enough that a swarm that splits shows it within a minute.
 SWARM_COUNT_WINDOW_SECONDS = 60.0
 
+# Track metadata keys the tracker writes from its own per-hit bookkeeping, for the
+# augmentor's threat judgement. No detection carries them, so Stone Soup's merge of a
+# hit's metadata into the track never overwrites them.
+# DECLARATIONS_KEY holds a (CoT type, time of its latest report) pair per uid whose
+# self-reports the track takes; SENSOR_HIT_AT_KEY the time of its latest non-CoT hit.
+DECLARATIONS_KEY = "cot_declarations"
+SENSOR_HIT_AT_KEY = "sensor_hit_at"
+
+# How long a CoT self-report's declared affiliation stands after its uid's latest report.
+DECLARATION_FRESH_SECONDS = 60.0
+
+# The CoT `how` of an object reporting its own position: from its GPS (`m-g`), fused from
+# its own sensors (`m-f`), or entered by its user without a fix (`h-e`, as ATAK reports
+# itself on losing GPS). How values refine by dash (`m-g-l`), so a refinement counts too.
+# A relayed (`m-r`), predicted (`m-p`), simulated (`m-s`) or hand-placed (`h-g-i-g-o`)
+# position is another party's report of the object and declares nothing.
+SELF_REPORT_HOWS = ("m-g", "m-f", "h-e")
+
+
+def is_self_report(how) -> bool:
+    """Whether a CoT `how` is that of an object reporting its own position."""
+    how = how if isinstance(how, str) else ""
+    return any(how == base or how.startswith(base + "-") for base in SELF_REPORT_HOWS)
+
+
 # Validation gate, in Mahalanobis distance (i.e. standard deviations of the
 # measurement prediction, measurement noise included). A true hit exceeds 5 in
 # three position dimensions about 1.5 times in 100,000, so the gate is loose
@@ -369,6 +394,9 @@ class SapientAsynchronousTracker:
         self._object_tracks = {}
         # Track id -> (timestamp, swarm count) its detections gave within the window.
         self._swarm_counts: dict[str, deque] = {}
+        # Track id -> {object key: (CoT type, time of its latest report)} of the CoT
+        # self-reports the track took; see _note_threat_evidence.
+        self._declarations: dict[str, dict] = {}
         self._refused_tracks = 0
         self._next_track_limit_report = 0.0
         self._shed_detections = 0
@@ -448,6 +476,7 @@ class SapientAsynchronousTracker:
                 track.append(updated_state)
                 self._last_update_time[track.id] = timestamp
                 self._hold_swarm_count(track, det, timestamp)
+                self._note_threat_evidence(track, det, timestamp)
                 self._bind_object_id(det, track)
                 self._count_confirmation_hit(track)
 
@@ -558,10 +587,53 @@ class SapientAsynchronousTracker:
         return bound
 
     def _bind_object_id(self, detection, track):
-        """Remembers which track a stable objectId was fused into."""
+        """Remembers which track a stable objectId was fused into.
+
+        An object moving to another track takes its declaration with it: the track it
+        left is no longer bound to it, so its self-reports no longer speak for that track.
+        """
         key = _object_key(detection)
-        if key is not None:
-            self._object_tracks[key] = track.id
+        if key is None:
+            return
+        previous = self._object_tracks.get(key)
+        self._object_tracks[key] = track.id
+        if previous is None or previous == track.id:
+            return
+        declarations = self._declarations.get(previous)
+        if declarations is None or declarations.pop(key, None) is None:
+            return
+        if not declarations:
+            del self._declarations[previous]
+        for live in self.tracks:
+            if live.id == previous:
+                live.metadata[DECLARATIONS_KEY] = tuple(declarations.values())
+
+    def _note_threat_evidence(self, track, detection, timestamp) -> None:
+        """Record what a hit tells the threat judgement: a declaration or a sensor's sighting.
+
+        A hit from anything but CoT is a sensor's sighting. A CoT hit is a declaration only
+        as a self-report (see is_self_report) from an event with a stable uid, the uid it is
+        bound to by this hit; a marker someone placed on the object declares nothing. Each
+        uid's latest self-report is kept, those older than DECLARATION_FRESH_SECONDS
+        dropped, so the augmentor can weigh every fresh one alike whatever order they came
+        in. The results are written to the track's metadata under the tracker's own keys.
+        """
+        metadata = detection.metadata or {}
+        if metadata.get("type") != "CoT":
+            track.metadata[SENSOR_HIT_AT_KEY] = timestamp
+            return
+        key = _object_key(detection)
+        if key is None or not is_self_report(metadata.get("how")):
+            return
+        declarations = self._declarations.setdefault(track.id, {})
+        declarations[key] = (metadata.get("cot_type"), timestamp)
+        for stale in [
+            other
+            for other, (_, at) in declarations.items()
+            if (timestamp - at).total_seconds() > DECLARATION_FRESH_SECONDS
+        ]:
+            del declarations[stale]
+        track.metadata[DECLARATIONS_KEY] = tuple(declarations.values())
 
     def _limit_detections(self, detection_group):
         """Caps how many detections one event is associated with.
@@ -631,6 +703,7 @@ class SapientAsynchronousTracker:
         # The seeding hit is a real detection, so it anchors staleness.
         self._last_update_time[track.id] = detection.timestamp
         self._hold_swarm_count(track, detection, detection.timestamp)
+        self._note_threat_evidence(track, detection, detection.timestamp)
         if self.confirm_hits > 1:
             self._tentative[track.id] = [1, detection.timestamp]
         self._bind_object_id(detection, track)
@@ -761,7 +834,13 @@ class SapientAsynchronousTracker:
             return
         self.tracks -= gone
         ids = {track.id for track in gone}
-        for book in (self._last_update_time, self._swarm_counts, self._tentative):
+        books = (
+            self._last_update_time,
+            self._swarm_counts,
+            self._tentative,
+            self._declarations,
+        )
+        for book in books:
             for track_id in ids:
                 book.pop(track_id, None)
         self._object_tracks = {k: v for k, v in self._object_tracks.items() if v not in ids}
@@ -821,5 +900,10 @@ class SapientAsynchronousTracker:
         self._tentative = {
             track_id: pending
             for track_id, pending in self._tentative.items()
+            if track_id in active_ids
+        }
+        self._declarations = {
+            track_id: declared
+            for track_id, declared in self._declarations.items()
             if track_id in active_ids
         }

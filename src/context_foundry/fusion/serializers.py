@@ -14,6 +14,17 @@ DEFAULT_STALE_SECONDS = 15.0
 # A threat level's CoT affiliation letter; any other level is drawn as suspect.
 THREAT_IDENTITY = {"hostile": "h", "suspect": "s", "friend": "f", "neutral": "n"}
 
+# The type after the affiliation for a track whose dimension nothing declared.
+DEFAULT_COT_FUNCTION = "A-M-F"
+
+
+def _cot_function(declared_type) -> str:
+    """The dimension a declared CoT type gives (`a-f-G-U-C` gives `G`), else air fixed-wing."""
+    parts = declared_type.split("-") if isinstance(declared_type, str) else []
+    if len(parts) < 3 or not parts[2] or parts[2] == "A":
+        return DEFAULT_COT_FUNCTION
+    return parts[2]
+
 
 def _cot_time(moment: datetime) -> str:
     """CoT wants UTC, millisecond precision, `Z`-suffixed."""
@@ -37,7 +48,7 @@ class CotSerializer(BaseSerializer):
         stale = _cot_time(state.timestamp + timedelta(seconds=self.stale_seconds))
 
         identity = THREAT_IDENTITY.get(state.threat_level, "s")
-        sidc = f"a-{identity}-A-M-F"
+        sidc = f"a-{identity}-{_cot_function(state.declared_type)}"
 
         event = ET.Element(
             "event",

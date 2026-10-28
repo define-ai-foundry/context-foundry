@@ -81,6 +81,8 @@ class TacticalTrack(BaseModel):
     class_confidences: list[float | None] = Field(default_factory=list)
     swarm_count: int = 1
     threat_level: str = "unknown"
+    # The CoT type a fresh self-report declared for the track, if any.
+    declared_type: str | None = None
 
     velocity: list[float] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)

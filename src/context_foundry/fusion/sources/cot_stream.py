@@ -9,7 +9,7 @@ from stonesoup.models.measurement.linear import LinearGaussian
 from stonesoup.types.detection import Detection
 
 from .. import config
-from ..cot_input import point_accuracy
+from ..cot_input import COT_NODE, point_accuracy
 from ..measurement import position_measurement
 from ..validators.cot import CotValidator
 from .base import SapientSource
@@ -61,6 +61,8 @@ class CotNetworkStream(SapientSource):
         # gets to sender identity -- so emitters behind one NAT address, or
         # forwarded by one relay, do still merge.
         self.frames = FrameAssembler(window_seconds=frame_window_seconds)
+        # Events dropped because their type is not an object's, such as map markers.
+        self.not_objects_skipped = 0
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind((self.ip, self.port))
@@ -101,6 +103,12 @@ class CotNetworkStream(SapientSource):
             return []  # Drop invalid CoT
         # A map marker, tasking or other event that is not an object makes no detection.
         if not str(clean_det.classification or "").startswith("a-"):
+            self.not_objects_skipped += 1
+            logger.debug(
+                "Dropped CoT %s of type %s: not an object",
+                clean_det.sensor_id,
+                clean_det.classification,
+            )
             return []
 
         # 2. Translate to Stone Soup Detection. A point without a height is
@@ -122,10 +130,15 @@ class CotNetworkStream(SapientSource):
         # Stone Soup merges a hit's metadata into the track, so putting a 2525
         # type code in "classification" would overwrite the real classification a
         # SAPIENT sensor gave the same track.
+        # Every CoT sender shares one node, as a cot-raw record's does; the uid is a stable
+        # object id, so the tracker can bind it to one track.
         detection.metadata = {
-            "nodeId": clean_det.sensor_id,
+            "nodeId": COT_NODE,
+            "objectId": clean_det.sensor_id,
+            "stable_object_id": True,
             "type": "CoT",
             "cot_type": clean_det.classification,
+            "how": clean_det.raw_metadata.get("how"),
         }
 
         # The port is left out: an emitter may send from a fresh ephemeral port
