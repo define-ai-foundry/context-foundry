@@ -35,11 +35,16 @@ from stonesoup.types.state import GaussianState
 from stonesoup.types.track import Track
 from stonesoup.types.update import GaussianStateUpdate
 
+from context_foundry.fusion import config
 from context_foundry.fusion import tracker as tracker_module
+from context_foundry.fusion.engine import FusionEngine
+from context_foundry.fusion.publish import PublishPolicy
 from context_foundry.fusion.tracker import (
-    DECLARATIONS_KEY,
+    DECLARATION_KEY,
+    DEFAULT_CONFIRM_HITS,
     GATE_MAHALANOBIS_DISTANCE,
     SapientAsynchronousTracker,
+    declared_until,
 )
 
 MEAS_MODEL = LinearGaussian(
@@ -1261,7 +1266,7 @@ def test_the_constant_acceleration_predictor_takes_the_general_path_with_extra_a
     np.testing.assert_allclose(prediction.covar, expected.covar)
 
 
-def _self_report(east, timestamp, uid="ATAK-1", cot_type="a-f-G", how="m-g"):
+def _self_report(east, timestamp, uid="ATAK-1", cot_type="a-f-G", how="m-g", stale=None):
     det = Detection(StateVector([[east], [0.0], [0.0]]), measurement_model=MEAS_MODEL)
     det.timestamp = timestamp
     det.metadata = {
@@ -1271,8 +1276,25 @@ def _self_report(east, timestamp, uid="ATAK-1", cot_type="a-f-G", how="m-g"):
         "type": "CoT",
         "cot_type": cot_type,
         "how": how,
+        "stale": stale,
     }
     return det
+
+
+def _sensor_hit(east, timestamp, object_id="o1"):
+    det = Detection(StateVector([[east], [0.0], [0.0]]), measurement_model=MEAS_MODEL)
+    det.timestamp = timestamp
+    det.metadata = {"nodeId": "RAD-1", "objectId": object_id}
+    return det
+
+
+def _seconds(seconds):
+    return T0 + timedelta(seconds=seconds)
+
+
+def _declared(cot_type, until, east=0.0, radius=50.0):
+    """The head of a track's declaration: type, fresh until, where it was made, its radius."""
+    return (cot_type, until, east, 0.0, radius)
 
 
 @pytest.mark.parametrize(
@@ -1281,12 +1303,15 @@ def _self_report(east, timestamp, uid="ATAK-1", cot_type="a-f-G", how="m-g"):
         ("m-g", True),
         ("m-g-l", True),
         ("m-f", True),
+        ("m-i", True),
+        ("m-i-x", True),
         ("h-e", True),
         ("m-r", False),
         ("m-p", False),
         ("m-s", False),
         ("h-g-i-g-o", False),
         ("m-gx", False),
+        ("m-ix", False),
         ("m", False),
         (None, False),
     ],
@@ -1294,41 +1319,137 @@ def _self_report(east, timestamp, uid="ATAK-1", cot_type="a-f-G", how="m-g"):
 def test_only_an_objects_own_position_is_a_self_report(how, declares):
     tracker = SapientAsynchronousTracker()
     (track,) = tracker.process_async_event(T0, {_self_report(0.0, T0, how=how)})
-    assert (DECLARATIONS_KEY in track.metadata) is declares
+    assert (DECLARATION_KEY in track.metadata) is declares
 
 
 def test_a_self_report_records_its_declaration_on_the_track():
     tracker = SapientAsynchronousTracker()
     (track,) = tracker.process_async_event(T0, {_self_report(0.0, T0)})
-    assert track.metadata[DECLARATIONS_KEY] == (("a-f-G", T0),)
+    assert track.metadata[DECLARATION_KEY][:5] == _declared("a-f-G", _seconds(60))
 
 
-def test_each_uids_latest_self_report_is_kept_and_a_stale_one_dropped():
+def test_a_surveyed_position_declares_as_an_emplaced_sensor_reports_itself():
     tracker = SapientAsynchronousTracker()
-    tracker.process_async_event(T0, {_self_report(0.0, T0, uid="A", cot_type="a-f-G")})
-    later = T0 + timedelta(seconds=30)
-    tracker.process_async_event(later, {_self_report(0.0, later, uid="B", cot_type="a-h-G")})
-    last = T0 + timedelta(seconds=70)
-    (track,) = tracker.process_async_event(last, {_self_report(0.0, last, uid="B")})
-    assert track.metadata[DECLARATIONS_KEY] == (("a-f-G", last),)
-    assert list(tracker._declarations[track.id]) == [("cot", "B")]
+    det = _self_report(0.0, T0, cot_type="a-f-G-E-S", how="m-i", stale="2026-01-01T00:04:00Z")
+    (track,) = tracker.process_async_event(T0, {det})
+    assert track.metadata[DECLARATION_KEY][:5] == _declared("a-f-G-E-S", _seconds(240))
+
+
+def test_the_uids_latest_self_report_replaces_its_declaration():
+    tracker = SapientAsynchronousTracker()
+    tracker.process_async_event(T0, {_self_report(0.0, T0, cot_type="a-h-G")})
+    later = _seconds(30)
+    (track,) = tracker.process_async_event(later, {_self_report(0.0, later)})
+    assert track.metadata[DECLARATION_KEY][:5] == _declared("a-f-G", _seconds(90))
+    assert tracker._declarations[track.id].key == ("cot", "ATAK-1")
+
+
+@pytest.mark.parametrize(
+    ("stale", "seconds"),
+    [
+        ("2026-01-01T00:05:00Z", 300.0),
+        ("2026-01-01T00:05:00.250+00:00", 300.25),
+        (datetime(2026, 1, 1, 0, 2, tzinfo=timezone.utc), 120.0),
+        ("2026-01-01T00:00:54Z", 60.0),
+        ("2025-12-31T23:59:00Z", 60.0),
+        ("2026-01-01T00:30:00Z", 600.0),
+        (None, 60.0),
+        ("", 60.0),
+        ("not a time", 60.0),
+        (7, 60.0),
+        ("2026-01-01T00:05:00", 60.0),
+    ],
+)
+def test_a_declaration_stands_until_its_stale_clamped_to_one_to_ten_minutes(stale, seconds):
+    assert declared_until(stale, T0) == T0 + timedelta(seconds=seconds)
+
+
+def test_a_self_report_declares_until_its_own_stale():
+    tracker = SapientAsynchronousTracker()
+    det = _self_report(0.0, T0, stale="2026-01-01T00:06:15Z")
+    (track,) = tracker.process_async_event(T0, {det})
+    assert track.metadata[DECLARATION_KEY][:5] == _declared("a-f-G", _seconds(375))
+
+
+def test_two_uids_reporting_themselves_at_one_place_are_two_tracks():
+    tracker = SapientAsynchronousTracker()
+    tracker.process_async_event(T0, {_self_report(0.0, T0, uid="A")})
+    later = _seconds(5)
+    tracks = tracker.process_async_event(later, {_self_report(0.0, later, uid="B")})
+    assert len(tracks) == 2
+    declared = sorted(declared.key for declared in tracker._declarations.values())
+    assert declared == [("cot", "A"), ("cot", "B")]
+
+
+def test_two_uids_reporting_themselves_in_one_event_stay_two_tracks():
+    tracker = SapientAsynchronousTracker()
+    tracker.process_async_event(T0, {_self_report(0.0, T0, uid="A")})
+    tracker.process_async_event(T0, {_self_report(1.0, T0, uid="B")})
+    for second in range(5, 60, 5):
+        t = _seconds(second)
+        tracks = tracker.process_async_event(
+            t, {_self_report(0.0, t, uid="A"), _self_report(1.0, t, uid="B")}
+        )
+        assert len(tracks) == 2
+        for track in tracks:
+            key = tracker._declarations[track.id].key
+            assert tracker._object_tracks[key] == track.id
+
+
+def test_a_self_report_stays_off_a_track_whose_uid_has_gone_quiet():
+    tracker = SapientAsynchronousTracker()
+    quiet = _self_report(0.0, T0, uid="A", stale="2026-01-01T00:05:00Z")
+    (first,) = tracker.process_async_event(T0, {quiet})
+    # A sensor keeps A's track alive while A is quiet; A's declaration lasts to 300 s.
+    for second in range(20, 120, 20):
+        tracker.process_async_event(_seconds(second), {_sensor_hit(0.0, _seconds(second))})
+    later = _seconds(125)
+    tracks = tracker.process_async_event(later, {_self_report(0.0, later, uid="B")})
+    assert len(tracks) == 2
+    assert tracker._declarations[first.id].key == ("cot", "A")
+
+
+def test_a_sensor_and_another_partys_report_still_join_a_self_reporters_track():
+    tracker = SapientAsynchronousTracker()
+    (track,) = tracker.process_async_event(T0, {_self_report(0.0, T0, uid="A")})
+    tracks = tracker.process_async_event(_seconds(2), {_sensor_hit(0.0, _seconds(2))})
+    assert tracks == {track}
+    relayed = _self_report(0.0, _seconds(4), uid="MARKER", how="h-g-i-g-o")
+    assert tracker.process_async_event(_seconds(4), {relayed}) == {track}
+    assert tracker._object_tracks[("cot", "MARKER")] == track.id
+
+
+def test_a_uid_bound_by_another_partys_report_starts_its_own_track_once_it_reports_itself():
+    tracker = SapientAsynchronousTracker()
+    (track,) = tracker.process_async_event(T0, {_self_report(0.0, T0, uid="A")})
+    relayed = _self_report(0.0, _seconds(2), uid="B", how="m-r")
+    tracker.process_async_event(_seconds(2), {relayed})
+    assert tracker._object_tracks[("cot", "B")] == track.id
+    own = _self_report(0.0, _seconds(4), uid="B")
+    tracks = tracker.process_async_event(_seconds(4), {own})
+    (other,) = [t for t in tracks if t.id != track.id]
+    assert tracker._object_tracks[("cot", "B")] == other.id
+    assert tracker._declarations[track.id].key == ("cot", "A")
+    assert tracker._declarations[other.id].key == ("cot", "B")
 
 
 def test_an_object_moving_to_another_track_takes_its_declaration_along():
     tracker = SapientAsynchronousTracker()
     (first,) = tracker.process_async_event(T0, {_self_report(0.0, T0)})
     # A sensor keeps the first track alive; the same uid reappears far out of its gate.
-    sensor = Detection(StateVector([[0.0], [0.0], [0.0]]), measurement_model=MEAS_MODEL)
-    sensor.timestamp = T0 + timedelta(seconds=1)
-    sensor.metadata = {"nodeId": "RAD-1", "objectId": "o1"}
-    tracker.process_async_event(sensor.timestamp, {sensor})
-    later = T0 + timedelta(seconds=2)
+    tracker.process_async_event(_seconds(1), {_sensor_hit(0.0, _seconds(1))})
+    later = _seconds(2)
     tracks = tracker.process_async_event(later, {_self_report(50_000.0, later)})
     (second,) = [t for t in tracks if t.id != first.id]
     assert first in tracks
-    assert first.metadata[DECLARATIONS_KEY] == ()
+    assert DECLARATION_KEY not in first.metadata
     assert first.id not in tracker._declarations
-    assert second.metadata[DECLARATIONS_KEY] == (("a-f-G", later),)
+    assert second.metadata[DECLARATION_KEY][:5] == _declared("a-f-G", _seconds(62), east=50_000.0)
+    # The track it left takes another uid's self-reports again.
+    t = _seconds(3)
+    tracks = tracker.process_async_event(t, {_self_report(0.0, t, uid="B")})
+    assert tracker._object_tracks[("cot", "B")] == first.id
+    assert tracker._declarations[first.id].key == ("cot", "B")
 
 
 def test_a_track_dropped_for_coasting_out_takes_its_declarations_along():
@@ -1336,7 +1457,7 @@ def test_a_track_dropped_for_coasting_out_takes_its_declarations_along():
     (track,) = tracker.process_async_event(T0, {_self_report(0.0, T0)})
     assert track.id in tracker._declarations
     # Another object far away is all that is seen from here; the first coasts out.
-    later = T0 + timedelta(seconds=11)
+    later = _seconds(11)
     tracker.process_async_event(later, {_self_report(50_000.0, later, uid="OTHER")})
     assert track not in tracker.tracks
     assert track.id not in tracker._declarations
@@ -1345,6 +1466,175 @@ def test_a_track_dropped_for_coasting_out_takes_its_declarations_along():
 def test_a_pruned_track_takes_its_declarations_along():
     tracker = SapientAsynchronousTracker(max_coast_seconds=10.0)
     (track,) = tracker.process_async_event(T0, {_self_report(0.0, T0)})
-    tracker._prune_stale_tracks(T0 + timedelta(seconds=11))
+    tracker._prune_stale_tracks(_seconds(11))
     assert track not in tracker.tracks
     assert track.id not in tracker._declarations
+
+
+@pytest.mark.parametrize(
+    ("make", "published"),
+    [
+        (lambda t: _self_report(0.0, t), True),
+        (lambda t: _self_report(0.0, t, cot_type="a-f-G-E-S", how="m-i"), True),
+        (lambda t: _self_report(0.0, t, how="m-r"), False),
+        (lambda t: _self_report(0.0, t, how="h-g-i-g-o"), False),
+        (lambda t: _sensor_hit(0.0, t), False),
+    ],
+    ids=["gps", "surveyed", "relayed", "hand-placed", "sensor"],
+)
+def test_only_a_self_report_publishes_from_its_first_report_under_default_confirmation(
+    make, published
+):
+    config.set_reference_origin(62.9, 29.8, 0.0)
+    engine = FusionEngine(
+        SapientAsynchronousTracker(confirm_hits=DEFAULT_CONFIRM_HITS),
+        PublishPolicy("window", window_seconds=5.0),
+    )
+    result = engine.process(T0, {make(T0)})
+    assert bool(result.published) is published
+
+
+def test_a_tentative_track_is_confirmed_by_the_first_self_report_it_takes():
+    tracker = SapientAsynchronousTracker(confirm_hits=3)
+    assert tracker.process_async_event(T0, {_sensor_hit(0.0, T0)}) == set()
+    (track,) = tracker.tracks
+    tracks = tracker.process_async_event(_seconds(2), {_self_report(0.0, _seconds(2))})
+    assert tracks == {track}
+    assert track.id not in tracker._tentative
+
+
+def _camera(east, timestamp, uid="CAM-1", stale=None, sigma=20.0):
+    det = _self_report(east, timestamp, uid=uid, cot_type="a-f-G-E-S", how="m-i", stale=stale)
+    det.measurement_model = LinearGaussian(
+        ndim_state=9, mapping=(0, 3, 6), noise_covar=np.diag([sigma**2, sigma**2, 4 * sigma**2])
+    )
+    return det
+
+
+@pytest.mark.parametrize(("how", "tracks"), [("m-i", 2), ("m-g", 1)])
+def test_an_emplaced_sensors_track_keeps_a_gate_the_size_of_its_error(how, tracks):
+    tracker = SapientAsynchronousTracker()
+    first = _camera(0.0, T0)
+    first.metadata["how"] = how
+    tracker.process_async_event(T0, {first})
+    # A sensor's hit 300 m off, half a minute on: a moving track's gate has grown past
+    # it, an emplaced sensor's has not.
+    later = _seconds(30)
+    assert len(tracker.process_async_event(later, {_sensor_hit(300.0, later)})) == tracks
+
+
+def test_a_surveyed_self_report_holds_the_track_it_joins_still():
+    tracker = SapientAsynchronousTracker()
+    for second in range(0, 10, 2):
+        tracker.process_async_event(_seconds(second), {_sensor_hit(5.0 * second, _seconds(second))})
+    (track,) = tracker.tracks
+    assert abs(track.state.state_vector[1, 0]) > 1.0
+    tracker.process_async_event(_seconds(10), {_camera(50.0, _seconds(10))})
+    assert tracker._is_still(track)
+    assert all(track.state.state_vector[i, 0] == 0.0 for i in (1, 2, 4, 5, 7, 8))
+    coasted = tracker.predictor.predict(track, timestamp=_seconds(40))
+    assert np.sqrt(coasted.covar[0, 0]) < 25.0
+
+
+def test_a_drone_passing_over_a_camera_never_takes_its_track():
+    from context_foundry.fusion.augmentor import TacticalContextAugmentor
+
+    config.set_reference_origin(62.9, 29.8, 0.0)
+    tracker = SapientAsynchronousTracker()
+    augmentor = TacticalContextAugmentor()
+    stale = "2026-01-01T00:04:00Z"
+    camera_marks, drone_marks = [], []
+    for second in range(0, 40):
+        t = _seconds(second)
+        hits = set()
+        if second % 20 == 0:
+            hits.add(_camera(0.0, t, stale=stale))
+        if second >= 1:
+            hits.add(_sensor_hit(-450.0 + 30.0 * second, t, object_id="drone"))
+        tracker.process_async_event(t, hits)
+        for track in tracker.tracks:
+            mark = augmentor.extract_tactical_track(track)
+            if track.id in tracker._declarations:
+                camera_marks.append((round(track.state.state_vector[0, 0], 1), mark.threat_level))
+            elif second >= 3:
+                drone_marks.append(mark.threat_level)
+    assert set(camera_marks) == {(0.0, "friend")}
+    assert set(drone_marks) == {"hostile"}
+
+
+def _swap(start, end):
+    """A's phone reports until 60 s, stale 2 min on; B's, 5 m off, from 70 s; a sensor
+    sees the person carrying them every 2 s. Fused from `start`, to `end`."""
+    tracker = SapientAsynchronousTracker(id_namespace="ns")
+    for second in range(start, end):
+        t = _seconds(second)
+        stale = (t + timedelta(seconds=120)).isoformat()
+        hits = set()
+        if second <= 60 and second % 20 == 0:
+            hits.add(_self_report(0.0, t, uid="A", stale=stale))
+        if second >= 70 and second % 20 == 10:
+            hits.add(_self_report(5.0, t, uid="B", stale=stale))
+        if second % 2 == 1:
+            hits.add(_sensor_hit(0.0, t))
+        if hits:
+            tracker.process_async_event(t, hits)
+    return tracker
+
+
+def test_a_uid_gone_stale_gives_its_track_up_to_the_uid_reporting_in_its_place():
+    before = _swap(0, 175)
+    assert len(before.tracks) == 2
+    after = _swap(0, 300)
+    (track,) = after.tracks
+    assert after._declarations[track.id].key == ("cot", "B")
+    assert ("cot", "A") not in after._object_tracks
+    # A rebuild that never saw A ends the same.
+    rebuild = _swap(150, 300)
+    (rebuilt,) = rebuild.tracks
+    assert rebuild._declarations[rebuilt.id].key == ("cot", "B")
+
+
+def test_a_released_track_with_no_other_self_reporter_near_stays_undeclared():
+    tracker = SapientAsynchronousTracker()
+    (track,) = tracker.process_async_event(T0, {_self_report(0.0, T0)})
+    for second in range(20, 100, 20):
+        tracker.process_async_event(_seconds(second), {_sensor_hit(0.0, _seconds(second))})
+    assert tracker.tracks == {track}
+    assert track.id not in tracker._declarations
+    assert DECLARATION_KEY not in track.metadata
+    assert ("cot", "ATAK-1") not in tracker._object_tracks
+
+
+def test_another_partys_report_of_a_self_reporter_leaves_its_binding():
+    tracker = SapientAsynchronousTracker()
+    (track,) = tracker.process_async_event(T0, {_self_report(0.0, T0, uid="A")})
+    relayed = _self_report(50_000.0, _seconds(2), uid="A", how="m-r")
+    tracks = tracker.process_async_event(_seconds(2), {relayed})
+    assert len(tracks) == 2
+    assert tracker._object_tracks[("cot", "A")] == track.id
+    assert tracker._declarations[track.id].key == ("cot", "A")
+    assert track.metadata[DECLARATION_KEY][:5] == _declared("a-f-G", _seconds(60))
+
+
+def test_a_vehicle_gone_quiet_beside_another_reporting_one_keeps_its_track():
+    tracker = SapientAsynchronousTracker()
+    for second in range(0, 200):
+        t = _seconds(second)
+        stale = (t + timedelta(seconds=60)).isoformat()
+        hits = set()
+        if second % 5 == 0:
+            if second < 60:
+                hits.add(_self_report(15.0 * second, t, uid="A", stale=stale))
+            hits.add(_self_report(15.0 * second - 40.0, t, uid="B", stale=stale))
+        tracker.process_async_event(t, hits)
+        moment = t + timedelta(milliseconds=500)
+        sensor = {
+            _sensor_hit(15.0 * second, moment, object_id="a"),
+            _sensor_hit(15.0 * second - 40.0, moment, object_id="b"),
+        }
+        tracker.process_async_event(moment, sensor)
+        if second == 55:
+            a_track = tracker._object_tracks[("cot", "A")]
+    # A's declaration ran out at 115 s; B, reporting beside it all along, is another vehicle.
+    assert a_track in {track.id for track in tracker.tracks}
+    assert len(tracker.tracks) == 2

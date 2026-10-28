@@ -349,13 +349,67 @@ def test_a_fast_friendly_vehicle_one_radar_plot_sees_stays_friend():
     results = []
     for second in range(0, 90, 2):
         if second == 30:
+            # A second after its 29 s report: 25 m on, inside the 50 m its report covers.
             det = _sapient(_at(second), 25.0 * second)
+            fusion.hit(_cot(_at(second - 1), 25.0 * (second - 1), cot_type="a-f-G-E-V"))
         else:
             det = _cot(_at(second), 25.0 * second, cot_type="a-f-G-E-V")
         results.append(fusion.hit(det)[1])
     assert results[-1].speed_mps > 20.0
     assert {r.threat_level for r in results} == {"friend"}
     assert {_cot_type(r) for r in results} == {"a-f-G"}
+
+
+def test_a_declaration_stands_only_near_where_it_was_made():
+    fusion = _Fusion()
+    assert fusion.hit(_cot(_at(0), 0.0))[1].threat_level == "friend"
+    # Only a sensor sees it from here, walking off slowly: the rule would say suspect.
+    threats = {}
+    for second in range(2, 40, 2):
+        threats[2.0 * second] = fusion.hit(_sapient(_at(second), 2.0 * second))[1].threat_level
+    # Its report's error is 5 m, so it covers the least radius, 50 m.
+    assert all(threats[m] == "friend" for m in threats if m <= 45)
+    assert all(threats[m] == "suspect" for m in threats if m >= 56)
+
+
+def test_a_fast_track_beyond_its_declarations_reach_is_judged_by_the_rule():
+    fusion = _Fusion()
+    fusion.hit(_cot(_at(0), 0.0))
+    # Sensor hits alone take the track away at 40 m/s.
+    threats = [fusion.hit(_sapient(_at(s), 40.0 * s))[1].threat_level for s in range(1, 6)]
+    assert threats == ["friend"] + ["hostile"] * 4
+    # The friend reports itself where the track now is: its declaration stands again.
+    assert fusion.hit(_cot(_at(6), 240.0))[1].threat_level == "friend"
+
+
+@pytest.mark.parametrize("speed", [25.0, 15.0])
+def test_a_fast_friend_keeps_its_mark_between_its_reports(speed):
+    fusion = _Fusion()
+    marks = []
+    for second in range(0, 60):
+        if second % 5 == 0:
+            fusion.hit(_cot(_at(second), speed * second, cot_type="a-f-G-E-V"))
+        moment = _at(second + 0.5)
+        marks.append(fusion.hit(_sapient(moment, speed * (second + 0.5)))[1].threat_level)
+    # Its first report gives no speed yet; from its second on it is carried along.
+    assert set(marks[5:]) == {"friend"}
+
+
+def test_a_standing_friend_lends_no_mark_to_a_drone_passing_by():
+    config.set_reference_origin(62.9, 29.8, 0.0)
+    tracker = SapientAsynchronousTracker()
+    augmentor = TacticalContextAugmentor()
+    marks = []
+    for second in range(0, 40):
+        if second % 5 == 0:
+            tracker.process_async_event(_at(second), {_cot(_at(second), 0.0)})
+        moment = _at(second + 0.5)
+        drone = _sapient(moment, -300.0 + 30.0 * (second + 0.5))
+        for track in tracker.process_async_event(moment, {drone}):
+            east = track.state.state_vector[0, 0]
+            marks.append((abs(east) > 60.0, augmentor.extract_tactical_track(track).threat_level))
+    assert any(far for far, _ in marks)
+    assert "friend" not in {threat for far, threat in marks if far}
 
 
 def test_a_hand_placed_marker_on_a_self_reporting_user_never_declares():
@@ -387,23 +441,28 @@ def test_a_hand_placed_marker_on_a_sensors_track_declares_nothing():
 
 
 @pytest.mark.parametrize(
-    ("first", "second", "standing"),
+    ("first", "second"),
     [
-        ("a-f-G", "a-n-G", "neutral"),
-        ("a-n-G", "a-f-G", "neutral"),
-        ("a-n-G", "a-s-G", "suspect"),
-        ("a-h-G", "a-s-G", "hostile"),
-        ("a-f-G", "a-h-G", "hostile"),
+        ("a-f-G", "a-n-G"),
+        ("a-n-G", "a-s-G"),
+        ("a-h-G", "a-s-G"),
+        ("a-f-G", "a-h-G"),
     ],
 )
-def test_the_most_severe_of_two_fresh_self_reports_stands(first, second, standing):
-    fusion = _Fusion()
-    threats = []
+def test_two_uids_reporting_themselves_at_one_place_keep_their_own_marks(first, second):
+    config.set_reference_origin(62.9, 29.8, 0.0)
+    tracker = SapientAsynchronousTracker()
+    augmentor = TacticalContextAugmentor()
+    marks = {}
     for i in range(6):
         uid, cot_type = ("ATAK-A", first) if i % 2 == 0 else ("ATAK-B", second)
-        _, result = fusion.hit(_cot(_at(5 * i), 0.0, uid=uid, cot_type=cot_type))
-        threats.append(result.threat_level)
-    assert threats[1:] == [standing] * 5
+        tracks = tracker.process_async_event(_at(5 * i), {_cot(_at(5 * i), 0.0, uid, cot_type)})
+        for track in tracks:
+            if tracker._object_tracks[("cot", uid)] == track.id:
+                threat = augmentor.extract_tactical_track(track).threat_level
+                marks.setdefault(uid, set()).add(threat)
+    assert len(tracker.tracks) == 2
+    assert marks == {"ATAK-A": {declared_threat(first)}, "ATAK-B": {declared_threat(second)}}
 
 
 def _published_marks(hits, start):
@@ -424,18 +483,18 @@ def _published_marks(hits, start):
 
 def test_a_rebuild_from_a_later_start_publishes_the_same_marks():
     config.set_reference_origin(62.9, 29.8, 0.0)
-    # A friend and a hostile both report themselves on one track, the friend first.
+    # A friend reporting itself, and a hostile seen only by another party's reports.
     hits = []
     for k in range(40):
         hits.append(_cot(_at(5.0 * k), 0.0, uid="BLUE-1", cot_type="a-f-G-U-C"))
-        hits.append(_cot(_at(5.0 * k + 2.5), 3.0, uid="RED-1", cot_type="a-h-G-U-C"))
+        hits.append(_cot(_at(5.0 * k + 2.5), 3.0, uid="RED-1", cot_type="a-h-G", how="m-r"))
     full = _published_marks(hits, 0.0)
     # A rebuild whose window starts on the hostile's report.
     rebuilt = _published_marks(hits, 102.5)
     # The two publish on different window phases, so compare what each draws from then on.
     from_full = {mark for s, mark in full.items() if s >= 112.5}
     from_rebuild = {mark for s, mark in rebuilt.items() if s >= 112.5}
-    assert from_rebuild == from_full == {("hostile", "a-h-G")}
+    assert from_rebuild == from_full == {("friend", "a-f-G")}
 
 
 def test_a_fast_friendly_user_reporting_only_itself_stays_friend():
@@ -456,6 +515,19 @@ def test_a_declaration_expires_sixty_seconds_after_its_last_report():
         threats[second] = fusion.hit(_sapient(_at(second), 0.0))[1].threat_level
     assert all(threats[s] == "friend" for s in threats if s <= 70)
     assert all(threats[s] == "suspect" for s in threats if s > 70)
+
+
+@pytest.mark.parametrize(("stale_after", "lasts"), [(240, 240), (30, 60), (3600, 600)])
+def test_a_declaration_lasts_until_its_events_stale_within_one_to_ten_minutes(stale_after, lasts):
+    fusion = _Fusion()
+    det = _cot(_at(0), 0.0)
+    det.metadata["stale"] = (_at(stale_after)).isoformat().replace("+00:00", "Z")
+    assert fusion.hit(det)[1].threat_level == "friend"
+    threats = {}
+    for second in range(20, 700, 20):
+        threats[second] = fusion.hit(_sapient(_at(second), 0.0))[1].threat_level
+    assert all(threats[s] == "friend" for s in threats if s <= lasts)
+    assert all(threats[s] == "suspect" for s in threats if s > lasts)
 
 
 def test_a_declared_hostile_is_held_after_the_declaration_ends():

@@ -7,8 +7,12 @@ import logging
 import time
 import uuid
 from collections import deque
+from collections.abc import Callable
+from datetime import datetime, timedelta
+from typing import NamedTuple
 
 import numpy as np
+from stonesoup.base import Property
 from stonesoup.dataassociator.neighbour import GNNWith2DAssignment
 from stonesoup.hypothesiser.distance import DistanceHypothesiser
 from stonesoup.measures import Mahalanobis
@@ -84,26 +88,64 @@ SWARM_COUNT_WINDOW_SECONDS = 60.0
 # Track metadata keys the tracker writes from its own per-hit bookkeeping, for the
 # augmentor's threat judgement. No detection carries them, so Stone Soup's merge of a
 # hit's metadata into the track never overwrites them.
-# DECLARATIONS_KEY holds a (CoT type, time of its latest report) pair per uid whose
-# self-reports the track takes; SENSOR_HIT_AT_KEY the time of its latest non-CoT hit.
-DECLARATIONS_KEY = "cot_declarations"
+# DECLARATION_KEY holds the (CoT type, fresh until, east, north, radius, made at, velocity
+# east, velocity north) of the latest self-report of the uid bound to the track, if one is:
+# where the report placed the track and how fast the track was going then. The declaration
+# stands while it is fresh and the track within `radius` metres of where that position,
+# carried on at that velocity, has got to. SENSOR_HIT_AT_KEY holds the time of the track's
+# latest non-CoT hit.
+DECLARATION_KEY = "cot_declaration"
 SENSOR_HIT_AT_KEY = "sensor_hit_at"
 
-# How long a CoT self-report's declared affiliation stands after its uid's latest report.
-DECLARATION_FRESH_SECONDS = 60.0
+# A self-report's declaration lasts until its event's own `stale`, but at least and at
+# most this long after its event time; an event without a readable `stale` gets the least.
+DECLARATION_MIN_SECONDS = 60.0
+DECLARATION_MAX_SECONDS = 600.0
+
+# A declaration speaks for its track only near where it was made: within this many of the
+# report's own horizontal errors (its CoT ce), and never less than DECLARATION_MIN_RADIUS_M.
+DECLARATION_RADIUS_ERRORS = 3.0
+DECLARATION_MIN_RADIUS_M = 50.0
+
+# The `how` of an emplaced sensor reporting its surveyed position. Its track is held still:
+# no velocity, and process noise small enough that its gate stays the size of its error
+# for as long as the track lives, so another object passing cannot take it over.
+STILL_HOW = "m-i"
+STILL_PROCESS_NOISE = 1e-10
+STILL_VELOCITY_VARIANCE = 1e-6
+STILL_ACCELERATION_VARIANCE = 1e-8
 
 # The CoT `how` of an object reporting its own position: from its GPS (`m-g`), fused from
-# its own sensors (`m-f`), or entered by its user without a fix (`h-e`, as ATAK reports
-# itself on losing GPS). How values refine by dash (`m-g-l`), so a refinement counts too.
-# A relayed (`m-r`), predicted (`m-p`), simulated (`m-s`) or hand-placed (`h-g-i-g-o`)
-# position is another party's report of the object and declares nothing.
-SELF_REPORT_HOWS = ("m-g", "m-f", "h-e")
+# its own sensors (`m-f`), surveyed, as an emplaced sensor reports itself (`m-i`), or
+# entered by its user without a fix (`h-e`, as ATAK reports itself on losing GPS). How
+# values refine by dash (`m-g-l`), so a refinement counts too. A relayed (`m-r`),
+# predicted (`m-p`), simulated (`m-s`) or hand-placed (`h-g-i-g-o`) position is another
+# party's report of the object and declares nothing.
+SELF_REPORT_HOWS = ("m-g", "m-f", "m-i", "h-e")
 
 
 def is_self_report(how) -> bool:
     """Whether a CoT `how` is that of an object reporting its own position."""
     how = how if isinstance(how, str) else ""
     return any(how == base or how.startswith(base + "-") for base in SELF_REPORT_HOWS)
+
+
+def declared_until(stale, event_time):
+    """Until when a self-report made at `event_time` declares, from its CoT `stale`.
+
+    `stale` is an ISO 8601 string or a datetime; it is clamped to between
+    DECLARATION_MIN_SECONDS and DECLARATION_MAX_SECONDS after `event_time`.
+    """
+    seconds = DECLARATION_MIN_SECONDS
+    try:
+        if isinstance(stale, str):
+            stale = datetime.fromisoformat(stale.strip().replace("Z", "+00:00"))
+        if isinstance(stale, datetime):
+            seconds = (stale - event_time).total_seconds()
+    except (TypeError, ValueError):
+        pass  # Unreadable, or naive against aware: the least.
+    seconds = min(max(seconds, DECLARATION_MIN_SECONDS), DECLARATION_MAX_SECONDS)
+    return event_time + timedelta(seconds=seconds)
 
 
 # Validation gate, in Mahalanobis distance (i.e. standard deviations of the
@@ -143,6 +185,9 @@ OBJECT_ID_GATE_MAHALANOBIS_DISTANCE = 3 * GATE_MAHALANOBIS_DISTANCE
 # of six swarms went unshown for 7 to 16 minutes. The cost is noisy sensors: with
 # 300 random false reports in two minutes, 3 reports let through 65-74 ghost
 # tracks, 5 reports in 60 s only 6-7.
+#
+# A CoT object reporting its own position (see is_self_report) is no stray report: its
+# track is confirmed by its first self-report, whatever the setting.
 DEFAULT_CONFIRM_HITS = 3
 CONFIRM_WINDOW_SECONDS = 30.0
 
@@ -186,6 +231,51 @@ def _object_key(detection):
     return metadata.get("nodeId"), object_id
 
 
+def _self_report_key(detection):
+    """The object key of a CoT self-report with a stable uid, else None."""
+    metadata = detection.metadata or {}
+    if metadata.get("type") != "CoT" or not is_self_report(metadata.get("how")):
+        return None
+    return _object_key(detection)
+
+
+def _is_still_report(detection) -> bool:
+    """Whether a detection is a self-report of an emplaced sensor's surveyed position."""
+    how = (detection.metadata or {}).get("how")
+    return (
+        _self_report_key(detection) is not None
+        and isinstance(how, str)
+        and (how == STILL_HOW or how.startswith(STILL_HOW + "-"))
+    )
+
+
+class _Declaration(NamedTuple):
+    """The latest self-report of the uid bound to a track."""
+
+    key: tuple
+    cot_type: str | None
+    until: datetime
+    east: float
+    north: float
+    radius: float
+    still: bool
+    # When the report was made, and when the uid's first self-report on this track was.
+    at: datetime
+    since: datetime
+
+
+def _hold_still(state) -> None:
+    """Sets a 9D state's velocity and acceleration to zero, known to near certainty."""
+    for index in (1, 2, 4, 5, 7, 8):
+        state.state_vector[index, 0] = 0.0
+        state.covar[index, :] = 0.0
+        state.covar[:, index] = 0.0
+        acceleration = index in (2, 5, 8)
+        state.covar[index, index] = (
+            STILL_ACCELERATION_VARIANCE if acceleration else STILL_VELOCITY_VARIANCE
+        )
+
+
 def _position_sigma(state):
     """Worst-axis 1-sigma position uncertainty of a 9D state, in metres.
 
@@ -216,6 +306,20 @@ class _LinearWhereLinearUpdater(UnscentedKalmanUpdater):
                 self, predicted_state, model, measurement_noise, **kwargs
             )
         return super().predict_measurement(predicted_state, model, measurement_noise, **kwargs)
+
+
+class _ExcludingHypothesiser(DistanceHypothesiser):
+    """A DistanceHypothesiser that leaves out the detections `excludes(track, det)` names.
+
+    A left-out detection gets no hypothesis on that track, so the assignment cannot give
+    it that track and it goes to another one or starts its own.
+    """
+
+    excludes: Callable = Property(doc="(track, detection) -> whether the track may not take it.")
+
+    def hypothesise(self, track, detections, timestamp, **kwargs):
+        detections = {det for det in detections if not self.excludes(track, det)}
+        return super().hypothesise(track, detections, timestamp, **kwargs)
 
 
 class _ConstantAccelerationPredictor(KalmanPredictor):
@@ -267,6 +371,22 @@ class _ConstantAccelerationPredictor(KalmanPredictor):
             transition_model=self.transition_model,
             prior=prior,
         )
+
+
+class _TrackwisePredictor(_ConstantAccelerationPredictor):
+    """Predicts a track `is_still(track)` names with `still`, anything else as usual.
+
+    Both are set once built. Only a Track, as association and coasting pass it, is told
+    apart; a bare state is predicted as usual.
+    """
+
+    still = None
+    is_still = None
+
+    def predict(self, prior, *args, **kwargs):
+        if isinstance(prior, Track) and self.is_still is not None and self.is_still(prior):
+            return self.still.predict(prior, *args, **kwargs)
+        return super().predict(prior, *args, **kwargs)
 
 
 class SapientAsynchronousTracker:
@@ -337,7 +457,15 @@ class SapientAsynchronousTracker:
         # sigma points, and it was the largest single cost of association -- every
         # event predicts every live track. The update stays unscented, since a
         # sensor's measurement model need not be linear.
-        self.predictor = _ConstantAccelerationPredictor(self.transition_model)
+        # A track an emplaced sensor's self-report holds still is predicted with almost no
+        # process noise; see STILL_HOW.
+        self._still_model = create_9d_constant_acceleration_model(
+            q_process_noise=STILL_PROCESS_NOISE
+        )
+        self._still_noise = [model.noise_diff_coeff for model in self._still_model.model_list]
+        self.predictor = _TrackwisePredictor(self.transition_model)
+        self.predictor.still = _ConstantAccelerationPredictor(self._still_model)
+        self.predictor.is_still = self._is_still
         self.updater = _LinearWhereLinearUpdater(
             measurement_model=None
         )  # Assigned dynamically via Detections
@@ -370,11 +498,15 @@ class SapientAsynchronousTracker:
         # probabilistic associator. Object count and position stay usable and
         # per-object identity does not, so treat a track id inside a swarm as
         # provisional.
-        self.hypothesiser = DistanceHypothesiser(
+        #
+        # Two uids reporting their own positions are two objects, however close, so a
+        # track bound to one never takes the other's self-report; see _excluded.
+        self.hypothesiser = _ExcludingHypothesiser(
             predictor=self.predictor,
             updater=self.updater,
             measure=Mahalanobis(),
             missed_distance=GATE_MAHALANOBIS_DISTANCE,
+            excludes=self._excluded,
         )
         self.data_associator = GNNWith2DAssignment(self.hypothesiser)
 
@@ -394,9 +526,9 @@ class SapientAsynchronousTracker:
         self._object_tracks = {}
         # Track id -> (timestamp, swarm count) its detections gave within the window.
         self._swarm_counts: dict[str, deque] = {}
-        # Track id -> {object key: (CoT type, time of its latest report)} of the CoT
-        # self-reports the track took; see _note_threat_evidence.
-        self._declarations: dict[str, dict] = {}
+        # Track id -> (object key, CoT type, fresh until) of the one self-reporting uid
+        # bound to the track and its latest self-report; see _note_threat_evidence.
+        self._declarations: dict[str, tuple] = {}
         self._refused_tracks = 0
         self._next_track_limit_report = 0.0
         self._shed_detections = 0
@@ -418,6 +550,7 @@ class SapientAsynchronousTracker:
         # that rule: a tentative track still gets this event's detection before it is
         # judged unconfirmed, as before.
         self._drop_coasted_out(timestamp)
+        self._release_expired(timestamp)
 
         # If no tracks exist yet, bootstrap the tracking engine using current observations
         if not self.tracks:
@@ -445,7 +578,7 @@ class SapientAsynchronousTracker:
                 self.data_associator.associate(reachable, remaining_detections, timestamp)
             )
         for track in remaining_tracks - reachable:
-            track.append(self.predictor.predict(track.state, timestamp=timestamp))
+            track.append(self.predictor.predict(track, timestamp=timestamp))
 
         associated_detections = set()
 
@@ -456,7 +589,7 @@ class SapientAsynchronousTracker:
             # updated from the same hit.
             if not joint_hypothesis:
                 # Track fell outside validation gates; coast forward using kinematics prediction
-                prediction = self.predictor.predict(track.state, timestamp=timestamp)
+                prediction = self.predictor.predict(track, timestamp=timestamp)
                 track.append(prediction)
             else:
                 # High-Fidelity Step: Extract the measurement model embedded inside the SAPIENT detection
@@ -473,6 +606,8 @@ class SapientAsynchronousTracker:
                     update_context["sensor_geodetic"] = det.metadata["sensor_geodetic"]
 
                 updated_state = self.updater.update(joint_hypothesis, **update_context)
+                if _is_still_report(det):
+                    _hold_still(updated_state)
                 track.append(updated_state)
                 self._last_update_time[track.id] = timestamp
                 self._hold_swarm_count(track, det, timestamp)
@@ -512,6 +647,7 @@ class SapientAsynchronousTracker:
         state = track.state
         sv = state.state_vector.ravel().tolist()
         covar = state.covar.tolist()
+        axis_noise = self._still_noise if self._is_still(track) else self._axis_noise
         limit = GATE_MAHALANOBIS_DISTANCE**2 * (1.0 + 1e-6)
         for det in detections:
             model = getattr(det, "measurement_model", None)
@@ -525,21 +661,22 @@ class SapientAsynchronousTracker:
             noise = model.noise_covar
             miss = spread = 0.0
             for row, index in enumerate(mapping):
-                position, variance = self._predicted_axis(sv, covar, index, dt)
+                position, variance = self._predicted_axis(sv, covar, index, dt, axis_noise)
                 miss += (measured[row] - position) ** 2
                 spread += variance + float(noise[row, row])
             if miss <= limit * spread:
                 return True
         return False
 
-    def _predicted_axis(self, sv, covar, index, dt):
+    @staticmethod
+    def _predicted_axis(sv, covar, index, dt, axis_noise):
         """Predicted position and its variance on one axis, `dt` seconds on."""
         h = (1.0, dt, 0.5 * dt * dt)
         position = sv[index] + sv[index + 1] * dt + sv[index + 2] * h[2]
         variance = sum(
             h[i] * h[j] * covar[index + i][index + j] for i in range(3) for j in range(3)
         )
-        variance += self._axis_noise[index // 3] * dt**5 / 20.0
+        variance += axis_noise[index // 3] * dt**5 / 20.0
         return position, variance
 
     def confirmed_tracks(self):
@@ -547,12 +684,16 @@ class SapientAsynchronousTracker:
         return {track for track in self.tracks if track.id not in self._tentative}
 
     def _count_confirmation_hit(self, track):
-        """Counts a detection towards a tentative track's confirmation."""
+        """Counts a detection towards a tentative track's confirmation.
+
+        A track that took a self-report, and so is bound to a self-reporting uid, is
+        confirmed at once.
+        """
         pending = self._tentative.get(track.id)
         if pending is None:
             return
         pending[0] += 1
-        if pending[0] >= self.confirm_hits:
+        if pending[0] >= self.confirm_hits or track.id in self._declarations:
             del self._tentative[track.id]
 
     def _associate_by_object_id(self, detection_group):
@@ -572,7 +713,7 @@ class SapientAsynchronousTracker:
             if key is None:
                 continue
             track = tracks_by_id.get(self._object_tracks.get(key))
-            if track is None or track in bound:
+            if track is None or track in bound or self._excluded(track, det):
                 continue
             prediction = self.predictor.predict(track, timestamp=det.timestamp)
             measurement_prediction = self.updater.predict_measurement(
@@ -589,51 +730,149 @@ class SapientAsynchronousTracker:
     def _bind_object_id(self, detection, track):
         """Remembers which track a stable objectId was fused into.
 
-        An object moving to another track takes its declaration with it: the track it
-        left is no longer bound to it, so its self-reports no longer speak for that track.
+        Only a self-report moves a self-reporting uid: another party's report of it, such
+        as a relay, updates whichever track it went to and leaves the uid bound where it is.
+        An object moving to another track takes its declaration with it: the track it left
+        is no longer bound to it, so it no longer speaks for that track, and the track may
+        take another uid's self-reports.
         """
         key = _object_key(detection)
         if key is None:
             return
         previous = self._object_tracks.get(key)
-        self._object_tracks[key] = track.id
         if previous is None or previous == track.id:
+            self._object_tracks[key] = track.id
             return
-        declarations = self._declarations.get(previous)
-        if declarations is None or declarations.pop(key, None) is None:
-            return
-        if not declarations:
-            del self._declarations[previous]
+        declared = self._declarations.get(previous)
+        if declared is not None and declared.key == key:
+            if _self_report_key(detection) is None:
+                return
+            self._undeclare(previous)
+        self._object_tracks[key] = track.id
+
+    def _undeclare(self, track_id) -> None:
+        """Forget the declaration of the uid bound to a track, if the track is still live."""
+        del self._declarations[track_id]
         for live in self.tracks:
-            if live.id == previous:
-                live.metadata[DECLARATIONS_KEY] = tuple(declarations.values())
+            if live.id == track_id:
+                live.metadata.pop(DECLARATION_KEY, None)
+
+    def _excluded(self, track, detection) -> bool:
+        """Whether the track is bound to a self-reporting uid other than the detection's.
+
+        Only a self-report is kept off such a track: a sensor's detection, or a CoT event
+        that is another party's report of an object, may still go to it.
+        """
+        declared = self._declarations.get(track.id)
+        if declared is None:
+            return False
+        key = _self_report_key(detection)
+        return key is not None and key != declared.key
+
+    def _is_still(self, track) -> bool:
+        """Whether the track is held still by its uid's latest self-report; see STILL_HOW."""
+        declared = self._declarations.get(track.id)
+        return declared is not None and declared.still
 
     def _note_threat_evidence(self, track, detection, timestamp) -> None:
         """Record what a hit tells the threat judgement: a declaration or a sensor's sighting.
 
         A hit from anything but CoT is a sensor's sighting. A CoT hit is a declaration only
         as a self-report (see is_self_report) from an event with a stable uid, the uid it is
-        bound to by this hit; a marker someone placed on the object declares nothing. Each
-        uid's latest self-report is kept, those older than DECLARATION_FRESH_SECONDS
-        dropped, so the augmentor can weigh every fresh one alike whatever order they came
-        in. The results are written to the track's metadata under the tracker's own keys.
+        bound to by this hit; a marker someone placed on the object declares nothing. The
+        uid's latest self-report is kept with how long it stands (see declared_until) and
+        where it was made, give or take DECLARATION_RADIUS_ERRORS of its own error, with
+        the track's velocity after it, and written to the track's metadata under the
+        tracker's own key.
         """
         metadata = detection.metadata or {}
         if metadata.get("type") != "CoT":
             track.metadata[SENSOR_HIT_AT_KEY] = timestamp
             return
-        key = _object_key(detection)
-        if key is None or not is_self_report(metadata.get("how")):
+        key = _self_report_key(detection)
+        if key is None:
             return
-        declarations = self._declarations.setdefault(track.id, {})
-        declarations[key] = (metadata.get("cot_type"), timestamp)
-        for stale in [
-            other
-            for other, (_, at) in declarations.items()
-            if (timestamp - at).total_seconds() > DECLARATION_FRESH_SECONDS
-        ]:
-            del declarations[stale]
-        track.metadata[DECLARATIONS_KEY] = tuple(declarations.values())
+        cot_type = metadata.get("cot_type")
+        until = declared_until(metadata.get("stale"), timestamp)
+        noise = detection.measurement_model.noise_covar
+        error = float(np.sqrt(max(noise[0, 0], noise[1, 1])))
+        radius = max(DECLARATION_RADIUS_ERRORS * error, DECLARATION_MIN_RADIUS_M)
+        east, north = float(detection.state_vector[0, 0]), float(detection.state_vector[1, 0])
+        previous = self._declarations.get(track.id)
+        since = previous.since if previous is not None and previous.key == key else timestamp
+        self._declarations[track.id] = _Declaration(
+            key,
+            cot_type,
+            until,
+            east,
+            north,
+            radius,
+            _is_still_report(detection),
+            timestamp,
+            since,
+        )
+        velocity = track.state.state_vector
+        track.metadata[DECLARATION_KEY] = (
+            cot_type,
+            until,
+            east,
+            north,
+            radius,
+            timestamp,
+            float(velocity[1, 0]),
+            float(velocity[4, 0]),
+        )
+
+    def _release_expired(self, timestamp) -> None:
+        """Release each uid whose declaration has gone stale from the track it is bound to.
+
+        The track stays, judged by the rule, unless the track of another uid that began
+        reporting itself after this uid's last self-report lies inside its gate: then it is
+        that object, seen again under a new uid, and is dropped, so what sensors see of it
+        goes to the uid that still reports. Another uid reporting all along beside it, a
+        vehicle in the same convoy, is another object and leaves the track be.
+        """
+        expired = [
+            track_id
+            for track_id, declared in self._declarations.items()
+            if timestamp > declared.until
+        ]
+        if not expired:
+            return
+        tracks_by_id = {track.id: track for track in self.tracks}
+        released = []
+        for track_id in expired:
+            declared = self._declarations[track_id]
+            self._undeclare(track_id)
+            if self._object_tracks.get(declared.key) == track_id:
+                del self._object_tracks[declared.key]
+            if track_id in tracks_by_id:
+                released.append((tracks_by_id[track_id], declared.at))
+        reporting = [
+            (tracks_by_id[track_id], declared.since)
+            for track_id, declared in self._declarations.items()
+            if track_id in tracks_by_id
+        ]
+        gone = {
+            track
+            for track, last in released
+            if any(
+                since > last and self._gates(track, other, timestamp) for other, since in reporting
+            )
+        }
+        if gone:
+            self._forget(gone)
+
+    def _gates(self, track, other, timestamp) -> bool:
+        """Whether `other`'s position falls inside `track`'s validation gate at `timestamp`."""
+        mine = self.predictor.predict(track, timestamp=timestamp)
+        theirs = self.predictor.predict(other, timestamp=timestamp)
+        axes = [0, 3, 6]
+        miss = np.asarray(mine.state_vector, dtype=float)[axes, 0]
+        miss = miss - np.asarray(theirs.state_vector, dtype=float)[axes, 0]
+        spread = np.asarray(mine.covar, dtype=float)[np.ix_(axes, axes)]
+        spread = spread + np.asarray(theirs.covar, dtype=float)[np.ix_(axes, axes)]
+        return float(miss @ np.linalg.solve(spread, miss)) <= GATE_MAHALANOBIS_DISTANCE**2
 
     def _limit_detections(self, detection_group):
         """Caps how many detections one event is associated with.
@@ -695,6 +934,8 @@ class SapientAsynchronousTracker:
         )
 
         prior = GaussianState(state_vector=state_vector, covar=covar, timestamp=detection.timestamp)
+        if _is_still_report(detection):
+            _hold_still(prior)
         # Seed the track's metadata from the hit that spawned it: Stone Soup only
         # accumulates metadata from Updates, so without this the track is
         # unclassified until its second detection.
@@ -704,7 +945,7 @@ class SapientAsynchronousTracker:
         self._last_update_time[track.id] = detection.timestamp
         self._hold_swarm_count(track, detection, detection.timestamp)
         self._note_threat_evidence(track, detection, detection.timestamp)
-        if self.confirm_hits > 1:
+        if self.confirm_hits > 1 and track.id not in self._declarations:
             self._tentative[track.id] = [1, detection.timestamp]
         self._bind_object_id(detection, track)
 
@@ -830,8 +1071,11 @@ class SapientAsynchronousTracker:
             ).total_seconds()
             > self.max_coast_seconds
         }
-        if not gone:
-            return
+        if gone:
+            self._forget(gone)
+
+    def _forget(self, gone) -> None:
+        """Drop these tracks and everything kept of them."""
         self.tracks -= gone
         ids = {track.id for track in gone}
         books = (

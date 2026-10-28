@@ -162,6 +162,8 @@ class CotRecordReader:
             "cot_type": record.get("type"),
             # How the position was made; a self-report declares the object's affiliation.
             "how": record.get("how"),
+            # Until when the event holds; how long a self-report's declaration stands.
+            "stale": record.get("stale"),
             "sensor_geodetic": None,
             **record.get("_lineage", {}),
         }

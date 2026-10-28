@@ -391,8 +391,8 @@ def fusion_main():
         default=DEFAULT_CONFIRM_HITS,
         help=f"Detections a new track needs within {CONFIRM_WINDOW_SECONDS:g} s before it is "
         f"confirmed and published (default: {DEFAULT_CONFIRM_HITS}). A track that does not "
-        "confirm in time is dropped, so a single stray report never becomes a track. 1 turns "
-        "confirmation off.",
+        "confirm in time is dropped, so a single stray report never becomes a track. A CoT "
+        "object reporting its own position confirms its track at once. 1 turns confirmation off.",
     )
     parser.add_argument(
         "--keycloak-token-url",
