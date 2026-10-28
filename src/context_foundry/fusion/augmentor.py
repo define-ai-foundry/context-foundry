@@ -26,7 +26,7 @@ DECLARED_THREAT = {
     "f": "friend",
     "a": "friend",
     "h": "hostile",
-    "j": "hostile",
+    "j": "suspect",
     "k": "hostile",
     "s": "suspect",
     "n": "neutral",

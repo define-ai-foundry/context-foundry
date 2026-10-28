@@ -292,7 +292,7 @@ def test_a_hostile_declared_cot_track_stays_hostile_when_slow(augmentor):
         ("a-f-G", "friend"),
         ("a-a-G", "friend"),
         ("a-h-G", "hostile"),
-        ("a-j-G", "hostile"),
+        ("a-j-G", "suspect"),
         ("a-k-G", "hostile"),
         ("a-s-G", "suspect"),
         ("a-n-G", "neutral"),
