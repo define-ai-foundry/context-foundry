@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+import re
 from datetime import timedelta
 
 from . import config
@@ -15,6 +16,27 @@ WGS84_E2 = 0.00669437999014
 # one whose swarm count briefly reads small, would otherwise flip its affiliation between
 # hostile and suspect from one update to the next.
 HOSTILE_HOLD_SECONDS = 60.0
+
+# The affiliation letter of a CoT atom type, `a-<letter>-...`.
+COT_AFFILIATION = re.compile(r"^a-([a-z])-")
+
+# A CoT sender's declared affiliation as a threat level. Unknown, pending, assumed
+# none and exercise-unknown are not a declaration and leave the threat to the rule.
+DECLARED_THREAT = {
+    "f": "friend",
+    "a": "friend",
+    "h": "hostile",
+    "j": "hostile",
+    "k": "hostile",
+    "s": "suspect",
+    "n": "neutral",
+}
+
+
+def declared_threat(cot_type) -> str | None:
+    """The threat level a CoT type's affiliation letter declares, or None when it declares none."""
+    match = COT_AFFILIATION.match(cot_type) if isinstance(cot_type, str) else None
+    return DECLARED_THREAT.get(match.group(1)) if match else None
 
 
 class TacticalContextAugmentor:
@@ -93,10 +115,14 @@ class TacticalContextAugmentor:
                 class_confidences = []
         swarm_count = metadata.get("swarm_count", 1)
 
-        # Core Rules Engine: Threat Assessment Logic
-        is_fast = speed_m_s > 20.0
-        is_swarm = swarm_count > 3
-        threat_level = self._held_threat(track.id, state.timestamp, is_fast or is_swarm)
+        # A CoT sender's declared affiliation wins over the rule and ends any hostile hold.
+        threat_level = declared_threat(metadata.get("cot_type"))
+        if threat_level is not None:
+            self._hostile_until.pop(track.id, None)
+        else:
+            is_fast = speed_m_s > 20.0
+            is_swarm = swarm_count > 3
+            threat_level = self._held_threat(track.id, state.timestamp, is_fast or is_swarm)
 
         # Return the universal state object for the serializers to consume
         return TacticalTrack(

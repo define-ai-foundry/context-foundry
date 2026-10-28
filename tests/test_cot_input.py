@@ -14,6 +14,7 @@ from context_foundry.fusion.cot_input import (
     known,
     point_accuracy,
     remarks_node,
+    skip_reason,
 )
 from context_foundry.fusion.measurement import UNKNOWN_SENSOR_GEOMETRIC_ERROR
 
@@ -91,6 +92,37 @@ def test_fusions_own_events_are_skipped():
     assert reader.detection(own) is None
     assert reader.own_records_skipped == 1
     assert reader.detection(_uav()) is not None
+
+
+@pytest.mark.parametrize("cot_type", ["b-m-p-s-m", "t-x-c", "u-d-f", "", None, "A-f-G"])
+def test_an_event_that_is_not_an_object_makes_no_detection(cot_type):
+    reader = CotRecordReader(own_node_id="fusion-node")
+    marker = _uav(type=cot_type)
+    assert skip_reason(marker) == "not_object"
+    assert reader.detection(marker) is None
+    assert reader.not_objects_skipped == 1
+    assert reader.renderings_skipped == 0
+    assert reader.records_rejected == 0
+
+
+def test_a_record_without_a_type_is_not_an_object():
+    marker = _uav()
+    del marker["type"]
+    assert skip_reason(marker) == "not_object"
+
+
+def test_skip_reason_names_renderings_whatever_their_type():
+    rendering = {"_text": "node=RAD-7 class=UAV"}
+    assert skip_reason(_uav(detail={"remarks": rendering})) == "rendering"
+    assert skip_reason(_uav(type="b-m-p-s-m", detail={"remarks": rendering})) == "rendering"
+    own = {"_text": "node=fusion-node class=UAV"}
+    assert skip_reason(_uav(detail={"remarks": own})) == "rendering"
+
+
+def test_skip_reason_is_none_for_an_object():
+    assert skip_reason(_uav()) is None
+    # Unusable but an object: the reader rejects it, it is not skipped.
+    assert skip_reason(_uav(point=None)) is None
 
 
 @pytest.mark.parametrize(

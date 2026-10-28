@@ -99,6 +99,9 @@ class CotNetworkStream(SapientSource):
 
         if clean_det is None:
             return []  # Drop invalid CoT
+        # A map marker, tasking or other event that is not an object makes no detection.
+        if not str(clean_det.classification or "").startswith("a-"):
+            return []
 
         # 2. Translate to Stone Soup Detection. A point without a height is
         # projected at 0 m but measured in east and north only.

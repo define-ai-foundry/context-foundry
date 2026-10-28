@@ -259,3 +259,109 @@ def test_a_hostile_track_stays_hostile_within_the_hold(augmentor):
     # Another track's judgement is its own.
     other = _make_track(slow, soon, meta, track_id="track-2")
     assert augmentor.extract_tactical_track(other).threat_level == "suspect"
+
+
+# --- declared affiliation ------------------------------------------------------
+
+
+def _moving(speed_east):
+    vec = np.zeros((9, 1))
+    vec[1, 0] = speed_east
+    return vec
+
+
+def test_a_friendly_cot_track_stays_friend_when_fast(augmentor):
+    config.set_reference_origin(62.9, 29.8, 0.0)
+    ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    meta = {"cot_type": "a-f-A-M-F-Q", "swarm_count": 5}
+    result = augmentor.extract_tactical_track(_make_track(_moving(40.0), ts, meta))
+    assert result.threat_level == "friend"
+
+
+def test_a_hostile_declared_cot_track_stays_hostile_when_slow(augmentor):
+    config.set_reference_origin(62.9, 29.8, 0.0)
+    ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    meta = {"cot_type": "a-h-G"}
+    result = augmentor.extract_tactical_track(_make_track(_moving(1.0), ts, meta))
+    assert result.threat_level == "hostile"
+
+
+@pytest.mark.parametrize(
+    ("cot_type", "threat"),
+    [
+        ("a-f-G", "friend"),
+        ("a-a-G", "friend"),
+        ("a-h-G", "hostile"),
+        ("a-j-G", "hostile"),
+        ("a-k-G", "hostile"),
+        ("a-s-G", "suspect"),
+        ("a-n-G", "neutral"),
+    ],
+)
+def test_each_declared_affiliation_maps_to_its_threat(augmentor, cot_type, threat):
+    config.set_reference_origin(62.9, 29.8, 0.0)
+    ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    track = _make_track(_moving(40.0), ts, {"cot_type": cot_type})
+    assert augmentor.extract_tactical_track(track).threat_level == threat
+
+
+def test_declared_threat_reads_only_a_cot_atom_types_affiliation():
+    from context_foundry.fusion.augmentor import declared_threat
+
+    assert declared_threat("a-f-G-U-C") == "friend"
+    assert declared_threat("a-F-G") is None
+    assert declared_threat("b-f-G") is None
+    assert declared_threat(None) is None
+    assert declared_threat(7) is None
+
+
+@pytest.mark.parametrize("cot_type", ["a-u-A", "a-p-A", "a-o-A", "a-x-A", "a-f", "b-m-p-s-m"])
+def test_an_undeclared_affiliation_keeps_the_rule_and_its_hold(augmentor, cot_type):
+    from datetime import timedelta
+
+    config.set_reference_origin(62.9, 29.8, 0.0)
+    ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    meta = {"cot_type": cot_type}
+    fast = augmentor.extract_tactical_track(_make_track(_moving(25.0), ts, meta))
+    assert fast.threat_level == "hostile"
+    soon = ts + timedelta(seconds=10)
+    slow = augmentor.extract_tactical_track(_make_track(_moving(1.0), soon, meta))
+    assert slow.threat_level == "hostile"
+
+
+def test_a_sapient_only_track_keeps_the_rule_and_its_hold(augmentor):
+    from datetime import timedelta
+
+    config.set_reference_origin(62.9, 29.8, 0.0)
+    ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    meta = {"classification": "UAS", "swarm_count": 1}
+    assert augmentor.extract_tactical_track(_make_track(_moving(1.0), ts, meta)).threat_level == (
+        "suspect"
+    )
+    swarm = {"classification": "UAS", "swarm_count": 4}
+    assert augmentor.extract_tactical_track(_make_track(_moving(1.0), ts, swarm)).threat_level == (
+        "hostile"
+    )
+    soon = ts + timedelta(seconds=10)
+    assert augmentor.extract_tactical_track(_make_track(_moving(1.0), soon, meta)).threat_level == (
+        "hostile"
+    )
+
+
+def test_a_declared_affiliation_clears_the_hostile_hold(augmentor):
+    from datetime import timedelta
+
+    config.set_reference_origin(62.9, 29.8, 0.0)
+    ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    undeclared = {"cot_type": "a-u-A"}
+    fast = augmentor.extract_tactical_track(_make_track(_moving(25.0), ts, undeclared))
+    assert fast.threat_level == "hostile"
+    # The sender declares it friendly: the hold no longer applies...
+    soon = ts + timedelta(seconds=5)
+    friendly = {"cot_type": "a-f-A"}
+    declared = augmentor.extract_tactical_track(_make_track(_moving(1.0), soon, friendly))
+    assert declared.threat_level == "friend"
+    # ...nor comes back when the declaration is gone, within what would have been the hold.
+    later = ts + timedelta(seconds=10)
+    after = augmentor.extract_tactical_track(_make_track(_moving(1.0), later, undeclared))
+    assert after.threat_level == "suspect"
