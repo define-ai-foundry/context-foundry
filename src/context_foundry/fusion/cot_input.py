@@ -23,6 +23,10 @@ confirming tracks too fast and making their accuracy look better than it is, and
 report's marker would be fused as an object standing at the sensor. Fusion's own tracks
 routed back through sapient-to-cot are skipped the same way. Only the first word is read:
 `node=` later in a remark is an emitter's own text, such as ATAK's.
+
+An event whose type does not begin `a-` is not an object -- a map marker (`b-*`), a
+tasking (`t-*`) and the like -- and makes no detection either. `skip_reason` names why
+a record is skipped, so a caller can count each kind on its own.
 """
 
 import logging
@@ -74,6 +78,20 @@ def remarks_node(record: dict) -> str | None:
     return None
 
 
+def skip_reason(record: dict) -> str | None:
+    """Why fusion makes no detection of a cot-raw record: "rendering", "not_object", or None.
+
+    "rendering" for sapient-to-cot's rendering of a SAPIENT report, fusion's own included;
+    "not_object" for an event whose type does not begin `a-`; None for any other record,
+    which may still be rejected as unusable.
+    """
+    if remarks_node(record) is not None:
+        return "rendering"
+    if not str(record.get("type") or "").startswith("a-"):
+        return "not_object"
+    return None
+
+
 class CotRecordReader:
     """Turns cot-raw records into (timestamp, sensor id, Detection), one at a time.
 
@@ -86,19 +104,25 @@ class CotRecordReader:
         self.own_records_skipped = 0
         # sapient-to-cot renderings of SAPIENT reports, which fusion reads as SAPIENT.
         self.renderings_skipped = 0
+        # Events whose type is not an object's, such as map markers.
+        self.not_objects_skipped = 0
 
     def detection(self, record: dict):
         """(timestamp, sensor id, Detection) of a located cot-raw event, or None.
 
-        None for a rendering of a SAPIENT report, fusion's own included, and for an event
-        fusion cannot use: no uid, no time, or no point with a latitude and longitude.
+        None for a rendering of a SAPIENT report, fusion's own included, for an event that
+        is not an object, and for an event fusion cannot use: no uid, no time, or no point
+        with a latitude and longitude.
         """
-        node = remarks_node(record)
-        if node is not None:
-            if node == self.own_node_id:
+        reason = skip_reason(record)
+        if reason == "rendering":
+            if remarks_node(record) == self.own_node_id:
                 self.own_records_skipped += 1
             else:
                 self.renderings_skipped += 1
+            return None
+        if reason == "not_object":
+            self.not_objects_skipped += 1
             return None
         try:
             uid = str(record["uid"])

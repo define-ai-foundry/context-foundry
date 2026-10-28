@@ -22,9 +22,9 @@ SENDER_1 = ("10.0.0.1", 4242)
 SENDER_2 = ("10.0.0.2", 4242)
 
 
-def _cot_xml(uid="COT-SENSOR-1", time=TIME_A, hae='hae="100.0" '):
+def _cot_xml(uid="COT-SENSOR-1", time=TIME_A, hae='hae="100.0" ', cot_type="a-f-A-M-F"):
     return (
-        f'<event version="2.0" uid="{uid}" type="a-f-A-M-F" '
+        f'<event version="2.0" uid="{uid}" type="{cot_type}" '
         f'time="{time}" start="{time}" stale="2026-01-01T00:00:15.000Z" how="m-g">'
         f'<point lat="62.900000" lon="29.800000" {hae}ce="10.0" le="10.0"/>'
         f"</event>"
@@ -107,6 +107,16 @@ def test_iter_events_drops_schema_invalid_packet(monkeypatch):
     # Invalid packet is silently dropped; the next recvfrom is the sentinel.
     with pytest.raises(_Stop):
         next(gen)
+
+
+def test_iter_events_drops_an_event_that_is_not_an_object(monkeypatch):
+    marker = _cot_xml(cot_type="b-m-p-s-m")
+    stream = _make_stream(
+        monkeypatch, [(marker, SENDER_1), (VALID_COT_XML, SENDER_1), TimeoutError(), _Stop()]
+    )
+    gen = stream.iter_events()
+    _, detections = next(gen)
+    assert [d.metadata["cot_type"] for d in detections] == ["a-f-A-M-F"]
 
 
 def test_iter_events_generic_exception_is_caught_and_logged(monkeypatch, caplog):
