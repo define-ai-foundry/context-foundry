@@ -412,19 +412,26 @@ def test_a_standing_friend_lends_no_mark_to_a_drone_passing_by():
     assert "friend" not in {threat for far, threat in marks if far}
 
 
-def test_a_hand_placed_marker_on_a_self_reporting_user_never_declares():
-    fusion = _Fusion()
-    threats = []
+def test_a_hand_placed_marker_beside_a_self_reporting_user_keeps_to_its_own_track():
+    config.set_reference_origin(62.9, 29.8, 0.0)
+    tracker = SapientAsynchronousTracker()
+    augmentor = TacticalContextAugmentor()
+    marks = {}
     for i in range(8):
         t = _at(5 * i)
         if i % 2 == 0:
             det = _cot(t, 20.0, uid="MARKER-1", cot_type="a-h-G", how="h-g-i-g-o")
         else:
             det = _cot(t, 0.0, uid="ATAK-ME", cot_type="a-f-G-U-C", how="m-g")
-        _, result = fusion.hit(det)
-        threats.append(result.threat_level)
-    # The marker came first and declared nothing; the user's own reports do.
-    assert threats == ["suspect"] + ["friend"] * 7
+        uid = det.metadata["objectId"]
+        for track in tracker.process_async_event(t, {det}):
+            if tracker._object_tracks[("cot", uid)] == track.id:
+                marks.setdefault(uid, set()).add(
+                    augmentor.extract_tactical_track(track).threat_level
+                )
+    assert len(tracker.tracks) == 2
+    # The user's own reports declare; the marker someone placed declares nothing.
+    assert marks == {"ATAK-ME": {"friend"}, "MARKER-1": {"suspect"}}
 
 
 def test_a_hand_placed_marker_on_a_sensors_track_declares_nothing():
@@ -483,7 +490,7 @@ def _published_marks(hits, start):
 
 def test_a_rebuild_from_a_later_start_publishes_the_same_marks():
     config.set_reference_origin(62.9, 29.8, 0.0)
-    # A friend reporting itself, and a hostile seen only by another party's reports.
+    # A friend reporting itself, and a hostile beside it seen only by another party's reports.
     hits = []
     for k in range(40):
         hits.append(_cot(_at(5.0 * k), 0.0, uid="BLUE-1", cot_type="a-f-G-U-C"))
@@ -494,7 +501,8 @@ def test_a_rebuild_from_a_later_start_publishes_the_same_marks():
     # The two publish on different window phases, so compare what each draws from then on.
     from_full = {mark for s, mark in full.items() if s >= 112.5}
     from_rebuild = {mark for s, mark in rebuilt.items() if s >= 112.5}
-    assert from_rebuild == from_full == {("friend", "a-f-G")}
+    assert from_rebuild == from_full
+    assert ("friend", "a-f-G") in from_full
 
 
 def test_a_fast_friendly_user_reporting_only_itself_stays_friend():

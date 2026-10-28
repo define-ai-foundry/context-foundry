@@ -69,6 +69,12 @@ def point_accuracy(ce: float | None, le: float | None) -> dict:
     }
 
 
+def _reported_speed(record: dict):
+    """The speed the event's detail gives for its object, as written, or None."""
+    track = (record.get("detail") or {}).get("track")
+    return track.get("speed") if isinstance(track, dict) else None
+
+
 def remarks_node(record: dict) -> str | None:
     """The node_id the remarks begin with, `node=<node_id>` as sapient-to-cot writes it, or None."""
     remarks = ((record.get("detail") or {}).get("remarks") or {}).get("_text") or ""
@@ -164,6 +170,8 @@ class CotRecordReader:
             "how": record.get("how"),
             # Until when the event holds; how long a self-report's declaration stands.
             "stale": record.get("stale"),
+            # The sender's own speed, m/s; a self-report standing still holds its track so.
+            "speed": _reported_speed(record),
             "sensor_geodetic": None,
             **record.get("_lineage", {}),
         }

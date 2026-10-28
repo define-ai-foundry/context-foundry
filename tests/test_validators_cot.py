@@ -70,6 +70,7 @@ def test_normalize_extracts_internal_detection(validator):
         "original_xml": VALID_COT_XML,
         "how": "m-g",
         "stale": "2026-01-01T00:00:15.000Z",
+        "speed": None,
         "ce": 10.0,
         "le": 10.0,
     }
@@ -99,3 +100,9 @@ def test_normalize_treats_cot_unknown_values_as_absent(validator):
     assert det.altitude is None
     assert det.raw_metadata["ce"] is None
     assert det.raw_metadata["le"] is None
+
+
+def test_normalize_carries_the_senders_own_speed(validator):
+    detail = '<detail><track speed="0.4" course="10"/></detail></event>'
+    det = validator.normalize(VALID_COT_XML.replace("</event>", detail))
+    assert det.raw_metadata["speed"] == "0.4"
