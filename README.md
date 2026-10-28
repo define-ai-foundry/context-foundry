@@ -381,4 +381,8 @@ All of the above run automatically on GitHub Actions (`.github/workflows/ci.yml`
 
 
 
+### Releases
+
+This engine is not released on its own: its version stays `0.1.0` and nothing is published from here. [pipeline-stages](https://github.com/define-ai-foundry/pipeline-stages) consumes it as a commit tarball pinned in its `fusion` extra, so a change here reaches a deployed pipeline only through a pipeline-stages release; see its README.
+
 Copyright 2026 Lempea Edge Oy / DEFINE AI Foundry. SPDX-License-Identifier: Apache-2.0
