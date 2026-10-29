@@ -86,6 +86,10 @@ class TacticalContextAugmentor:
         self._hostile_until = {}
         # Track id -> until when a swarm overrules a declaration, from its last swarm count.
         self._swarm_until = {}
+        # Track ids whose hostile hold was last renewed while the track was already an
+        # animal (one faster than ANIMAL_MAX_SPEED_MPS): an animal ends only a hold from
+        # before it was one, or a speed jittering about that limit would flip its mark.
+        self._animal_holds = set()
 
     @staticmethod
     def _hold(holds: dict, track_id, timestamp) -> dict:
@@ -102,20 +106,38 @@ class TacticalContextAugmentor:
         until = holds.get(track_id)
         return until is not None and timestamp <= until
 
-    def _held_threat(self, track_id, timestamp, hostile_now: bool) -> str:
-        """The more severe of now's judgement and a hostile one within HOSTILE_HOLD_SECONDS."""
+    def _held_threat(self, track_id, timestamp, hostile_now: bool, animal_kind=False) -> str:
+        """The more severe of now's judgement and a hostile one within HOSTILE_HOLD_SECONDS.
+
+        A hold renewed while the track is an animal (`animal_kind`) is marked as such.
+        """
         if hostile_now:
             self._hostile_until = self._hold(self._hostile_until, track_id, timestamp)
+            if animal_kind:
+                self._animal_holds.add(track_id)
+            else:
+                self._animal_holds.discard(track_id)
+            self._animal_holds &= self._hostile_until.keys()
             return "hostile"
         return "hostile" if self._holding(self._hostile_until, track_id, timestamp) else "suspect"
 
     def _threat(
-        self, track_id, timestamp, metadata, position, is_fast: bool, is_swarm: bool, animal=False
+        self,
+        track_id,
+        timestamp,
+        metadata,
+        position,
+        is_fast: bool,
+        is_swarm: bool,
+        animal=False,
+        animal_kind=False,
     ):
         """(threat level, declared CoT type or None) from the rule and the declaration.
 
         An `animal` (see extract_tactical_track) is neither fast nor a swarm to the rule,
-        and ends a hostile hold it is under.
+        and ends the hostile and swarm holds it is under, unless they were set while the
+        track was already an animal (`animal_kind`, then over ANIMAL_MAX_SPEED_MPS): those
+        run their course, so a speed about that limit does not flip the mark.
 
         Without a standing declaration (fresh, and the track at `position`, its east and
         north, near where it was made) the rule decides: fast or a swarm is hostile, held.
@@ -124,21 +146,22 @@ class TacticalContextAugmentor:
         CoT backs: a non-CoT hit within SENSOR_HIT_RECENT_SECONDS and a swarm count now or
         within its hold. Speed never overrules it. An overruled one gives no declared type.
         """
-        if animal:
+        if animal and track_id not in self._animal_holds:
             self._hostile_until.pop(track_id, None)
+            self._swarm_until.pop(track_id, None)
         if is_swarm:
             self._swarm_until = self._hold(self._swarm_until, track_id, timestamp)
         declared, declared_type = _standing_declaration(
             metadata.get(DECLARATION_KEY), timestamp, *position
         )
         if declared is None:
-            return self._held_threat(track_id, timestamp, is_fast or is_swarm), None
+            return self._held_threat(track_id, timestamp, is_fast or is_swarm, animal_kind), None
         if declared == "hostile":
-            return self._held_threat(track_id, timestamp, True), declared_type
+            return self._held_threat(track_id, timestamp, True, animal_kind), declared_type
         sensor_at = metadata.get(SENSOR_HIT_AT_KEY)
         sensed = sensor_at is not None and _within(timestamp, sensor_at, SENSOR_HIT_RECENT_SECONDS)
         if sensed and self._holding(self._swarm_until, track_id, timestamp):
-            self._held_threat(track_id, timestamp, is_swarm)
+            self._held_threat(track_id, timestamp, is_swarm, animal_kind)
             return "hostile", None
         return declared, declared_type
 
@@ -203,7 +226,14 @@ class TacticalContextAugmentor:
         is_fast = speed_m_s > 20.0 and not animal and kind != "ground"
         is_swarm = swarm_count > 3 and not animal
         threat_level, declared_type = self._threat(
-            track.id, state.timestamp, metadata, (float(e), float(n)), is_fast, is_swarm, animal
+            track.id,
+            state.timestamp,
+            metadata,
+            (float(e), float(n)),
+            is_fast,
+            is_swarm,
+            animal,
+            kind == "animal",
         )
 
         # Return the universal state object for the serializers to consume

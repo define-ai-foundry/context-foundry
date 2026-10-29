@@ -113,6 +113,8 @@ CLASS_KIND_WINDOW_SECONDS = 60.0
 ANIMAL_CLASSES = frozenset({"animal", "bird"})
 GROUND_CLASSES = frozenset({"land vehicle", "human"})
 GROUND_DIMENSIONS = frozenset({"G"})
+# CoT affiliations that mark an object hostile (`h`) or a faker (`k`).
+HOSTILE_AFFILIATIONS = frozenset({"h", "k"})
 # Separator between the levels of a flattened classification path (validators.sapient).
 CLASS_PATH_SEPARATOR = " > "
 
@@ -200,7 +202,9 @@ def class_kind(metadata) -> str | None:
     """What a hit says its object is: "animal", "ground", "other", or None when it says nothing.
 
     Another party's CoT report of an object says it by its type's dimension: `G` (ground)
-    is "ground", any other, sea surface `S` included, "other". A self-report says nothing here:
+    is "ground", any other, sea surface `S` included, "other". One that marks the object
+    hostile (`a-h`, `a-k`) is "other" whatever its dimension: a relay declares no
+    affiliation, so speed is what marks such a vehicle hostile, and it stays so. A self-report says nothing here:
     its declaration speaks for the track while it stands, and once the track has left it
     the rule judges the track as it is, not as the report said it was. A sensor's class
     says it only when its top level has CLASS_KIND_CONFIDENCE or more: "animal" when any
@@ -211,6 +215,8 @@ def class_kind(metadata) -> str | None:
         parts = str(metadata.get("cot_type") or "").split("-")
         if is_self_report(metadata.get("how")) or len(parts) < 3 or parts[0] != "a" or not parts[2]:
             return None
+        if parts[1] in HOSTILE_AFFILIATIONS:
+            return "other"
         return "ground" if parts[2] in GROUND_DIMENSIONS else "other"
     classification = metadata.get("classification")
     confidences = metadata.get("class_confidences") or []

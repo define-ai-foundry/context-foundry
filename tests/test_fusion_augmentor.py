@@ -705,6 +705,8 @@ def test_a_relayed_cot_reports_dimension_says_whether_speed_counts(cot_type, thr
         ({"classification": "Air vehicle > UAV rotary wing", "class_confidences": [0.9]}, "other"),
         ({"type": "CoT", "cot_type": "a-u-G-E-V", "how": "m-r"}, "ground"),
         ({"type": "CoT", "cot_type": "a-u-S-X", "how": "m-r"}, "other"),
+        ({"type": "CoT", "cot_type": "a-h-G-E-V", "how": "m-r"}, "other"),
+        ({"type": "CoT", "cot_type": "a-k-G", "how": "m-r"}, "other"),
         ({"classification": "Sea vessel", "class_confidences": [0.9]}, "other"),
         ({"type": "CoT", "cot_type": "a-n-A-C", "how": "m-r"}, "other"),
         ({"type": "CoT", "cot_type": "a-f-G-U-C", "how": "m-g"}, None),
@@ -718,4 +720,49 @@ def test_class_kind(metadata, kind):
 
 def test_a_lone_fast_boat_stays_hostile():
     hits = [_classed(_at(2 * i), 50.0 * i, "Sea vessel > Small boat", 0.8) for i in range(10)]
+    assert _marks(_Fusion(), hits)[-1] == "hostile"
+
+
+def _animal_at(augmentor, speed, seconds, metadata=None):
+    config.set_reference_origin(62.9, 29.8, 0.0)
+    vec = np.zeros((9, 1))
+    vec[1, 0] = speed
+    meta = {
+        "classification": "Animal",
+        "swarm_count": 1,
+        "class_kind": "animal",
+        **(metadata or {}),
+    }
+    return augmentor.extract_tactical_track(_make_track(vec, _at(seconds), meta)).threat_level
+
+
+def test_an_animal_about_the_speed_limit_does_not_flicker(augmentor):
+    # Over the limit it is judged by the rule and held; a slower update within the hold
+    # does not end a hold it set itself.
+    marks = [_animal_at(augmentor, speed, 2 * i) for i, speed in enumerate([36, 34, 36, 34, 34])]
+    assert marks == ["hostile"] * 5
+    # The hold runs its course once it stays under the limit...
+    assert _animal_at(augmentor, 34, 8 + 61) == "suspect"
+    # ...and crossing back over starts it again.
+    assert _animal_at(augmentor, 36, 72) == "hostile"
+    assert _animal_at(augmentor, 34, 74) == "hostile"
+
+
+def test_an_animal_ends_a_swarm_hold_from_before_it_was_one(augmentor):
+    from context_foundry.fusion.tracker import DECLARATION_KEY, SENSOR_HIT_AT_KEY
+
+    config.set_reference_origin(62.9, 29.8, 0.0)
+    friend = ("a-f-A-M-F", _at(600), 0.0, 0.0, 100.0, _at(0), 0.0, 0.0)
+    base = {"classification": "UAS", DECLARATION_KEY: friend, SENSOR_HIT_AT_KEY: _at(0)}
+    swarm = _make_track(np.zeros((9, 1)), _at(0), {**base, "swarm_count": 5})
+    assert augmentor.extract_tactical_track(swarm).threat_level == "hostile"
+    # Within the swarm hold, the same track now an animal flock: the friend's mark stands.
+    flock = {**base, "classification": "Animal", "swarm_count": 5, "class_kind": "animal"}
+    flock[SENSOR_HIT_AT_KEY] = _at(10)
+    track = _make_track(np.zeros((9, 1)), _at(10), flock)
+    assert augmentor.extract_tactical_track(track).threat_level == "friend"
+
+
+def test_a_relayed_hostile_ground_vehicle_stays_hostile_when_fast():
+    hits = [_cot(_at(2 * i), 50.0 * i, cot_type="a-h-G-E-V", how="m-r") for i in range(10)]
     assert _marks(_Fusion(), hits)[-1] == "hostile"
