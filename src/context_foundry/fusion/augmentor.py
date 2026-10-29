@@ -21,6 +21,11 @@ HOSTILE_HOLD_SECONDS = 60.0
 # The fastest an animal is taken to fly. A track the sensors class as an animal that goes
 # faster may be a drone they classed wrongly, and is judged by the rule like any other.
 ANIMAL_MAX_SPEED_MPS = 35.0
+# How many of a track's updates in a row must be faster than ANIMAL_MAX_SPEED_MPS before an
+# animal is judged by the rule. A report landing far from where the track expected gives one
+# update an absurd speed (a sensor's bird track on the exercise read 86 to 434 m/s for an
+# update), which a bird never flies and a drone keeps up over several.
+ANIMAL_FAST_UPDATES = 3
 
 # How recent a sensor's (non-CoT) hit must be for a swarm to overrule a declaration.
 SENSOR_HIT_RECENT_SECONDS = 60.0
@@ -90,6 +95,21 @@ class TacticalContextAugmentor:
         # animal (one faster than ANIMAL_MAX_SPEED_MPS): an animal ends only a hold from
         # before it was one, or a speed jittering about that limit would flip its mark.
         self._animal_holds = set()
+        # Track id -> how many of its updates in a row were of an animal faster than
+        # ANIMAL_MAX_SPEED_MPS; a track with none has no entry.
+        self._animal_fast_run = {}
+
+    def _fast_run(self, track_id, speed_m_s) -> int:
+        """The track's run of updates faster than ANIMAL_MAX_SPEED_MPS, this one included."""
+        if speed_m_s <= ANIMAL_MAX_SPEED_MPS:
+            self._animal_fast_run.pop(track_id, None)
+            return 0
+        run = self._animal_fast_run.get(track_id, 0) + 1
+        # Bounded like the holds: a track gone mid-run is forgotten with the rest.
+        if len(self._animal_fast_run) > 1000:
+            self._animal_fast_run = {}
+        self._animal_fast_run[track_id] = run
+        return run
 
     @staticmethod
     def _hold(holds: dict, track_id, timestamp) -> dict:
@@ -219,10 +239,11 @@ class TacticalContextAugmentor:
         swarm_count = metadata.get("swarm_count", 1)
 
         # What the track's hits agree it is (the tracker's CLASS_KIND_KEY) tempers the rule:
-        # an animal no faster than ANIMAL_MAX_SPEED_MPS is neither fast nor a swarm (a
-        # flock), and something on the ground is not fast, only a swarm.
+        # an animal is neither fast nor a swarm (a flock) until ANIMAL_FAST_UPDATES of its
+        # updates in a row are faster than ANIMAL_MAX_SPEED_MPS, and something on the ground
+        # is not fast, only a swarm.
         kind = metadata.get(CLASS_KIND_KEY)
-        animal = kind == "animal" and speed_m_s <= ANIMAL_MAX_SPEED_MPS
+        animal = kind == "animal" and self._fast_run(track.id, speed_m_s) < ANIMAL_FAST_UPDATES
         is_fast = speed_m_s > 20.0 and not animal and kind != "ground"
         is_swarm = swarm_count > 3 and not animal
         threat_level, declared_type = self._threat(

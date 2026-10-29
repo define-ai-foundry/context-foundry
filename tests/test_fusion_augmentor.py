@@ -737,15 +737,29 @@ def _animal_at(augmentor, speed, seconds, metadata=None):
 
 
 def test_an_animal_about_the_speed_limit_does_not_flicker(augmentor):
-    # Over the limit it is judged by the rule and held; a slower update within the hold
-    # does not end a hold it set itself.
-    marks = [_animal_at(augmentor, speed, 2 * i) for i, speed in enumerate([36, 34, 36, 34, 34])]
-    assert marks == ["hostile"] * 5
+    # Over the limit on ANIMAL_FAST_UPDATES updates in a row it is judged by the rule and
+    # held; a slower update within the hold does not end a hold it set itself.
+    speeds = [36, 36, 36, 34, 34]
+    marks = [_animal_at(augmentor, speed, 2 * i) for i, speed in enumerate(speeds)]
+    assert marks == ["suspect", "suspect", "hostile", "hostile", "hostile"]
     # The hold runs its course once it stays under the limit...
-    assert _animal_at(augmentor, 34, 8 + 61) == "suspect"
-    # ...and crossing back over starts it again.
-    assert _animal_at(augmentor, 36, 72) == "hostile"
-    assert _animal_at(augmentor, 34, 74) == "hostile"
+    assert _animal_at(augmentor, 34, 4 + 61) == "suspect"
+    # ...and a new run over the limit starts it again.
+    assert [_animal_at(augmentor, 36, 70 + 2 * i) for i in range(3)][-1] == "hostile"
+    assert _animal_at(augmentor, 34, 76) == "hostile"
+
+
+def test_an_animal_jittering_about_the_limit_stays_suspect(augmentor):
+    # Never ANIMAL_FAST_UPDATES updates over the limit in a row: never hostile, no flip.
+    speeds = [36, 34, 36, 34, 36, 34]
+    marks = [_animal_at(augmentor, speed, 2 * i) for i, speed in enumerate(speeds)]
+    assert marks == ["suspect"] * 6
+
+
+def test_one_speed_spike_does_not_make_an_animal_hostile(augmentor):
+    # A report far from where the track expected: one update reads 391 m/s.
+    speeds = [9, 391, 8, 12, 9]
+    assert [_animal_at(augmentor, s, 5 * i) for i, s in enumerate(speeds)] == ["suspect"] * 5
 
 
 def test_an_animal_ends_a_swarm_hold_from_before_it_was_one(augmentor):
