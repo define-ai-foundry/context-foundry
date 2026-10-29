@@ -96,6 +96,27 @@ SWARM_COUNT_WINDOW_SECONDS = 60.0
 # latest non-CoT hit.
 DECLARATION_KEY = "cot_declaration"
 SENSOR_HIT_AT_KEY = "sensor_hit_at"
+# CLASS_KIND_KEY holds what every hit of the track within CLASS_KIND_WINDOW_SECONDS that
+# says what it is agrees it is, "animal" or "ground"; it is absent when they disagree, say
+# anything else, or none says. See class_kind.
+CLASS_KIND_KEY = "class_kind"
+
+# A sensor's class says what a hit is only at this confidence or more. A sensor unsure of
+# an object lists every class at a low confidence, which is no evidence of any one of them.
+CLASS_KIND_CONFIDENCE = 0.5
+# How far back a track's class kind reaches. As with the swarm count, sensors see one
+# object differently, so the latest hit's class alone would flicker between them.
+CLASS_KIND_WINDOW_SECONDS = 60.0
+# Class names, read without a namespace prefix (`sapient_core:Animal`) or case, and CoT
+# dimensions that say a hit is of an animal or of something on the ground. A boat is not
+# ground: fast attack boats travel alone, so speed still marks a boat hostile.
+ANIMAL_CLASSES = frozenset({"animal", "bird"})
+GROUND_CLASSES = frozenset({"land vehicle", "human"})
+GROUND_DIMENSIONS = frozenset({"G"})
+# CoT affiliations that mark an object hostile (`h`) or a faker (`k`).
+HOSTILE_AFFILIATIONS = frozenset({"h", "k"})
+# Separator between the levels of a flattened classification path (validators.sapient).
+CLASS_PATH_SEPARATOR = " > "
 
 # A self-report's declaration lasts until its event's own `stale`, but at least and at
 # most this long after its event time; an event without a readable `stale` gets the least.
@@ -175,6 +196,42 @@ def declared_until(stale, event_time):
         pass  # Unreadable, or naive against aware: the least.
     seconds = min(max(seconds, DECLARATION_MIN_SECONDS), DECLARATION_MAX_SECONDS)
     return event_time + timedelta(seconds=seconds)
+
+
+def class_kind(metadata) -> str | None:
+    """What a hit says its object is: "animal", "ground", "other", or None when it says nothing.
+
+    Another party's CoT report of an object says it by its type's dimension: `G` (ground)
+    is "ground", any other, sea surface `S` included, "other". One that marks the object
+    hostile (`a-h`, `a-k`) is "other" whatever its dimension: a relay declares no
+    affiliation, so speed is what marks such a vehicle hostile, and it stays so. A self-report says nothing here:
+    its declaration speaks for the track while it stands, and once the track has left it
+    the rule judges the track as it is, not as the report said it was. A sensor's class
+    says it only when its top level has CLASS_KIND_CONFIDENCE or more: "animal" when any
+    level is an animal or a bird, "ground" when the top level is a land vehicle or a human,
+    "other" otherwise.
+    """
+    if metadata.get("type") == "CoT":
+        parts = str(metadata.get("cot_type") or "").split("-")
+        if is_self_report(metadata.get("how")) or len(parts) < 3 or parts[0] != "a" or not parts[2]:
+            return None
+        if parts[1] in HOSTILE_AFFILIATIONS:
+            return "other"
+        return "ground" if parts[2] in GROUND_DIMENSIONS else "other"
+    classification = metadata.get("classification")
+    confidences = metadata.get("class_confidences") or []
+    if not classification or classification == "Unknown":
+        return None
+    top = confidences[0] if confidences else None
+    if top is None or top < CLASS_KIND_CONFIDENCE:
+        return None
+    levels = [
+        level.rsplit(":", 1)[-1].strip().lower()
+        for level in classification.split(CLASS_PATH_SEPARATOR)
+    ]
+    if ANIMAL_CLASSES.intersection(levels):
+        return "animal"
+    return "ground" if levels[0] in GROUND_CLASSES else "other"
 
 
 # Validation gate, in Mahalanobis distance (i.e. standard deviations of the
@@ -600,6 +657,8 @@ class SapientAsynchronousTracker:
         self._object_tracks = {}
         # Track id -> (timestamp, swarm count) its detections gave within the window.
         self._swarm_counts: dict[str, deque] = {}
+        # Track id -> (timestamp, class kind) its detections gave within the window.
+        self._class_kinds: dict[str, deque] = {}
         # Track id -> (object key, time) of the latest CoT uid's event the track took.
         self._cot_uids: dict[str, tuple] = {}
         # Track id -> its state as its latest detection left it, before any coasting.
@@ -693,6 +752,7 @@ class SapientAsynchronousTracker:
                 self._posteriors[track.id] = updated_state
                 self._last_update_time[track.id] = timestamp
                 self._hold_swarm_count(track, det, timestamp)
+                self._hold_class_kind(track, det, timestamp)
                 self._note_threat_evidence(track, det, timestamp, motion)
                 self._bind_object_id(det, track)
                 self._count_confirmation_hit(track)
@@ -1138,6 +1198,7 @@ class SapientAsynchronousTracker:
         # The seeding hit is a real detection, so it anchors staleness.
         self._last_update_time[track.id] = detection.timestamp
         self._hold_swarm_count(track, detection, detection.timestamp)
+        self._hold_class_kind(track, detection, detection.timestamp)
         self._note_threat_evidence(track, detection, detection.timestamp, motion)
         if self.confirm_hits > 1 and track.id not in self._declarations:
             self._tentative[track.id] = [1, detection.timestamp]
@@ -1160,6 +1221,26 @@ class SapientAsynchronousTracker:
             track.metadata["swarm_count"] = max(c for _, c in seen)
         else:
             track.metadata.pop("swarm_count", None)
+
+    def _hold_class_kind(self, track, detection, timestamp) -> None:
+        """Set the track's class kind to what its hits within the window agree it is.
+
+        A hit that says nothing of what it is (see class_kind) adds nothing. The track has
+        a class kind only while every hit in the window that says one says the same,
+        "animal" or "ground", so a single confident sighting of anything else, a drone
+        among them, takes it away for the window's length.
+        """
+        seen = self._class_kinds.setdefault(track.id, deque())
+        kind = class_kind(detection.metadata or {})
+        if kind is not None:
+            seen.append((timestamp, kind))
+        while seen and (timestamp - seen[0][0]).total_seconds() > CLASS_KIND_WINDOW_SECONDS:
+            seen.popleft()
+        kinds = {k for _, k in seen}
+        if len(kinds) == 1 and kinds <= {"animal", "ground"}:
+            track.metadata[CLASS_KIND_KEY] = kinds.pop()
+        else:
+            track.metadata.pop(CLASS_KIND_KEY, None)
 
     def _seed_id(self, detection) -> str:
         """A track id fixed by the detection that starts the track, within `id_namespace`.
@@ -1275,6 +1356,7 @@ class SapientAsynchronousTracker:
         books = (
             self._last_update_time,
             self._swarm_counts,
+            self._class_kinds,
             self._tentative,
             self._declarations,
             self._cot_uids,
@@ -1337,6 +1419,9 @@ class SapientAsynchronousTracker:
             track_id: seen
             for track_id, seen in self._swarm_counts.items()
             if track_id in active_ids
+        }
+        self._class_kinds = {
+            track_id: seen for track_id, seen in self._class_kinds.items() if track_id in active_ids
         }
         self._tentative = {
             track_id: pending
