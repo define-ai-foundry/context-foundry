@@ -7,7 +7,7 @@ from datetime import timedelta
 
 from . import config
 from .schemas import TacticalTrack
-from .tracker import DECLARATION_KEY, SENSOR_HIT_AT_KEY
+from .tracker import CLASS_KIND_KEY, DECLARATION_KEY, SENSOR_HIT_AT_KEY
 
 # WGS84 Ellipsoid Constants
 WGS84_A = 6378137.0
@@ -17,6 +17,10 @@ WGS84_E2 = 0.00669437999014
 # one whose swarm count briefly reads small, would otherwise flip its affiliation between
 # hostile and suspect from one update to the next.
 HOSTILE_HOLD_SECONDS = 60.0
+
+# The fastest an animal is taken to fly. A track the sensors class as an animal that goes
+# faster may be a drone they classed wrongly, and is judged by the rule like any other.
+ANIMAL_MAX_SPEED_MPS = 35.0
 
 # How recent a sensor's (non-CoT) hit must be for a swarm to overrule a declaration.
 SENSOR_HIT_RECENT_SECONDS = 60.0
@@ -105,8 +109,13 @@ class TacticalContextAugmentor:
             return "hostile"
         return "hostile" if self._holding(self._hostile_until, track_id, timestamp) else "suspect"
 
-    def _threat(self, track_id, timestamp, metadata, position, is_fast: bool, is_swarm: bool):
+    def _threat(
+        self, track_id, timestamp, metadata, position, is_fast: bool, is_swarm: bool, animal=False
+    ):
         """(threat level, declared CoT type or None) from the rule and the declaration.
+
+        An `animal` (see extract_tactical_track) is neither fast nor a swarm to the rule,
+        and ends a hostile hold it is under.
 
         Without a standing declaration (fresh, and the track at `position`, its east and
         north, near where it was made) the rule decides: fast or a swarm is hostile, held.
@@ -115,6 +124,8 @@ class TacticalContextAugmentor:
         CoT backs: a non-CoT hit within SENSOR_HIT_RECENT_SECONDS and a swarm count now or
         within its hold. Speed never overrules it. An overruled one gives no declared type.
         """
+        if animal:
+            self._hostile_until.pop(track_id, None)
         if is_swarm:
             self._swarm_until = self._hold(self._swarm_until, track_id, timestamp)
         declared, declared_type = _standing_declaration(
@@ -184,10 +195,15 @@ class TacticalContextAugmentor:
                 class_confidences = []
         swarm_count = metadata.get("swarm_count", 1)
 
-        is_fast = speed_m_s > 20.0
-        is_swarm = swarm_count > 3
+        # What the track's hits agree it is (the tracker's CLASS_KIND_KEY) tempers the rule:
+        # an animal no faster than ANIMAL_MAX_SPEED_MPS is neither fast nor a swarm (a
+        # flock), and something on the ground is not fast, only a swarm.
+        kind = metadata.get(CLASS_KIND_KEY)
+        animal = kind == "animal" and speed_m_s <= ANIMAL_MAX_SPEED_MPS
+        is_fast = speed_m_s > 20.0 and not animal and kind != "ground"
+        is_swarm = swarm_count > 3 and not animal
         threat_level, declared_type = self._threat(
-            track.id, state.timestamp, metadata, (float(e), float(n)), is_fast, is_swarm
+            track.id, state.timestamp, metadata, (float(e), float(n)), is_fast, is_swarm, animal
         )
 
         # Return the universal state object for the serializers to consume
