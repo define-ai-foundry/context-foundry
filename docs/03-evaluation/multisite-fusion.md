@@ -2,10 +2,14 @@
 
 > **How one fusion instance performs when it fuses two unrelated, geographically distant sites at once, measured against each site fused alone.**
 
-**Status:** proposed. This page holds the method for review. Results are added to it once the method is agreed.
+**Status:** measured for the far pair (joensuu and alakurtti). The near pair is still blocked. Results are under [Results](#results).
 
 ## Key Takeaways
 
+* **Accuracy doesn't suffer from combining at this load and distance.** Each site's tracks, false tracks and error are the same fused together as fused alone, and error doesn't grow with distance from the ENU frame origin up to 600 km.
+* **Cost is shared.** Each live track adds about 0.1 ms to every event, whichever site it is at. With clutter at joensuu, each alakurtti event took 6.5 times as long (1.90 to 12.44 ms).
+* **The watermark is shared.** With alakurtti's clock 3 s and 5 s behind, the engine dropped 19% and 42% of alakurtti's events, and alakurtti lost a track. Its clock lagging by 2 s or less dropped nothing.
+* So the gain from one fusion instance per site would be independent cost and independent late-event gating, not accuracy. Whether the shared 120-track cap refuses tracks at the other site isn't settled yet (see [Open points](#open-points)).
 * One `FusionEngine` keeps one track population, one event-time watermark, one ENU frame and one set of caps for every sensor it hears. This page measures what that costs when the sensors sit at sites hundreds of kilometres apart.
 * The measurement replays scenario-foundry's joensuu and alakurtti scenarios, alone and merged, through the engine in-process, and scores the result per site with `dev/fusion_benchmark.py`'s scoring.
 * Four experiments separate the effects: combining, frame origin placement, clock offset between sites, and load at one site.
@@ -139,6 +143,119 @@ Seeded random clutter (detections that follow no object) is added to joensuu's s
 * joensuu's own losses
 
 The engine groups detections per sensor and instant, both in replay and in the pipeline-stages `fusion` stage, so one site's detections never share an event with another site's. `max_event_detections` therefore cannot shed one site's detections because of another's. The experiment reports this as a structural result rather than measuring it.
+
+---
+
+## Results
+
+Measured on the far pair, at context-foundry `c225c7b` and scenario-foundry `32a7de6`, with scenario seed 42 and clutter seed 42. Each condition ran three times in fresh subprocesses, and every run gave the same tracks. Times are the medians on an AMD Ryzen 5 5500U (12 threads), Python 3.12.16, under Linux.
+
+Commands, run from the repository root:
+
+```bash
+python dev/multisite_benchmark.py experiments \
+  --scenario-foundry ../scenario-foundry --only E1 --repeats 3 --save e1.json
+# likewise --only E2, E3 and E4, with the default lags (1 2 3 5) and clutter rates (0.5 1 2 5)
+```
+
+Columns:
+
+* **tracks / false / err m:** `fusion_benchmark.py`'s scoring for the site's tracks.
+* **dropped:** the site's events dropped as late.
+* **ms/event:** the median `FusionEngine.process` time for the site's events.
+
+Timings vary by up to about 40% between conditions that do the same work (alakurtti took 2.70 ms/event alone and 1.90 ms/event combined), so only the larger differences and the fitted slopes are read as results.
+
+### E1: alone against combined
+
+| condition | site | tracks | false | err m | dropped | refused | ms/event |
+|---|---|---:|---:|---:|---:|---:|---:|
+| alone | joensuu | 6 | 0 | 21 | 0 | 0 | 1.57 |
+| alone | alakurtti | 5 | 0 | 25 | 0 | 0 | 2.70 |
+| combined | joensuu | 6 | 0 | 21 | 0 | 0 | 1.85 |
+| combined | alakurtti | 5 | 0 | 25 | 0 | 0 | 1.90 |
+
+* Combined, each swarm is followed by the same tracks as when its site is fused alone.
+* The cost fit over the combined run gives 0.30 ms per event for each own-site live track and 0.32 ms for each other-site live track. At about 10 tracks per site that cost is too small to show in ms/event.
+
+### E2: frame origin placement
+
+| frame origin | joensuu tracks / false / err m | alakurtti tracks / false / err m |
+|---|---|---|
+| first detection (62.185N 30.632E, a joensuu target) | 6 / 0 / 21 | 5 / 0 / 25 |
+| `FI-MIL-RAD-KOLI-01` | 7 / 0 / 19 | 5 / 0 / 25 |
+| `FI-MIL-RAD-LUOSTO-01` | 7 / 0 / 21 | 5 / 0 / 25 |
+| midpoint 65.049N 28.456E | 7 / 0 / 19 | 5 / 0 / 25 |
+
+Median error by distance of the track from the frame origin, both sites together:
+
+| frame origin | 0–100 km | 100–200 km | 200–300 km | 300–400 km | 400–500 km | 500–600 km |
+|---|---|---|---|---|---|---|
+| first detection | 20 m (615) | | | | | 24 m (412) |
+| KOLI-01 | 20 m (620) | | | | 24 m (412) | |
+| LUOSTO-01 | 21 m (191) | 27 m (221) | | | | 20 m (624) |
+| midpoint | | 21 m (154) | 21 m (693) | 27 m (185) | | |
+
+The numbers in brackets are track snapshots.
+
+* Error follows the site, not the distance from the frame origin. joensuu is about 20 m both at the origin and 500–600 km from it, and alakurtti stays at 25 m wherever the origin is.
+* Placing the origin anywhere other than the first detection, even at joensuu's own anchor, splits joensuu's decoy wave into two tracks. That points to a borderline association that a small numerical change tips over, not to a frame effect.
+
+### E3: clock offset between sites
+
+| alakurtti behind | alakurtti dropped | alakurtti tracks / false / err m | alakurtti tracks per swarm (Iskander, Geran, heli) | joensuu |
+|---|---|---|---|---|
+| 0 s (E1) | 0 of 577 | 5 / 0 / 25 | 3, 1, 1 | 6 / 0 / 21 |
+| 1 s | 0 of 577 | 5 / 0 / 25 | 3, 1, 1 | 6 / 0 / 21 |
+| 2 s | 0 of 577 | 5 / 0 / 25 | 3, 1, 1 | 6 / 0 / 22 |
+| 3 s | 112 of 577 (19%) | 4 / 0 / 27 | 2, 1, 1 | 6 / 0 / 22 |
+| 5 s | 240 of 577 (42%) | 5 / 0 / 26 | 2, 1, 2 | 6 / 0 / 21 |
+
+* Only the lagging site loses events. joensuu dropped none in any run.
+* Drops begin above `LATE_EVENT_TOLERANCE_SECONDS` (2 s). Beyond that, the share dropped depends on how the two sites' events interleave.
+* At 3 s one Iskander track is lost. At 5 s the helicopter assault is also split into two tracks.
+
+### E4: load at one site
+
+| clutter at joensuu | joensuu tracks (false) | peak live, joensuu | refused, joensuu | alakurtti tracks / false / err m | refused, alakurtti | alakurtti ms/event | own / other ms per track |
+|---|---|---:|---:|---|---:|---:|---|
+| none (E1 combined) | 6 (0) | 6 | 0 | 5 / 0 / 25 | 0 | 1.90 | 0.30 / 0.32 |
+| 0.5/s | 77 (64) | 23 | 0 | 5 / 0 / 25 | 0 | 4.38 | 0.45 / 0.50 |
+| 1/s | 213 (188) | 40 | 0 | 5 / 0 / 25 | 0 | 3.93 | 0.11 / 0.12 |
+| 2/s | 536 (502) | 65 | 0 | 5 / 0 / 25 | 0 | 5.78 | 0.12 / 0.13 |
+| 5/s | 1656 (1601) | 119 | 147 | 5 / 0 / 25 | 0 | 12.44 | 0.11 / 0.09 |
+
+* **Cost:** joensuu's load slows alakurtti. At 5/s an alakurtti event costs 6.5 times what it does without clutter, while alakurtti's own picture is unchanged.
+  * From 1/s up, where there are enough live tracks for a stable fit, an other-site live track costs the same per event as an own-site one: about 0.1 ms.
+  * The 0.5/s fit has a negative intercept and is not read as a result.
+* **Caps:** at 5/s the tracker reached the cap (peak 119 of 120 live tracks) and refused 147 new tracks, all at joensuu. alakurtti was refused none in this run.
+* **Shedding:** no run shed a detection, as expected from the per-sensor, per-instant grouping.
+* **joensuu's own accuracy under clutter is not read as a result yet** (see [Open points](#open-points)).
+
+### Answers
+
+1. **Accuracy:** no measurable loss from combining the far pair at scenario load (E1). The single frame costs nothing measurable up to 600 km from its origin (E2).
+2. **Cost:** every live track costs about 0.1 ms per event at both sites, whichever site it is at (E1, E4). One site's load therefore sets the other site's per-event cost: 6.5 times as long for alakurtti with 5/s of clutter at joensuu.
+3. **Losses:**
+   * The shared watermark drops a lagging site's events once its clock is more than 2 s behind: 19% at 3 s and 42% at 5 s, losing a track (E3).
+   * The shared track cap was reached but refused only joensuu's tracks in this run (E4).
+   * Shedding cannot cross sites.
+4. **Frame:** error does not grow with distance from the origin up to 600 km, and moving the origin doesn't change it beyond one borderline track split (E2).
+5. **Implication:** per-site fusion instances would remove the cross-site cost and the cross-site late-event drops, and keep each site's track cap to itself. They would not improve accuracy at this distance and load, because there is no accuracy loss to remove.
+
+### Open points
+
+* **Clutter confirms into tracks.** Clutter detections are each a one-off point, yet hundreds become confirmed tracks under `DEFAULT_CONFIRM_HITS` (3). Until it is clear whether that reflects the clutter model or the gating, joensuu's accuracy under clutter is not read as a result. alakurtti's numbers and the cost figures don't depend on it.
+* **The cap refused no alakurtti track.** It isn't checked yet whether alakurtti's tracks all began before the cap filled. If so, the experiment needs a site that starts tracks while the other one holds the cap.
+* **The near pair and all four sites** remain blocked on scenario configs.
+
+### Inputs for Phase B
+
+* **What to compare a clustered run against:** the E1 combined run and the E3 and E4 conditions, with the same commits, seeds and harness. Clustering should leave E1's accuracy unchanged, remove E3's alakurtti drops, and bring alakurtti's ms/event under E4 back to its alone value.
+* **Clustering boundary:**
+  * The two sites never share a node id, and their tracks never cross between sites, so clustering by site (by sensor network) is enough for this pair.
+  * The near pair, about 85 km apart, is where a geographic boundary would have to be chosen, and it is not measurable yet.
+* **Frame:** each instance could keep the current first-detection frame. E2 shows no need to re-anchor at these distances.
 
 ---
 
