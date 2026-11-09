@@ -207,7 +207,7 @@ class CountingTracker(SapientAsynchronousTracker):
         return super()._initialize_new_track(detection)
 
 
-def make_tracker():
+def make_tracker(id_namespace=""):
     """A CountingTracker with the CLI's defaults, which are not all the constructor's."""
     return CountingTracker(
         max_live_tracks=MAX_LIVE_TRACKS,
@@ -215,6 +215,7 @@ def make_tracker():
         max_coast_seconds=MAX_COAST_SECONDS,
         max_event_detections=MAX_EVENT_DETECTIONS,
         confirm_hits=DEFAULT_CONFIRM_HITS,
+        id_namespace=id_namespace,
     )
 
 
@@ -266,14 +267,16 @@ def _origin(spec_origin, sensors):
     return spec_origin["lat"], spec_origin["lon"], spec_origin.get("alt", 0.0)
 
 
-def run_condition(spec):
-    """Fuse one condition and return its measurements. Changes module-global engine state."""
+def build_messages(spec):
+    """A condition's sites and its merged log, aligned and cluttered but not yet lagged."""
     sf = Path(spec["scenario_foundry"])
     names = spec["sites"]
-    lags = {k: float(v) for k, v in spec.get("lags", {}).items()}
     networks = {n: json.loads((Path(spec["sensors_dir"]) / f"{n}.json").read_text()) for n in names}
     sites = {n: networks[n]["sensors"] for n in names}
     shifts = alignment_shifts({n: _scenario_start(n, sf) for n in names})
+    # A delay moves a site's whole scenario later, after the alignment.
+    for n, seconds in spec.get("delays", {}).items():
+        shifts[n] += float(seconds)
 
     messages = []
     for n in names:
@@ -292,18 +295,33 @@ def run_condition(spec):
             clutter["rate"],
             clutter["seed"],
         )
+    return {
+        "names": names,
+        "sites": sites,
+        "anchor": networks[names[0]].get("primary_anchor_node"),
+        "anchors": {n: networks[n].get("primary_anchor_node") for n in names},
+        "shifts": shifts,
+        "lags": {k: float(v) for k, v in spec.get("lags", {}).items()},
+        "messages": messages,
+    }
 
+
+def fuse(messages, sites, *, anchor=None, origin=None, lags=None, id_namespace=""):
+    """Fuse `messages` with one engine in this process, counting per site.
+
+    `sites` maps each site name to its sensors, which together are the engine's
+    sensor network. Changes module-global engine state.
+    """
+    names = list(sites)
+    lags = lags or {}
     sensors = union_sensors([sites[n] for n in names])
-    config.load_sensor_network(
-        sensor_network_list=sensors,
-        primary_anchor_node=networks[names[0]].get("primary_anchor_node"),
-    )
+    config.load_sensor_network(sensor_network_list=sensors, primary_anchor_node=anchor)
     # As the pipeline stage does: no frame until the first point projected sets it,
     # unless the condition places the origin.
     config.set_reference_origin(None, None, None)
-    origin = _origin(spec.get("origin"), sensors)
-    if origin is not None:
-        config.set_reference_origin(*origin)
+    placed = _origin(origin, sensors)
+    if placed is not None:
+        config.set_reference_origin(*placed)
 
     with tempfile.TemporaryDirectory() as workdir:
         path = Path(workdir) / "replay.json"
@@ -318,7 +336,7 @@ def run_condition(spec):
             e, north, _ = config.wgs84_to_enu(s["lat"], s["lon"], float(s.get("alt", 0.0)))
             sensors_enu.append((e, north, n))
 
-    tracker = make_tracker()
+    tracker = make_tracker(id_namespace)
     engine = FusionEngine(
         tracker,
         PublishPolicy("window", DEFAULT_COAST_SECONDS, DEFAULT_WINDOW_SECONDS),
@@ -331,8 +349,13 @@ def run_condition(spec):
     per_site = {n: {"events": 0, "detections": 0, "dropped": 0, "ms": []} for n in names}
     peak_live = dict.fromkeys(names, 0)
     worst_skew = {}
+    offered = 0
+    process_seconds = 0.0
+    full = []
     began = time.perf_counter()
     for stamp, detections, site in deliver(events, node_site, lags):
+        if len(tracker.tracks) >= tracker.max_live_tracks:
+            full.append(stamp)
         live = Counter(
             nearest_site(t.state_vector[0, 0], t.state_vector[3, 0], sensors_enu)
             for t in tracker.tracks
@@ -341,7 +364,10 @@ def run_condition(spec):
             peak_live[n] = max(peak_live[n], live[n])
         t0 = time.perf_counter()
         result = engine.process(stamp, detections)
-        ms = (time.perf_counter() - t0) * 1000.0
+        elapsed = time.perf_counter() - t0
+        ms = elapsed * 1000.0
+        process_seconds += elapsed
+        offered += len(detections)
         stats = per_site[site]
         if result.dropped:
             stats["dropped"] += 1
@@ -354,31 +380,14 @@ def run_condition(spec):
         cot.extend(serializer.serialize(tactical) for _, tactical in result.published)
     loop_seconds = time.perf_counter() - began
 
-    tracks = fb.read_tracks("\n".join(cot))
-    by_site = defaultdict(dict)
-    for uid, snapshots in tracks.items():
-        by_site[site_of_snapshots(snapshots, sites)][uid] = snapshots
-    scores = {}
-    samples = []
-    for n in names:
-        swarms = fb.load_swarms(n, sf, shifts[n] - lags.get(n, 0.0))
-        scores[n] = fb.score_tracks(n, by_site.get(n, {}), swarms)
-        for snapshots in by_site.get(n, {}).values():
-            for when, lat, lon, _ in snapshots:
-                match = fb.nearest_swarm(swarms, when, lat, lon)
-                if match is not None and match[1] <= fb.FALSE_TRACK_DISTANCE_M:
-                    km = fb.haversine_m(frame_origin[0], frame_origin[1], lat, lon) / 1000.0
-                    samples.append((km, match[1]))
-
     refused_by_site = Counter()
     for node, count in tracker.refused_by_node.items():
         refused_by_site[node_site.get(node, "unknown")] += count
     all_ms = [ms for s in per_site.values() for ms in s["ms"]]
     all_dets = sum(s["detections"] for s in per_site.values())
     return {
-        "spec": spec,
+        "cot": cot,
         "frame_origin": frame_origin,
-        "scores": scores,
         "sites": {
             n: {
                 "events": per_site[n]["events"],
@@ -397,7 +406,68 @@ def run_condition(spec):
         "shed_detections": tracker._shed_detections,
         "ms_per_detection": sum(all_ms) / all_dets if all_dets else None,
         "loop_seconds": loop_seconds,
+        "process_seconds": process_seconds,
+        "detections_offered": offered,
         "cost_fit": fit_cost(rows),
+        "ms_by_site": {n: per_site[n]["ms"] for n in names},
+        "cap_full": {
+            "events": len(full),
+            "first": _format_stamp(full[0]) if full else None,
+            "last": _format_stamp(full[-1]) if full else None,
+        },
+    }
+
+
+def score_by_site(cot, sites, swarms, frame_origin):
+    """Per-site scores of the tracks in `cot`, and (km from the frame origin, error m) samples.
+
+    Each track goes to the site of the sensor nearest its first position; `swarms`
+    maps each site to its swarms.
+    """
+    tracks = fb.read_tracks("\n".join(cot))
+    by_site = defaultdict(dict)
+    for uid, snapshots in tracks.items():
+        by_site[site_of_snapshots(snapshots, sites)][uid] = snapshots
+    scores = {}
+    samples = []
+    for n in sites:
+        scores[n] = fb.score_tracks(n, by_site.get(n, {}), swarms[n])
+        for snapshots in by_site.get(n, {}).values():
+            for when, lat, lon, _ in snapshots:
+                match = fb.nearest_swarm(swarms[n], when, lat, lon)
+                if match is not None and match[1] <= fb.FALSE_TRACK_DISTANCE_M:
+                    km = fb.haversine_m(frame_origin[0], frame_origin[1], lat, lon) / 1000.0
+                    samples.append((km, match[1]))
+    return scores, samples
+
+
+def condition_swarms(spec, built):
+    """Each site's swarms, on the condition's aligned and lagged clock."""
+    sf = Path(spec["scenario_foundry"])
+    return {
+        n: fb.load_swarms(n, sf, built["shifts"][n] - built["lags"].get(n, 0.0))
+        for n in built["names"]
+    }
+
+
+def run_condition(spec):
+    """Fuse one condition and return its measurements. Changes module-global engine state."""
+    built = build_messages(spec)
+    fused = fuse(
+        built["messages"],
+        built["sites"],
+        anchor=built["anchor"],
+        origin=spec.get("origin"),
+        lags=built["lags"],
+    )
+    scores, samples = score_by_site(
+        fused["cot"], built["sites"], condition_swarms(spec, built), fused["frame_origin"]
+    )
+    result = {k: v for k, v in fused.items() if k not in ("cot", "ms_by_site", "cap_full")}
+    return {
+        "spec": spec,
+        **result,
+        "scores": scores,
         "error_by_frame_distance": error_bins(samples, FRAME_BIN_KM),
     }
 
@@ -498,12 +568,15 @@ def summarize(runs):
         for r in runs
     )
     summary = {
-        k: v for k, v in first.items() if k not in ("loop_seconds", "ms_per_detection", "cost_fit")
+        k: v
+        for k, v in first.items()
+        if k not in ("loop_seconds", "process_seconds", "ms_per_detection", "cost_fit")
     }
     summary["repeats"] = len(runs)
     summary["deterministic"] = deterministic
     summary["ms_per_detection"] = statistics.median(r["ms_per_detection"] for r in runs)
     summary["loop_seconds"] = statistics.median(r["loop_seconds"] for r in runs)
+    summary["process_seconds"] = statistics.median(r["process_seconds"] for r in runs)
     for n in summary["sites"]:
         values = [
             r["sites"][n]["median_ms_per_event"]
