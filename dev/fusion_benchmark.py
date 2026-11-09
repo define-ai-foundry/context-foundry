@@ -148,32 +148,47 @@ def peak_estimated_objects(tracks):
     return peak
 
 
-def score(name, scenario_foundry, sensors_dir):
+def match_track(snapshots, swarms):
+    """(swarm the track follows most, its median distance), or (None, None) if none flies."""
+    matches = [nearest_swarm(swarms, t, lat, lon) for t, lat, lon, _ in snapshots]
+    matches = [m for m in matches if m is not None]
+    if not matches:
+        return None, None
+    dists = sorted(d for _, d in matches)
+    return Counter(w for w, _ in matches).most_common(1)[0][0], dists[len(dists) // 2]
+
+
+def load_swarms(name, scenario_foundry, shift_seconds=0.0):
+    """A scenario's swarms, with its clock moved by `shift_seconds`."""
     tactical = json.loads(
         (scenario_foundry / "data/tactical_scenarios" / f"{name}_tactical.json").read_text()
     )
-    messages = scenario_foundry / "data/generated_output" / f"{name}_messages.json"
     start = parse_time(tactical["scenario_meta"]["start_time_iso"])
-    swarms = [Swarm(wid, cfg, start) for wid, cfg in tactical["threat_profiles"].items()]
+    start += timedelta(seconds=shift_seconds)
+    return [Swarm(wid, cfg, start) for wid, cfg in tactical["threat_profiles"].items()]
+
+
+def score(name, scenario_foundry, sensors_dir):
+    messages = scenario_foundry / "data/generated_output" / f"{name}_messages.json"
+    swarms = load_swarms(name, scenario_foundry)
 
     with tempfile.TemporaryDirectory() as workdir:
         tracks = read_tracks(run_fusion(messages, sensors_dir / f"{name}.json", workdir))
 
+    return score_tracks(name, tracks, swarms)
+
+
+def score_tracks(name, tracks, swarms):
+    """The benchmark's row for `tracks` (from read_tracks) against `swarms`."""
     per_swarm = Counter()
     false_tracks = 0
     errors = []
     for snapshots in tracks.values():
-        matches = [nearest_swarm(swarms, t, lat, lon) for t, lat, lon, _ in snapshots]
-        matches = [m for m in matches if m is not None]
-        if not matches:
+        wave_id, median = match_track(snapshots, swarms)
+        if wave_id is None or median > FALSE_TRACK_DISTANCE_M:
             false_tracks += 1
             continue
-        dists = sorted(d for _, d in matches)
-        median = dists[len(dists) // 2]
-        if median > FALSE_TRACK_DISTANCE_M:
-            false_tracks += 1
-            continue
-        per_swarm[Counter(w for w, _ in matches).most_common(1)[0][0]] += 1
+        per_swarm[wave_id] += 1
         errors.append(median)
 
     return {
