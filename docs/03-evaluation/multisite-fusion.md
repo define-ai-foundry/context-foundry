@@ -273,4 +273,4 @@ The numbers in brackets are track snapshots.
 
 * The near pair and the four-site run, until scenario configs exist for porvoo_oil_refinery and hamina_kotka.
 * Recorded exercise data. Archived records are a later input once records can be mapped to cells.
-* Clustering and parallel fusion instances themselves: this page provides the measurement they are compared against.
+* Clustering and parallel fusion instances themselves: this page provides the measurement they are compared against. They are measured in [Cluster-Parallel Fusion](cluster-parallel-fusion.md).
