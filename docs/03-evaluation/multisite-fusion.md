@@ -7,7 +7,7 @@
 ## Key Takeaways
 
 * **Accuracy doesn't suffer from combining at this load and distance.** Each site's tracks, false tracks and error are the same fused together as fused alone, and error doesn't grow with distance from the ENU frame origin up to 600 km.
-* **Cost is shared.** Each live track adds about 0.1 ms to every event, whichever site it is at. With clutter at joensuu, each alakurtti event took 6.5 times as long (1.90 to 12.44 ms).
+* **Cost is shared.** Each live track adds about 0.1 ms to every event, whichever site it is at. With clutter at joensuu, each alakurtti event took 4.8 to 6.5 times as long, on the two machines it was run on.
 * **The watermark is shared.** With alakurtti's clock 3 s and 5 s behind, the engine dropped 19% and 42% of alakurtti's events, and alakurtti lost a track. Its clock lagging by 2 s or less dropped nothing.
 * So the gain from one fusion instance per site would be independent cost and independent late-event gating, not accuracy. Whether the shared 120-track cap refuses tracks at the other site isn't settled yet (see [Open points](#open-points)).
 * One `FusionEngine` keeps one track population, one event-time watermark, one ENU frame and one set of caps for every sensor it hears. This page measures what that costs when the sensors sit at sites hundreds of kilometres apart.
@@ -164,7 +164,7 @@ Columns:
 * **dropped:** the site's events dropped as late.
 * **ms/event:** the median `FusionEngine.process` time for the site's events.
 
-Timings vary by up to about 40% between conditions that do the same work (alakurtti took 2.70 ms/event alone and 1.90 ms/event combined), so only the larger differences and the fitted slopes are read as results.
+Timings vary by up to about 40% between conditions that do the same work (alakurtti took 2.70 ms/event alone and 1.90 ms/event combined), so only the larger differences and the fitted slopes are read as results. alakurtti alone being slower than combined is that noise, not an effect: it does less work alone. A second machine reproduced every track, drop and refusal count exactly; only the times differed.
 
 ### E1: alone against combined
 
@@ -225,7 +225,7 @@ The numbers in brackets are track snapshots.
 | 2/s | 536 (502) | 65 | 0 | 5 / 0 / 25 | 0 | 5.78 | 0.12 / 0.13 |
 | 5/s | 1656 (1601) | 119 | 147 | 5 / 0 / 25 | 0 | 12.44 | 0.11 / 0.09 |
 
-* **Cost:** joensuu's load slows alakurtti. At 5/s an alakurtti event costs 6.5 times what it does without clutter, while alakurtti's own picture is unchanged.
+* **Cost:** joensuu's load slows alakurtti. At 5/s an alakurtti event costs 6.5 times what it does without clutter (1.90 to 12.44 ms), while alakurtti's own picture is unchanged. A review run on a second machine gave 4.8 times (1.11 to 5.36 ms), so the slowdown is stated as a range.
   * From 1/s up, where there are enough live tracks for a stable fit, an other-site live track costs the same per event as an own-site one: about 0.1 ms.
   * The 0.5/s fit has a negative intercept and is not read as a result.
 * **Caps:** at 5/s the tracker reached the cap (peak 119 of 120 live tracks) and refused 147 new tracks, all at joensuu. alakurtti was refused none in this run.
@@ -235,7 +235,7 @@ The numbers in brackets are track snapshots.
 ### Answers
 
 1. **Accuracy:** no measurable loss from combining the far pair at scenario load (E1). The single frame costs nothing measurable up to 600 km from its origin (E2).
-2. **Cost:** every live track costs about 0.1 ms per event at both sites, whichever site it is at (E1, E4). One site's load therefore sets the other site's per-event cost: 6.5 times as long for alakurtti with 5/s of clutter at joensuu.
+2. **Cost:** every live track costs about 0.1 ms per event at both sites, whichever site it is at (E1, E4). One site's load therefore sets the other site's per-event cost: 4.8 to 6.5 times as long for alakurtti with 5/s of clutter at joensuu, on two machines.
 3. **Losses:**
    * The shared watermark drops a lagging site's events once its clock is more than 2 s behind: 19% at 3 s and 42% at 5 s, losing a track (E3).
    * The shared track cap was reached but refused only joensuu's tracks in this run (E4).
