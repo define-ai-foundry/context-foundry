@@ -2,7 +2,7 @@
 
 > **What clustering detections geographically before fusion would gain, with one fusion instance per cluster, measured against one instance fusing every site and against each site fused alone.**
 
-**Status:** proposal, not yet measured. The near pair is still blocked (see [Inputs](#inputs)).
+**Status:** measured on the far pair and the synthetic boundary case. The near pair is still blocked (see [Inputs](#inputs)).
 
 ## Summary
 
@@ -14,6 +14,7 @@
   1. engine-level partitioning in one process
   2. a platform-level region router feeding several `fusion` stages
   3. not worth building
+* **Result:** clustering by deployment gives each site exactly what it gets fused alone. It removes four cross-site effects of a shared engine: late-gate drops, cost per event, cap refusals, and a newly found one in track confirmation. It does not speed up the busiest deployment under load. A grid by detection position splits tracks at cell edges. [Recommendation](#recommendation): split by deployment in the platform (option 2, method A); throughput needs a cheaper engine event instead.
 
 ---
 
@@ -93,7 +94,7 @@ Method A is the baseline. It is how sensors already arrive (one sensor-network c
 
 ### Process model
 
-* **One OS process per cluster,** started with `multiprocessing` in spawn mode. Threads won't work, because the sensor registry and the ENU origin are module-global.
+* **One OS process per cluster:** a fresh Python subprocess, as in Multisite Fusion. Threads won't work, because the sensor registry and the ENU origin are module-global.
 * **Each instance has its own:**
   * frame: the first detection it fuses, as in the pipeline stage today. Multisite Fusion's E2 found no need to re-anchor.
   * watermark: `FusionEngine` keeps one per instance
@@ -101,8 +102,12 @@ Method A is the baseline. It is how sensors already arrive (one sensor-network c
   * track-id namespace: the tracker's `id_namespace`, set to the cluster's name
 * **Each instance** runs Multisite Fusion's fuse loop (`FusionEngine.process` per event, in delivery order) over its own cluster's events only.
 * **Every clustered condition is timed two ways:**
-  * **parallel:** the instances run at once in separate processes. Its wall-clock estimates option 2, a platform-level split.
-  * **sequential:** the same instances one after another in one process. Their summed time estimates option 1, one engine that predicts and coasts only the tracks of the cluster an event belongs to.
+  * **parallel:** the instances run at once, each in its own process. It shows what they cost each other on one machine.
+  * **sequential:** the same instances one after another, each in a fresh process, so none competes for a core.
+* **From those times:**
+  * **option 1**, one engine that predicts and coasts only the tracks of the cluster an event belongs to, is estimated by the instances' summed time on one core
+  * **option 2**, a platform-level split, by the longest instance's time, with one core per cluster, or by the instances packed onto 2 cores
+* Times are the seconds spent in `FusionEngine.process`. They leave out reading the replay and the harness's own bookkeeping per event.
 
 ### Merge
 
@@ -117,7 +122,11 @@ Method A is the baseline. It is how sensors already arrive (one sensor-network c
   * A second target stays in the overlap.
 * **Handover options compared:**
   * **none:** the instances' outputs are concatenated as they are
-  * **stitch:** a track that ends in one instance is linked to one that starts in the other within a time window Δt and a distance d (both parameters, reported with the results)
+  * **stitch:** a track in one instance is continued by a track in another when:
+    * the second starts after the first, and no later than Δt after the first ends
+    * it stays within d of the first: of the first's last position if it starts after the first ends, otherwise as a median over the time both exist
+  * The stitch therefore joins both handovers and overlapping duplicates. Δt is the coast window (45 s) and d is the scoring's false-track distance (2 km).
+  * Each track continues at most one other, and is continued by at most one, the closest first.
 * **Run under:** method A (each group a cluster) and method C (a cell boundary between the groups).
 * **Reported:** duplicates, gap length, and what the stitch removes and costs.
 
@@ -141,8 +150,8 @@ Each site is reported in three runs: the single instance, the clustered run, and
 | Merge | duplicate tracks, gaps | the merge checks above |
 | Losses | events dropped as late, tracks refused at `max_live_tracks`, detections shed at `max_event_detections` | as in Multisite Fusion |
 | Cost | ms per event, by site; own-site and other-site ms per live track | as in Multisite Fusion (`fit_cost`) |
-| Throughput | detections/s per instance: its detections divided by its fuse-loop seconds | `time.perf_counter` |
-| Throughput | aggregate detections/s: all detections divided by the parallel wall-clock, on 2 cores and on one core per cluster | `time.perf_counter` |
+| Throughput | detections/s per instance: the detections it was offered, divided by its seconds in `FusionEngine.process` | `time.perf_counter` |
+| Throughput | aggregate detections/s: all detections divided by the instances' seconds summed (one core), packed onto 2 cores, or the longest instance's (one core per cluster) | `time.perf_counter` |
 | Clustering cost | µs per detection to route (method C); time to recluster when a sensor registers (method B) | `time.perf_counter` |
 
 Throughput is compared with I-394.2's 40 to 48 detections a second fused and 72 a second from one sensor, and with the exercise's busiest minute (329 SAPIENT records a second). Rates are compared within one machine. The machine is stated.
@@ -189,26 +198,151 @@ The synthetic case above, under methods A and C, with and without the stitch.
 
 ## Results
 
-*Not measured yet.* This section will give the commits, seeds, machine and commands, and the tables for P0, C1, C2 and C3.
+**Run:**
+
+| Item | Value |
+|---|---|
+| context-foundry | `ce05775` (the harness commit on this branch) |
+| scenario-foundry | `32a7de6` |
+| Seeds | scenarios 42, clutter 42 |
+| Machine | AMD Ryzen 5 5500U (6 cores, 12 threads), Python 3.12, Linux x86_64 |
+| Repeats | 3 per condition. Every condition gave the same tracks, scores, drops and refusals in all three; times are medians. |
+| Command | `python dev/cluster_fusion_benchmark.py experiments --scenario-foundry <scenario-foundry checkout> --repeats 3 --p0-delays 600 1200 --save <out>.json` |
+
+**Checks before reading:**
+* The refactored harness gave the same tracks, false tracks, error, drops and refusals for Multisite Fusion's E1 and E3 at 3 s as before the refactor.
+* Under method A, each far-pair cluster scored exactly as its site fused alone in E1, E3 at 3 s and E3 at 5 s, parallel and sequential: the same scores, event counts, drops, refusals, peak live tracks and gaps.
+* The own-site and other-site cost fit was not refitted. Multisite Fusion's fit stands, and the ms per event below shows the same effect.
+
+### P0: Multisite Fusion's open points
+
+**Cap timing.** At 5/s clutter the shared cap is first full at 02:47:10, after alakurtti has started its tracks, which is why E4 refused none of them. With alakurtti's launches moved later:
+
+| alakurtti launches | single: alakurtti tracks refused | single: V3_ARCTIC_HELI_ASSAULT gap | clustered by A: refused | clustered by A: gap |
+|---|---:|---:|---:|---:|
+| as in E4 | 0 | 45 s | 0 | 45 s |
+| 600 s later | 3 | 75 s | 0 | 45 s |
+| 1200 s later | 0 | 45 s | 0 | 45 s |
+
+* So the cap does refuse tracks across sites: joensuu's clutter cost alakurtti a 30 s longer gap on one swarm. Whether it happens depends on when the cap is full, not on how late alakurtti starts; at 1200 s the cap had room at the right moments.
+* Clustering by A removes it: alakurtti's own cap is never full.
+
+**Clutter confirming into tracks.** This is the confirmation rule as documented at `tracker.py:253-275`: a track confirms on 3 reports within 30 s, and that comment records 65 to 74 ghost tracks from 300 random false reports in two minutes. E4's clutter is 1 to 5 random reports a second, so it confirms into tracks as designed. The harness is not at fault.
+
+**A new cross-site effect: the confirmation window.** E1 showed no difference in tracks, false tracks or error, but the single engine left gaps of 252, 192 and 162 s at the start of three joensuu swarms (W1_DECOY, W2_KMS_PLANT, W2_KMS_RAILWAY) that joensuu fused alone does not have. The cause:
+* The tracker checks whether a tentative track has passed its 30 s window only when an event arrives (`_prune_stale_tracks`, `tracker.py:1395-1400`).
+* At the start only KOLI-01 sees these swarms, every 18 s, so the third report comes 36 s after the first.
+* Fused alone, no event arrives between 30 s and 36 s, so the third report still confirms the track.
+* In the single engine, alakurtti's events at 02:45:30.04 and 02:45:34.96 run the check, the tentative track is dropped, and it starts again. That repeats every cycle until a second sensor sees the swarm.
+* So whether one site's tracks are shown depends on how busy the other site is. Clustering by A removes it, because each instance only sees its own site's events.
+
+### C1: single against clustered against alone
+
+**Accuracy, E1 (combined).** Tracks, false tracks, median error, and gaps longer than the 45 s coast window:
+
+| Site | single | clustered by A | clustered by C | alone |
+|---|---|---|---|---|
+| joensuu | 6 tracks, 0 false, 21 m; gaps 252, 192, 162, 83 s | 6, 0, 21 m; gaps 48, 54, 48 s | 7, 0, 21 m; gaps 48, 54, 48 + 53 s | 6, 0, 21 m; gaps 48, 54, 48 s |
+| alakurtti | 5, 0, 25 m; gaps 245, 74, 45 s | 5, 0, 25 m; gaps 245, 74, 45 s | 8 (7 after the stitch), 0, 27 m; gaps 245, 60, 45 s | 5, 0, 25 m; gaps 245, 74, 45 s |
+
+* Method C splits tracks at cell edges: alakurtti's swarms cross cells, giving 3 more tracks, of which the stitch joins 1. joensuu's W2_KMS_AIRPORT gains a second gap.
+
+**Late gate, E3.** alakurtti's events dropped, of 577:
+
+| alakurtti behind | single | clustered by A | alone |
+|---|---|---|---|
+| 3 s | 112 (19%); 4 tracks, 27 m | 0; 5 tracks, 25 m | 0; 5 tracks, 25 m |
+| 5 s | 240 (42%); 5 tracks, 26 m | 0; 5 tracks, 25 m | 0; 5 tracks, 25 m |
+
+**Cost, E4.** alakurtti's median ms per event with clutter at joensuu (alone: 1.34 ms):
+
+| Clutter at joensuu | single | A, sequential | A, parallel |
+|---|---:|---:|---:|
+| 1/s | 3.49 | 1.18 | 1.70 |
+| 2/s | 5.61 | 1.40 | 1.67 |
+| 5/s | 11.64 | 1.42 | 2.10 |
+
+* Clustered, alakurtti's time per event is back at its alone value; in parallel it pays somewhat for sharing the machine.
+* joensuu at 5/s: single 1656 tracks, 1601 false, 147 refused; A 1628, 1571 false, 118 refused; C (17 cells) 1670, 1604 false, 0 refused. Each grid cell has its own cap, so none fills; more clutter then confirms.
+
+### Throughput
+
+Detections a second through `FusionEngine.process`, from the sequential runs (each instance in its own process, none sharing a core):
+
+| Condition | single | A: one core | A: core per cluster | C: one core | C: core per cluster | Slowest instance |
+|---|---:|---:|---:|---:|---:|---|
+| E1 combined | 897 | 1196 | 2389 | 1376 | 2633 | alakurtti 983 (A) |
+| clutter 1/s | 373 | 365 | 399 | | | joensuu 320 (A) |
+| clutter 2/s | 193 | 186 | 191 | | | joensuu 166 (A) |
+| clutter 5/s | 80 | 84 | 84 | 100 | 101 | joensuu 79 (A), cell r69c15 85 (C) |
+
+* With 2 clusters, "2 cores" equals "core per cluster".
+* **Without clutter**, splitting the far pair raises throughput by a third on one core, because each event predicts fewer tracks, and gives 2.7 times on two.
+* **Under load**, the busiest cluster sets the rate. At 5/s clutter, joensuu's instance alone is as slow as the single engine (about 80 a second). 100 km cells lift the total to about 100, but the busiest cell still does only 85.
+* **Parallel runs:** two instances at once ran as fast as one after the other. 17 instances at once (C at 5/s) on 12 threads and about 4 GB of memory were each slower, so the core-per-cluster figure for C assumes cores that this machine doesn't have.
+* **Noise:** runs of 1 to 2 s (no clutter) vary by up to about 30% between modes; runs of 160 s or more (5/s) vary by a few percent.
+* **Against the platform's rates:** these are laptop rates, not the pipeline's hardware, so they show proportions, not headroom. Under clutter, one instance here does 70 to 85 detections a second, the same order as I-394.2's 40 to 48 fused and the 72 a second burst. The exercise's busiest minute (329 SAPIENT records a second) is about four times that; clustering would only reach it if the load spread over four or more clusters of similar weight, and in E4 it doesn't.
+
+### C2: clustering cost and stability
+
+* **Method B:** the geometry table under [Clustering](#clustering) holds. No threshold gives back the deployments: under 250 km alakurtti and hamina_kotka split (alakurtti spans 274 km, hamina_kotka 204 km), and from 250 km up sites merge. Reclustering all 27 sensors when one registers takes 0.3 ms.
+* **Routing:** 0.6 to 17 µs a detection for A and 1.4 to 21 µs for C, against 1 to 12 ms per event to fuse: 2% or less in every condition.
+* **Method C at cell edges:** see E1 above: 3 extra alakurtti tracks and one extra joensuu gap at 100 km cells.
+
+### C3: boundary case B1 (synthetic)
+
+Two targets, two radar groups whose footprints overlap. Tracks are counted by the group nearest their first position.
+
+| Run | Tracks | Duplicates | Stitch links | After the stitch | Median error | Gaps |
+|---|---:|---:|---:|---:|---:|---|
+| single | 2 | 0 | 0 | 2 tracks, 0 duplicates | 23 m | none |
+| clustered by A | 4 | 2 | 2 | 2 tracks, 0 duplicates | 23 to 25 m | none |
+| clustered by C | 4 | 1 | 2 | 2 tracks, 0 duplicates | 31 to 32 m | none |
+
+* Clustered, the overlap target is tracked by both instances, and the crossing target gets a second track when it enters the other group's area. The stitch joins both kinds, so the merged picture has the single engine's 2 tracks again.
+* Under C, the cell edge splits each target's detections between instances, so each instance fuses fewer reports per target and the error rises by about 9 m. A doesn't split detections, so its error stays at the single engine's.
 
 ---
 
 ## Recommendation
 
-*Written once the results exist.* It will choose and justify one of:
+**Split by deployment where the platform composes fusion (option 2, method A), but not as a fix for throughput.** Do not build a geographic router (method C) or engine-level partitioning (option 1) now.
 
-1. **Engine-level partitioning:** one process, with tracks indexed by region so that only nearby tracks are predicted or coasted. Estimated by the sequential timing.
-2. **Platform-level split:** a region-router stage feeding several `fusion` stages. Estimated by the parallel timing. It touches:
-   * pipeline-stages
-   * the pipeline-catalog descriptor
-   * pipeline composition in rain-data-pipelines
-   * the cell attribution of I-336.1
-3. **Not worth it**, with the numbers.
+**Why method A.** On the far pair, clustering by deployment is exact: each instance gives what its site gives fused alone, in every condition. It removes four ways one site affects the other in a shared engine:
 
-It will:
-* name the follow-up issues and repos
-* say how much of the exercise's late-gate loss a per-cluster watermark would have removed, given that I-394.7's losses came from individual senders
-* propose the measured rates as a line for `docs/pipelines-fusion-runbook.md` in rain-iam-platform, as a separate change
+| Cross-site effect | single | clustered by A |
+|---|---|---|
+| Late gate (E3) | 19% and 42% of alakurtti's events dropped | none |
+| Cost per event (E4, 5/s) | alakurtti 11.6 ms | 1.4 ms |
+| Track cap (P0, 600 s) | 3 alakurtti tracks refused, a 30 s longer gap | none |
+| Confirmation window (E1) | three joensuu swarms first shown 108 to 216 s later than alone | none |
+
+Routing by `nodeId` costs microseconds. Since sensors already arrive one sensor-network config per deployment, no geometry is needed.
+
+**Why not method C.** Cells split tracks and raise the error where a target meets a cell edge (B1: 23 m to 32 m), and they fragment the far pair's tracks (alakurtti 5 to 8). The only gain is a cap per cell, which lets more clutter confirm into tracks. The busiest cell is no faster than the busiest deployment.
+
+**Why not method B.** Sensor position does not recover the deployments at any threshold.
+
+**Why not option 1.** Estimated by the summed time on one core, engine-level partitioning gains a third without clutter and 5% at 5/s clutter. It would remove the cost effect, but the late gate, the cap and the confirmation window would each need a per-partition version, which amounts to separate engines in one thread. Option 2 gets all of that from processes the platform already runs.
+
+**What it does not fix.**
+* **Throughput (I-394.2):** under load the busiest deployment bounds the rate, and clustering does not make it faster. That needs a cheaper event in the engine (the cost per live track per event).
+* **Most of the exercise's late drops (I-394.7):** a per-deployment watermark removes drops caused by one deployment running behind another. I-394.7 found most losses came from individual senders lagging or catching up in bursts, and when the lagging sender is in the same deployment as the one that set the watermark, nothing changes. How much it would have removed needs the exercise's records mapped to deployments (I-336.1), which this page leaves out.
+* **The near pair:** porvoo_oil_refinery and hamina_kotka are 85 km apart with overlapping footprints, so method A would produce boundary duplicates there. B1 shows the stitch removes them on synthetic data. It stays unmeasured until scenario-foundry has configs for both sites.
+
+**Follow-ups:**
+
+| Repo | Item |
+|---|---|
+| context-foundry | Issue: a tentative track's confirmation window is checked only when some event arrives, so whether a track that takes 30 to 36 s to get its third report is shown depends on unrelated traffic. Making it deterministic is a design choice: checked strictly, a 30 s window drops objects seen only by an 18 s radar, against the window's own rule that it holds three revisits of the slowest sensor. |
+| context-foundry | Issue: the per-event cost per live track, for I-394.2. Clustering doesn't remove it. |
+| rain-iam-platform, pipeline-stages, rain-data-pipelines | Proposal: compose one `fusion` stage per deployment and merge their output, with the stitch where deployments overlap. |
+| scenario-foundry | Scenario configs for porvoo_oil_refinery and hamina_kotka, to measure the near pair. |
+| rain-iam-platform | A line for `docs/pipelines-fusion-runbook.md`, as a separate change (below). |
+
+**Proposed runbook line** (`rain-iam-platform`, `docs/pipelines-fusion-runbook.md`):
+
+> One fusion engine, measured on a laptop, fuses about 900 to 1,400 detections a second on the far pair without clutter, and about 70 to 85 a second with 5 false reports a second at one site (about 120 live tracks). Splitting fusion by deployment removes cross-site late drops, cost and cap refusals but does not speed up the busiest deployment. Source: context-foundry `docs/03-evaluation/cluster-parallel-fusion.md`.
 
 ---
 
