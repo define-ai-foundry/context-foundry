@@ -339,7 +339,7 @@ Two targets, two radar groups whose footprints overlap. Tracks are counted by th
 |---|---|---|---|---|
 | 1 | Per-event cost grows with every live track (the coast step of each unmatched track) | E4, Throughput | [context-foundry#33](https://github.com/define-ai-foundry/context-foundry/issues/33), the engine side of I-394.2 | Profile E4 at 5/s, then cut the per-event work for tracks no detection can reach. |
 | 2 | A tentative track is confirmed or dropped depending on unrelated events | E1 | [context-foundry#32](https://github.com/define-ai-foundry/context-foundry/issues/32) | Confirmation depends only on the track's own reports; size the window against the slowest sensor's revisit and measure ghost tracks under clutter. |
-| 3 | A site's own clutter leaves its swarms uncovered for 413 to 965 s and fills the track cap | E4 | context-foundry issue to open | Decided in that issue, after [context-foundry#33](https://github.com/define-ai-foundry/context-foundry/issues/33)'s profile. |
+| 3 | A site's own clutter leaves its swarms uncovered for 413 to 965 s and fills the track cap | E4 | [context-foundry#35](https://github.com/define-ai-foundry/context-foundry/issues/35) | Decided in that issue, after [context-foundry#33](https://github.com/define-ai-foundry/context-foundry/issues/33)'s profile. |
 | — | Late drops from senders' bursts | I-394.7 | rain-iam-platform, closed | Fusion's limits recorded there; not an engine change. |
 | — | Cross-site late gate | E3 | none | Small on the exercise; no change. |
 | — | The near pair (porvoo_oil_refinery, hamina_kotka) is unmeasured | [Inputs](#inputs) | none | Needs scenario configs; only relevant if clustering is revisited. |
