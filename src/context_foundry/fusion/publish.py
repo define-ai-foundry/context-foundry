@@ -32,6 +32,8 @@ from .cot_input import COT_NODE
 from .sapient_raw import cot_node_id, cot_object_ulid
 
 POLICIES = ("all", "updates", "coast", "predicted", "window")
+# The rules that never send a predicted state, so need no track coasted each event.
+UPDATES_ONLY = ("updates", "window")
 DEFAULT_COAST_SECONDS = 5.0
 DEFAULT_WINDOW_SECONDS = 5.0
 
