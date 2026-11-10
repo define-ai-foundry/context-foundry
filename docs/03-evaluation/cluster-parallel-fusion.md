@@ -73,7 +73,7 @@
 | **B. By sensor position** | single-linkage over sensor positions with a distance threshold; a detection goes to its sensor's cluster | a dictionary lookup, plus reclustering when a sensor registers |
 | **C. By detection position** | a fixed lat/lon grid (cell size a parameter, 100 km by default); a detection goes to the cell it lies in | a cell computation; measured |
 
-Method A is the baseline. It is how sensors already arrive (one sensor-network config per deployment), and it needs no geometry.
+Method A is the baseline. In the CLI and this harness, sensors arrive as one sensor-network config per deployment, so it needs no geometry. The platform's `fusion` stage has no such config: see [Recommendation](#recommendation).
 
 **Method B on sensor geometry alone.** Single-linkage over all four sites' sensor configs gives the clusters below. No scenarios are needed for this.
 
@@ -87,7 +87,7 @@ Method A is the baseline. It is how sensors already arrive (one sensor-network c
 | footprints overlap (distance < range of one + range of the other) | 1 |
 
 * No threshold gives back the four sites.
-* alakurtti's own sensors are up to 274 km apart, so any threshold under that splits alakurtti.
+* alakurtti's sensors are up to 274 km apart, but single linkage chains through its middle sensors, so it stays whole at 250 km and splits at 150 km and under.
 * hamina_kotka's radar has a 400 km range and sits in Jyväskylä, 210 km from joensuu.
 * Linking sensors whose footprints overlap therefore puts all four sites in one cluster.
 * So sensor position alone doesn't recover the deployments. Method B is reported as this table, plus the far pair at the thresholds that split alakurtti.
@@ -113,7 +113,7 @@ Method A is the baseline. It is how sensors already arrive (one sensor-network c
 
 * The instances' fused CoT is concatenated into one picture and scored per site with `fusion_benchmark.score_tracks`, as in Multisite Fusion.
 * **Duplicate:** two tracks from different instances, matched to the same swarm, whose lifetimes overlap.
-* **Gap:** a stretch longer than the coast window in which a swarm has no track, although it is inside some sensor's range.
+* **Gap:** a stretch at least as long as the coast window in which a swarm has no track, although it is inside some sensor's range.
 
 ### Boundary case B1 (synthetic)
 
@@ -238,7 +238,7 @@ The synthetic case above, under methods A and C, with and without the stitch.
 
 ### C1: single against clustered against alone
 
-**Accuracy, E1 (combined).** Tracks, false tracks, median error, and gaps longer than the 45 s coast window:
+**Accuracy, E1 (combined).** Tracks, false tracks, median error, and gaps at least as long as the 45 s coast window:
 
 | Site | single | clustered by A | clustered by C | alone |
 |---|---|---|---|---|
@@ -264,6 +264,7 @@ The synthetic case above, under methods A and C, with and without the stitch.
 
 * Clustered, alakurtti's time per event is back at its alone value; in parallel it pays somewhat for sharing the machine.
 * joensuu at 5/s: single 1656 tracks, 1601 false, 147 refused; A 1628, 1571 false, 118 refused; C (17 cells) 1670, 1604 false, 0 refused. Each grid cell has its own cap, so none fills; more clutter then confirms.
+* joensuu's own swarms at 5/s, sequential: each of its five is uncovered for 413 to 965 s on one engine and under A alike (W1_DECOY 413 s both, W2_KMS_PLANT 632 s both, W2_KMS_AIRPORT 948 s single and 965 s A), with peak live tracks 119 and 120. alakurtti's gaps stay at E1's.
 
 ### Throughput
 
@@ -285,7 +286,7 @@ Detections a second through `FusionEngine.process`, from the sequential runs (ea
 
 ### C2: clustering cost and stability
 
-* **Method B:** the geometry table under [Clustering](#clustering) holds. No threshold gives back the deployments: under 250 km alakurtti and hamina_kotka split (alakurtti spans 274 km, hamina_kotka 204 km), and from 250 km up sites merge. Reclustering all 27 sensors when one registers takes 0.3 ms.
+* **Method B:** the geometry table under [Clustering](#clustering) holds. No threshold gives back the deployments: at 150 km and under alakurtti and hamina_kotka split (single linkage chains through their middle sensors, so neither splits at its 274 km and 204 km spans), and from 250 km up sites merge. Reclustering all 27 sensors when one registers takes 0.3 ms.
 * **Routing:** 0.6 to 17 µs a detection for A and 1.4 to 21 µs for C, against 1 to 12 ms per event to fuse: 2% or less in every condition.
 * **Method C at cell edges:** see E1 above: 3 extra alakurtti tracks and one extra joensuu gap at 100 km cells.
 
@@ -317,7 +318,9 @@ Two targets, two radar groups whose footprints overlap. Tracks are counted by th
 | Track cap (P0, 600 s) | 3 alakurtti tracks refused, a 30 s longer gap | none |
 | Confirmation window (E1) | three joensuu swarms first shown 108 to 216 s later than alone | none |
 
-Routing by `nodeId` costs microseconds. Since sensors already arrive one sensor-network config per deployment, no geometry is needed.
+Routing by `nodeId` costs microseconds, and in the CLI and this harness, which load one sensor-network config per deployment, it needs no geometry.
+
+**What the platform lacks for it.** The `fusion` stage has no sensor config to route by: its sensor registry is learned from its input (rain-iam-platform `DECISIONS.md`, Fusion), and which cell a sensor belongs to is not known, since every cell sends to the same two listener ports (I-336.1). Option 2 therefore needs a routing key first: one pipeline and listener per deployment, or a router stage with a node-to-deployment table. Either changes `DECISIONS.md` Exercise pipeline, which runs every cell on one pipeline with one `fusion` and rejected a pipeline per cell because it splits the fused picture; a proposal must keep one merged picture.
 
 **Why not method C.** Cells split tracks and raise the error where a target meets a cell edge (B1: 23 m to 32 m), and they fragment the far pair's tracks (alakurtti 5 to 8). The only gain is a cap per cell, which lets more clutter confirm into tracks. The busiest cell is no faster than the busiest deployment.
 
@@ -327,6 +330,7 @@ Routing by `nodeId` costs microseconds. Since sensors already arrive one sensor-
 
 **What it does not fix.**
 * **Throughput (I-394.2):** under load the busiest deployment bounds the rate, and clustering does not make it faster. That needs a cheaper event in the engine (the cost per live track per event).
+* **A site's own clutter (E4):** at 5/s, joensuu's swarms go uncovered for 413 to 965 s on one engine and under A alike. Clustering by deployment protects a site from another site's clutter, not from its own.
 * **Most of the exercise's late drops (I-394.7):** a per-deployment watermark removes drops caused by one deployment running behind another. I-394.7 found most losses came from individual senders lagging or catching up in bursts, and when the lagging sender is in the same deployment as the one that set the watermark, nothing changes. How much it would have removed needs the exercise's records mapped to deployments (I-336.1), which this page leaves out.
 * **The near pair:** porvoo_oil_refinery and hamina_kotka are 85 km apart with overlapping footprints, so method A would produce boundary duplicates there. B1 shows the stitch removes them on synthetic data. It stays unmeasured until scenario-foundry has configs for both sites.
 
@@ -336,13 +340,13 @@ Routing by `nodeId` costs microseconds. Since sensors already arrive one sensor-
 |---|---|
 | context-foundry | Issue: a tentative track's confirmation window is checked only when some event arrives, so whether a track that takes 30 to 36 s to get its third report is shown depends on unrelated traffic. Making it deterministic is a design choice: checked strictly, a 30 s window drops objects seen only by an 18 s radar, against the window's own rule that it holds three revisits of the slowest sensor. |
 | context-foundry | Issue: the per-event cost per live track, for I-394.2. Clustering doesn't remove it. |
-| rain-iam-platform, pipeline-stages, rain-data-pipelines | Proposal: compose one `fusion` stage per deployment and merge their output, with the stitch where deployments overlap. |
+| rain-iam-platform, pipeline-stages, rain-data-pipelines | Proposal, starting from a revision of `DECISIONS.md` Exercise pipeline: a routing key per deployment (a pipeline and listener per deployment, or a router stage with a node-to-deployment table, I-336.1), then one `fusion` stage per deployment with their output merged into one picture, with the stitch where deployments overlap. |
 | scenario-foundry | Scenario configs for porvoo_oil_refinery and hamina_kotka, to measure the near pair. |
 | rain-iam-platform | A line for `docs/pipelines-fusion-runbook.md`, as a separate change (below). |
 
 **Proposed runbook line** (`rain-iam-platform`, `docs/pipelines-fusion-runbook.md`):
 
-> One fusion engine, measured on a laptop, fuses about 900 to 1,400 detections a second on the far pair without clutter, and about 70 to 85 a second with 5 false reports a second at one site (about 120 live tracks). Splitting fusion by deployment removes cross-site late drops, cost and cap refusals but does not speed up the busiest deployment. Source: context-foundry `docs/03-evaluation/cluster-parallel-fusion.md`.
+> Splitting fusion by deployment raised the rate on the far pair without clutter by about a third on one core and about 2.7 times with a core per deployment; with 5 false reports a second at one site, the busiest deployment's engine bounds the rate and splitting gained about 5%. It removes cross-site late drops, cost and cap refusals but does not speed up the busiest deployment. Absolute rates moved about 3.5 times between two laptops, so headroom needs a measurement on the iamrain node. Source: context-foundry `docs/03-evaluation/cluster-parallel-fusion.md`.
 
 ---
 
