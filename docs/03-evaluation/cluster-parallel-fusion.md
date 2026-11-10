@@ -14,7 +14,7 @@
   1. engine-level partitioning in one process
   2. a platform-level region router feeding several `fusion` stages
   3. not worth building
-* **Result:** clustering by deployment gives each site exactly what it gets fused alone. It removes four cross-site effects of a shared engine: late-gate drops, cost per event, cap refusals, and a newly found one in track confirmation. It does not speed up the busiest deployment under load. A grid by detection position splits tracks at cell edges. [Recommendation](#recommendation): split by deployment in the platform (option 2, method A); throughput needs a cheaper engine event instead.
+* **Result:** clustering by deployment gives each site exactly what it gets fused alone. It removes four cross-site effects of a shared engine: late-gate drops, cost per event, cap refusals, and a newly found one in track confirmation. It does not speed up the busiest deployment under load. A grid by detection position splits tracks at cell edges. [Recommendation](#recommendation): not worth building now (option 3). The platform has no routing key per deployment, and each effect either has a cheaper fix in the engine or was small on the exercise. Fix the engine first (cost per live track, the confirmation window); method A stays the design if a revisit trigger is met.
 
 ---
 
@@ -282,7 +282,7 @@ Detections a second through `FusionEngine.process`, from the sequential runs (ea
 * **Under load**, the busiest cluster sets the rate. At 5/s clutter, joensuu's instance alone is as slow as the single engine (about 80 a second). 100 km cells lift the total to about 100, but the busiest cell still does only 85.
 * **Parallel runs:** two instances at once ran as fast as one after the other. 17 instances at once (C at 5/s) on 12 threads and about 4 GB of memory were each slower, so the core-per-cluster figure for C assumes cores that this machine doesn't have.
 * **Noise:** runs of 1 to 2 s (no clutter) vary by up to about 30% between modes; runs of 160 s or more (5/s) vary by a few percent.
-* **Against the platform's rates:** these are laptop rates, not the pipeline's hardware, so they show proportions, not headroom. Under clutter, one instance here does 70 to 85 detections a second, the same order as I-394.2's 40 to 48 fused and the 72 a second burst. The exercise's busiest minute (329 SAPIENT records a second) is about four times that; clustering would only reach it if the load spread over four or more clusters of similar weight, and in E4 it doesn't.
+* **Against the platform's rates:** these are laptop rates, not the pipeline's hardware, so they show proportions, not headroom. They moved about 3.5 times between two machines (E1 single 897 a second here, 3,162 to 3,541 on another), so they are not set against I-394.2's 40 to 48 fused a second or the exercise's busiest minute (329 SAPIENT records a second). What carries over: under clutter the busiest cluster sets the rate, so clustering raises the total only as far as the load spreads over clusters of similar weight, and in E4 it doesn't.
 
 ### C2: clustering cost and stability
 
@@ -307,28 +307,33 @@ Two targets, two radar groups whose footprints overlap. Tracks are counted by th
 
 ## Recommendation
 
-**Split by deployment where the platform composes fusion (option 2, method A), but not as a fix for throughput.** Do not build a geographic router (method C) or engine-level partitioning (option 1) now.
+**Not worth building now (option 3).** Fix the engine first. Clustering by deployment (method A) is the design to use if a revisit trigger below is met; a geographic router (method C) and engine-level partitioning (option 1) are not.
 
-**Why method A.** On the far pair, clustering by deployment is exact: each instance gives what its site gives fused alone, in every condition. It removes four ways one site affects the other in a shared engine:
+**What method A gives.** On the far pair, clustering by deployment is exact: each instance gives what its site gives fused alone, in every condition. It removes four ways one site affects the other in a shared engine:
 
-| Cross-site effect | single | clustered by A |
-|---|---|---|
-| Late gate (E3) | 19% and 42% of alakurtti's events dropped | none |
-| Cost per event (E4, 5/s) | alakurtti 11.6 ms | 1.4 ms |
-| Track cap (P0, 600 s) | 3 alakurtti tracks refused, a 30 s longer gap | none |
-| Confirmation window (E1) | three joensuu swarms first shown 108 to 216 s later than alone | none |
+| Cross-site effect | single | clustered by A | Weighed against the exercise and the engine |
+|---|---|---|---|
+| Late gate (E3) | 19% and 42% of alakurtti's events dropped | none | Small on the exercise: most late drops came from senders' bursts (I-394.7), and a replay of 27 October 08:10–11:33 UTC in event-time order through the `fusion` stage's code dropped 22 detections as late against 453,976 records (from the review of this page, context-foundry#31; not rerun here). |
+| Cost per event (E4, 5/s) | alakurtti 11.6 ms | 1.4 ms | Real, but a cheaper event in the engine removes it for every site and also serves throughput (I-394.2), which clustering does not. |
+| Track cap (P0, 600 s) | 3 alakurtti tracks refused, a 30 s longer gap | none | Seen only with synthetic clutter at the other site; a site's own clutter still fills its cap under A (E4: 118 refused). |
+| Confirmation window (E1) | three joensuu swarms first shown 108 to 216 s later than alone | none | An engine defect: the window is checked only when some event arrives. Fixing it in the engine removes it for every site. |
 
 Routing by `nodeId` costs microseconds, and in the CLI and this harness, which load one sensor-network config per deployment, it needs no geometry.
 
-**What the platform lacks for it.** The `fusion` stage has no sensor config to route by: its sensor registry is learned from its input (rain-iam-platform `DECISIONS.md`, Fusion), and which cell a sensor belongs to is not known, since every cell sends to the same two listener ports (I-336.1). Option 2 therefore needs a routing key first: one pipeline and listener per deployment, or a router stage with a node-to-deployment table. Either changes `DECISIONS.md` Exercise pipeline, which runs every cell on one pipeline with one `fusion` and rejected a pipeline per cell because it splits the fused picture; a proposal must keep one merged picture.
+**What the platform lacks for it.** The `fusion` stage has no sensor config to route by: its sensor registry is learned from its input (rain-iam-platform `DECISIONS.md`, Fusion), and which cell a sensor belongs to is not known, since every cell sends to the same two listener ports (I-336.1). Option 2 therefore needs a routing key first: one pipeline and listener per deployment, or a router stage with a node-to-deployment table. Either changes `DECISIONS.md` Exercise pipeline, which runs every cell on one pipeline with one `fusion` and rejected a pipeline per cell because it splits the fused picture; a proposal must keep one merged picture. It would also need a merge and the stitch, unmeasured on real overlapping deployments (the near pair).
+
+**Revisit when** any of these holds:
+* after the engine fixes, one deployment's load still slows another's events by a measurable share;
+* the platform gains a routing key per deployment for another reason (I-336.1);
+* an exercise shows late drops caused by one deployment running behind another.
 
 **Why not method C.** Cells split tracks and raise the error where a target meets a cell edge (B1: 23 m to 32 m), and they fragment the far pair's tracks (alakurtti 5 to 8). The only gain is a cap per cell, which lets more clutter confirm into tracks. The busiest cell is no faster than the busiest deployment.
 
 **Why not method B.** Sensor position does not recover the deployments at any threshold.
 
-**Why not option 1.** Estimated by the summed time on one core, engine-level partitioning gains a third without clutter and 5% at 5/s clutter. It would remove the cost effect, but the late gate, the cap and the confirmation window would each need a per-partition version, which amounts to separate engines in one thread. Option 2 gets all of that from processes the platform already runs.
+**Why not option 1.** Estimated by the summed time on one core, engine-level partitioning gains a third without clutter and 5% at 5/s clutter. It would remove the cost effect, but the late gate, the cap and the confirmation window would each need a per-partition version, which amounts to separate engines in one thread. If a split is ever needed, option 2 gets all of that from processes the platform already runs.
 
-**What it does not fix.**
+**What clustering would not fix.**
 * **Throughput (I-394.2):** under load the busiest deployment bounds the rate, and clustering does not make it faster. That needs a cheaper event in the engine (the cost per live track per event).
 * **A site's own clutter (E4):** at 5/s, joensuu's swarms go uncovered for 413 to 965 s on one engine and under A alike. Clustering by deployment protects a site from another site's clutter, not from its own.
 * **Most of the exercise's late drops (I-394.7):** a per-deployment watermark removes drops caused by one deployment running behind another. I-394.7 found most losses came from individual senders lagging or catching up in bursts, and when the lagging sender is in the same deployment as the one that set the watermark, nothing changes. How much it would have removed needs the exercise's records mapped to deployments (I-336.1), which this page leaves out.
@@ -339,14 +344,13 @@ Routing by `nodeId` costs microseconds, and in the CLI and this harness, which l
 | Repo | Item |
 |---|---|
 | context-foundry | Issue: a tentative track's confirmation window is checked only when some event arrives, so whether a track that takes 30 to 36 s to get its third report is shown depends on unrelated traffic. Making it deterministic is a design choice: checked strictly, a 30 s window drops objects seen only by an 18 s radar, against the window's own rule that it holds three revisits of the slowest sensor. |
-| context-foundry | Issue: the per-event cost per live track, for I-394.2. Clustering doesn't remove it. |
-| rain-iam-platform, pipeline-stages, rain-data-pipelines | Proposal, starting from a revision of `DECISIONS.md` Exercise pipeline: a routing key per deployment (a pipeline and listener per deployment, or a router stage with a node-to-deployment table, I-336.1), then one `fusion` stage per deployment with their output merged into one picture, with the stitch where deployments overlap. |
+| context-foundry | Issue: the per-event cost per live track, for I-394.2. It comes first: it serves throughput and removes the cost effect for every site. |
 | scenario-foundry | Scenario configs for porvoo_oil_refinery and hamina_kotka, to measure the near pair. |
 | rain-iam-platform | A line for `docs/pipelines-fusion-runbook.md`, as a separate change (below). |
 
 **Proposed runbook line** (`rain-iam-platform`, `docs/pipelines-fusion-runbook.md`):
 
-> Splitting fusion by deployment raised the rate on the far pair without clutter by about a third on one core and about 2.7 times with a core per deployment; with 5 false reports a second at one site, the busiest deployment's engine bounds the rate and splitting gained about 5%. It removes cross-site late drops, cost and cap refusals but does not speed up the busiest deployment. Absolute rates moved about 3.5 times between two laptops, so headroom needs a measurement on the iamrain node. Source: context-foundry `docs/03-evaluation/cluster-parallel-fusion.md`.
+> Splitting fusion by deployment raised the rate on the far pair without clutter by about a third on one core and about 2.7 times with a core per deployment; with 5 false reports a second at one site, the busiest deployment's engine bounds the rate and splitting gained about 5%. It would remove cross-site late drops, cost and cap refusals but not speed up the busiest deployment, and it is not planned. Absolute rates moved about 3.5 times between two laptops, so headroom needs a measurement on the iamrain node. Source: context-foundry `docs/03-evaluation/cluster-parallel-fusion.md`.
 
 ---
 
