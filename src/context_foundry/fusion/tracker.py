@@ -28,6 +28,7 @@ from stonesoup.types.track import Track
 from stonesoup.updater.kalman import KalmanUpdater, UnscentedKalmanUpdater
 
 from .models import create_9d_constant_acceleration_model
+from .reach import reachable_rows, track_row
 
 logger = logging.getLogger(__name__)
 
@@ -674,6 +675,9 @@ class SapientAsynchronousTracker:
         # keep, or None), so pruning a track not coasted skips the exact check; see
         # _may_be_wide.
         self._narrow_until: dict[str, tuple] = {}
+        # Track id -> (state, motion, row): the numbers the reach check needs, rebuilt
+        # only when the track's state or motion changes; see _reachable.
+        self._reach_rows: dict[str, tuple] = {}
         # CoT object key -> time of its latest event fused; see _binding_lapsed.
         self._cot_seen: dict[tuple, datetime] = {}
         # Track id -> the latest self-report of the self-reporting uid bound to the track;
@@ -720,9 +724,7 @@ class SapientAsynchronousTracker:
         # could only be assigned its missed-detection column, so leaving it out changes
         # no assignment; it is what keeps an event's cost to the tracks near it rather
         # than every track in the picture.
-        reachable = {
-            track for track in remaining_tracks if self._may_gate(track, remaining_detections)
-        }
+        reachable = self._reachable(remaining_tracks, remaining_detections)
         if reachable:
             associations.update(
                 self.data_associator.associate(reachable, remaining_detections, timestamp)
@@ -785,6 +787,29 @@ class SapientAsynchronousTracker:
         self._prune_stale_tracks(timestamp)
 
         return self.confirmed_tracks()
+
+    def _reachable(self, tracks, detections):
+        """The tracks that may fall inside a detection's gate, all checked in one array call.
+
+        `_may_gate`'s bound for every track at once (`reach.reachable_rows`): each track's
+        numbers are kept as a row, rebuilt only when its state or motion changes, so an
+        event costs a row lookup per live track rather than a prediction.
+        """
+        tracks = list(tracks)
+        if not tracks or not detections:
+            return set()
+        rows = []
+        for track in tracks:
+            state = track.state
+            motion = self._motion(track)
+            cached = self._reach_rows.get(track.id)
+            if cached is None or cached[0] is not state or cached[1] != motion:
+                noise = self._axis_noise if motion is None else self._motion_noise[motion]
+                cached = (state, motion, track_row(state, noise))
+                self._reach_rows[track.id] = cached
+            rows.append(cached[2])
+        reached = reachable_rows(np.stack(rows), detections, GATE_MAHALANOBIS_DISTANCE**2)
+        return {track for track, hit in zip(tracks, reached, strict=True) if hit}
 
     def _may_gate(self, track, detections):
         """Whether a track could fall inside the validation gate of any of the detections.
@@ -1449,6 +1474,7 @@ class SapientAsynchronousTracker:
             self._cot_uids,
             self._posteriors,
             self._narrow_until,
+            self._reach_rows,
         )
         for book in books:
             for track_id in ids:
@@ -1537,5 +1563,8 @@ class SapientAsynchronousTracker:
             track_id: narrow
             for track_id, narrow in self._narrow_until.items()
             if track_id in active_ids
+        }
+        self._reach_rows = {
+            track_id: row for track_id, row in self._reach_rows.items() if track_id in active_ids
         }
         self._cot_seen = {k: seen for k, seen in self._cot_seen.items() if k in self._object_tracks}
