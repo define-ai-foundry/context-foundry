@@ -330,7 +330,7 @@ Two targets, two radar groups whose footprints overlap. Tracks are counted by th
 * **A site's own clutter (E4):** at 5/s, joensuu's swarms go uncovered for 413 to 965 s on one engine and under A alike.
 * **The exercise's late drops:** most came from fusion falling behind its input, the rest from individual senders lagging, running on an offset clock or catching up in bursts ([pipeline-stages#58](https://github.com/define-ai-foundry/pipeline-stages/issues/58)). Clustering changes the first only as far as it speeds up the busiest deployment, and the second not at all.
 
-**Revisit only if** the platform comes to provide a sensor-to-deployment mapping and, after the engine fixes, one deployment's load still slows another's events by a measurable share.
+**Revisit only if,** after the engine fixes ([context-foundry#33](https://github.com/define-ai-foundry/context-foundry/issues/33)), one `fusion` on the iamrain node cannot keep up with the exercise's peak rate (I-336.2). Splitting is then the way to use more than one core, since the engine runs on one Python thread. With no sensor-to-deployment mapping it needs a partition key by position: a grid with the stitch, which removed border duplicates in B1 (synthetic) but splits tracks at cell edges. `dev/cluster_fusion_benchmark.py` measures one engine against several.
 
 **Problems found and where they are fixed.** Each issue holds the design of its fix; this table holds the order.
 
