@@ -1993,3 +1993,56 @@ def test_a_track_not_coasted_is_updated_to_the_same_state():
     for (lazy_time, lazy_state), (coasted_time, coasted_state) in zip(lazy, coasted, strict=True):
         assert lazy_time == coasted_time
         assert lazy_state == pytest.approx(coasted_state, abs=1e-6)
+
+
+def test_a_track_is_never_too_uncertain_before_its_narrow_time():
+    """The shortcut only skips the exact check while the track cannot be too uncertain,
+    whatever the correlations in its covariance."""
+    tracker = SapientAsynchronousTracker(coast_unmatched=False, max_coast_position_sigma=500.0)
+    rng = np.random.default_rng(7)
+    for _ in range(200):
+        root = rng.normal(size=(9, 9)) * rng.uniform(1.0, 60.0)
+        covar = root @ root.T
+        state = GaussianState(StateVector(rng.normal(size=9)), covar, timestamp=T0)
+        track = Track([state])
+        seconds = tracker._narrow_seconds(state, None)
+        if seconds is None:
+            continue
+        for fraction in (0.0, 0.25, 0.5, 0.75, 1.0):
+            moment = T0 + timedelta(seconds=seconds * fraction)
+            assert tracker._coasted_position_sigma(track, moment) <= 500.0 + 1e-6
+
+
+def test_pruning_checks_a_narrow_track_exactly_only_once_it_may_be_wide(monkeypatch):
+    tracker = SapientAsynchronousTracker(
+        coast_unmatched=False, max_coast_seconds=10_000.0, max_coast_position_sigma=300.0
+    )
+    tracker.process_async_event(T0, {_det(0.0, 0.0, 500.0, T0)})
+    (track,) = tuple(tracker.tracks)
+    exact = []
+    original = tracker._coasted_position_sigma
+    monkeypatch.setattr(
+        tracker,
+        "_coasted_position_sigma",
+        lambda t, now: exact.append(now) or original(t, now),
+    )
+
+    tracker._prune_stale_tracks(T0 + timedelta(seconds=1))
+    assert exact == []
+
+    narrow = tracker._narrow_until[track.id][2]
+    tracker._prune_stale_tracks(narrow + timedelta(seconds=1))
+    assert exact == [narrow + timedelta(seconds=1)]
+
+
+def test_a_track_already_too_uncertain_is_always_checked_exactly():
+    tracker = SapientAsynchronousTracker(coast_unmatched=False, max_coast_position_sigma=300.0)
+    track = _wide_track(0.0, 0.0, 400.0)
+
+    assert tracker._may_be_wide(track, T0)
+    assert tracker._narrow_until[track.id][2] is None
+
+
+def test_a_coasted_track_is_always_checked_exactly():
+    tracker = SapientAsynchronousTracker(coast_unmatched=True)
+    assert tracker._may_be_wide(_wide_track(0.0, 0.0, 10.0), T0)
