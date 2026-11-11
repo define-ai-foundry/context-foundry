@@ -14,19 +14,18 @@
   1. engine-level partitioning in one process
   2. a platform-level region router feeding several `fusion` stages
   3. not worth building
-* **Result:** clustering by deployment gives each site exactly what it gets fused alone. It removes four cross-site effects of a shared engine: late-gate drops, cost per event, cap refusals, and a newly found one in track confirmation. It does not speed up the busiest deployment under load. A grid by detection position splits tracks at cell edges. [Recommendation](#recommendation): do not cluster fusion. Method A needs a sensor-to-deployment mapping the platform does not provide, and sensor or detection position (methods B and C) does not recover deployments or splits tracks. Fix the engine instead: the cost per live track ([context-foundry#33](https://github.com/define-ai-foundry/context-foundry/issues/33)) first, then the confirmation window ([context-foundry#32](https://github.com/define-ai-foundry/context-foundry/issues/32)).
+* **Result:** clustering by deployment gives each site exactly what it gets fused alone. It removes four cross-site effects of a shared engine: late-gate drops, cost per event, cap refusals, and a newly found one in track confirmation. It does not speed up the busiest deployment under load. A grid by detection position splits tracks at cell edges. [Recommendation](#recommendation): do not cluster fusion. Method A needs a sensor-to-deployment mapping the platform does not provide today, and sensor or detection position (methods B and C) does not recover deployments or splits tracks. Fix the engine instead: the cost per live track ([context-foundry#33](https://github.com/define-ai-foundry/context-foundry/issues/33)) first, which also removes most of the exercise's late drops, then the confirmation window ([context-foundry#32](https://github.com/define-ai-foundry/context-foundry/issues/32)).
 
 ---
 
 ## Why Measure This
 
 * **The issue it informs:** the platform's fusion-throughput issue (`rain-iam-platform`, `docs/pipeline-platform/ISSUES.md`, I-394.2). Each association event predicts every live track, and each unmatched track coasts on every event, whichever cell it is in.
-  * context-foundry#19 brought fusion to about 10 ms per detection, 40 to 48 detections a second fused on the exercise.
-  * A single sensor sent bursts of 72 a second.
+  * context-foundry#19 made fusion faster, but on the exercise it still fused fewer detections a second than single sensors sent in bursts (I-394.2).
   * The engine runs on one Python thread, so adding replicas doesn't help.
-* **The exercise's peak volume:** the busiest minute of 2026-10-27 carried 329 SAPIENT and 236 CoT records a second, in the senders' catch-up bursts (`docs/pipelines-exercise-runbook.md`, section 9).
-* **Late drops on the exercise:** most came from individual senders lagging or catching up in bursts, not from one whole site running behind another (I-394.7).
-  * A per-cluster watermark only removes the second kind.
+* **The exercise's peak volume:** the busiest minute came in the senders' catch-up bursts (I-336.2).
+* **Late drops on the exercise:** most came from the one `fusion` falling behind its input, so its merge released records early (I-394.3); the rest came from individual senders lagging, running on an offset clock or catching up in bursts (I-394.7, [pipeline-stages#58](https://github.com/define-ai-foundry/pipeline-stages/issues/58)).
+  * A per-cluster watermark only removes drops caused by one site running behind another, which is neither of these.
   * The recommendation has to weigh that.
 
 ---
@@ -36,7 +35,7 @@
 1. **Accuracy:** with one instance per cluster, is each site's picture the same as in Multisite Fusion's E1, and the same as the site fused alone?
 2. **Late gate:** are the alakurtti drops from Multisite Fusion's E3 gone?
 3. **Cost:** under Multisite Fusion's E4 clutter at joensuu, does alakurtti's per-event time return to its alone value?
-4. **Throughput:** how many detections a second does each instance sustain, and how many all instances together on N cores, measured against I-394.2's rates and the exercise's peak?
+4. **Throughput:** how many detections a second does each instance sustain, and how many all instances together on N cores, in proportion to one engine?
 5. **Clustering:** what does each clustering method cost, and how does each behave when a sensor registers?
 6. **Boundaries:** where clusters overlap or an object crosses between them, how many duplicate tracks and gaps result, and does a stitch step remove them?
 7. **Recommendation:** engine-level partitioning, a platform-level split, or not worth it?
@@ -73,7 +72,7 @@
 | **B. By sensor position** | single-linkage over sensor positions with a distance threshold; a detection goes to its sensor's cluster | a dictionary lookup, plus reclustering when a sensor registers |
 | **C. By detection position** | a fixed lat/lon grid (cell size a parameter, 100 km by default); a detection goes to the cell it lies in | a cell computation; measured |
 
-Method A is the baseline. In the CLI and this harness, sensors arrive as one sensor-network config per deployment, so it needs no geometry. The platform has no such config and does not provide a sensor-to-deployment mapping: see [Recommendation](#recommendation).
+Method A is the baseline. In the CLI and this harness, sensors arrive as one sensor-network config per deployment, so it needs no geometry. The platform has no such config and does not provide a sensor-to-deployment mapping today: see [Recommendation](#recommendation).
 
 **Method B on sensor geometry alone.** Single-linkage over all four sites' sensor configs gives the clusters below. No scenarios are needed for this.
 
@@ -154,7 +153,7 @@ Each site is reported in three runs: the single instance, the clustered run, and
 | Throughput | aggregate detections/s: all detections divided by the instances' seconds summed (one core), packed onto 2 cores, or the longest instance's (one core per cluster) | `time.perf_counter` |
 | Clustering cost | µs per detection to route (method C); time to recluster when a sensor registers (method B) | `time.perf_counter` |
 
-Throughput is compared with I-394.2's 40 to 48 detections a second fused and 72 a second from one sensor, and with the exercise's busiest minute (329 SAPIENT records a second). Rates are compared within one machine. The machine is stated.
+Rates are compared within one machine, as proportions. The machine is stated. They are not set against the platform's rates (I-394.2) or the exercise's peak (I-336.2), which were measured on other hardware.
 
 ---
 
@@ -282,7 +281,7 @@ Detections a second through `FusionEngine.process`, from the sequential runs (ea
 * **Under load**, the busiest cluster sets the rate. At 5/s clutter, joensuu's instance alone is as slow as the single engine (about 80 a second). 100 km cells lift the total to about 100, but the busiest cell still does only 85.
 * **Parallel runs:** two instances at once ran as fast as one after the other. 17 instances at once (C at 5/s) on 12 threads and about 4 GB of memory were each slower, so the core-per-cluster figure for C assumes cores that this machine doesn't have.
 * **Noise:** runs of 1 to 2 s (no clutter) vary by up to about 30% between modes; runs of 160 s or more (5/s) vary by a few percent.
-* **Against the platform's rates:** these are laptop rates, not the pipeline's hardware, so they show proportions, not headroom. They moved about 3.5 times between two machines (E1 single 897 a second here, 3,162 to 3,541 on another), so they are not set against I-394.2's 40 to 48 fused a second or the exercise's busiest minute (329 SAPIENT records a second). What carries over: under clutter the busiest cluster sets the rate, so clustering raises the total only as far as the load spreads over clusters of similar weight, and in E4 it doesn't.
+* **Against the platform's rates:** these are laptop rates, not the pipeline's hardware, so they show proportions, not headroom. They moved about 3.5 times between two machines (E1 single 897 a second here, 3,162 to 3,541 on another), so they are not set against the platform's rates (I-394.2) or the exercise's peak (I-336.2). What carries over: under clutter the busiest cluster sets the rate, so clustering raises the total only as far as the load spreads over clusters of similar weight, and in E4 it doesn't.
 
 ### C2: clustering cost and stability
 
@@ -307,17 +306,17 @@ Two targets, two radar groups whose footprints overlap. Tracks are counted by th
 
 ## Recommendation
 
-**Do not cluster fusion; fix the engine (option 3).** No clustering method is available on the platform: method A needs a sensor-to-deployment mapping the platform does not provide, method B does not recover the deployments, and method C splits tracks at cell edges. The cross-site effects that matter have fixes in the engine that serve every site.
+**Do not cluster fusion; fix the engine (option 3).** No clustering method is available on the platform today: method A needs a sensor-to-deployment mapping the platform does not provide, method B does not recover the deployments, and method C splits tracks at cell edges. The cross-site effects that matter have fixes in the engine that serve every site.
 
-**Why method A is not available.** The `fusion` stage has no sensor config to route by: its sensor registry is learned from its input (rain-iam-platform `DECISIONS.md`, Fusion). Which cell or deployment a sensor belongs to is not known, since every cell sends to the same two listener ports, and the platform team does not plan to provide that mapping (I-336.1). `DECISIONS.md` Exercise pipeline also runs every cell on one pipeline with one `fusion`, and rejected a pipeline per cell because it splits the fused picture. Method A holds only where sensors arrive as one sensor-network config per deployment, as in the CLI and this harness.
+**Why method A is not available.** The `fusion` stage has no sensor config to route by: its sensor registry is learned from its input (rain-iam-platform `DECISIONS.md`, Fusion). Which cell or deployment a sensor belongs to is not known, since every cell sends to the same two listener ports, and the platform does not provide that mapping today (I-336.1). `DECISIONS.md` Exercise pipeline also runs every cell on one pipeline with one `fusion`, and rejected a pipeline per cell because it splits the fused picture. Method A holds only where sensors arrive as one sensor-network config per deployment, as in the CLI and this harness.
 
 **What method A would have given.** On the far pair, clustering by deployment is exact: each instance gives what its site gives fused alone, in every condition. It removes four ways one site affects the other in a shared engine, each of which is small on the exercise or fixed in the engine instead:
 
 | Cross-site effect | single | clustered by A | Instead |
 |---|---|---|---|
-| Late gate (E3) | 19% and 42% of alakurtti's events dropped | none | Small on the exercise: most late drops came from senders' bursts (I-394.7), and a replay of 27 October 08:10–11:33 UTC in event-time order through the `fusion` stage's code dropped 22 detections as late against 453,976 records (from the review of this page, [context-foundry#31](https://github.com/define-ai-foundry/context-foundry/pull/31); not rerun here). |
+| Late gate (E3) | 19% and 42% of alakurtti's events dropped | none | On the exercise, most late drops came from the one engine falling behind its input, which a cheaper event removes for every site ([context-foundry#33](https://github.com/define-ai-foundry/context-foundry/issues/33)); the rest came from individual senders ([pipeline-stages#58](https://github.com/define-ai-foundry/pipeline-stages/issues/58)). |
 | Cost per event (E4, 5/s) | alakurtti 11.6 ms | 1.4 ms | A cheaper event in the engine ([context-foundry#33](https://github.com/define-ai-foundry/context-foundry/issues/33)) removes it for every site and also serves throughput (I-394.2), which clustering does not. |
-| Track cap (P0, 600 s) | 3 alakurtti tracks refused, a 30 s longer gap | none | Seen only with synthetic clutter at the other site; a site's own clutter still fills its cap under A (E4: 118 refused). |
+| Track cap (P0, 600 s) | 3 alakurtti tracks refused, a 30 s longer gap | none | Measured here only with synthetic clutter at the other site; a replay of the exercise's recorded data also reached the shared cap (review of this page, [context-foundry#31](https://github.com/define-ai-foundry/context-foundry/pull/31); not rerun here). A site's own clutter still fills its cap under A (E4: 118 refused). |
 | Confirmation window (E1) | three joensuu swarms first shown 108 to 216 s later than alone | none | An engine defect, fixed in the engine for every site ([context-foundry#32](https://github.com/define-ai-foundry/context-foundry/issues/32)). |
 
 **Why not method C.** Cells split tracks and raise the error where a target meets a cell edge (B1: 23 m to 32 m), and they fragment the far pair's tracks (alakurtti 5 to 8). The only gain is a cap per cell, which lets more clutter confirm into tracks. The busiest cell is no faster than the busiest deployment.
@@ -329,7 +328,7 @@ Two targets, two radar groups whose footprints overlap. Tracks are counted by th
 **What clustering would not have fixed.**
 * **Throughput (I-394.2):** under load the busiest deployment bounds the rate, and clustering does not make it faster.
 * **A site's own clutter (E4):** at 5/s, joensuu's swarms go uncovered for 413 to 965 s on one engine and under A alike.
-* **Most of the exercise's late drops (I-394.7):** they came from individual senders lagging or catching up in bursts, which a per-deployment watermark does not change.
+* **The exercise's late drops:** most came from fusion falling behind its input, the rest from individual senders lagging, running on an offset clock or catching up in bursts ([pipeline-stages#58](https://github.com/define-ai-foundry/pipeline-stages/issues/58)). Clustering changes the first only as far as it speeds up the busiest deployment, and the second not at all.
 
 **Revisit only if** the platform comes to provide a sensor-to-deployment mapping and, after the engine fixes, one deployment's load still slows another's events by a measurable share.
 
@@ -337,17 +336,17 @@ Two targets, two radar groups whose footprints overlap. Tracks are counted by th
 
 | Order | Problem | Found in | Where | Direction |
 |---|---|---|---|---|
-| 1 | Per-event cost grows with every live track (the coast step of each unmatched track) | E4, Throughput | [context-foundry#33](https://github.com/define-ai-foundry/context-foundry/issues/33), the engine side of I-394.2 | Profile E4 at 5/s, then cut the per-event work for tracks no detection can reach. |
+| 1 | Per-event cost grows with every live track (the coast step of each unmatched track); on the exercise, fusion falling behind caused most late drops | E4, Throughput, [pipeline-stages#58](https://github.com/define-ai-foundry/pipeline-stages/issues/58) | [context-foundry#33](https://github.com/define-ai-foundry/context-foundry/issues/33), the engine side of I-394.2 | Profile E4 at 5/s, then cut the per-event work for tracks no detection can reach. |
 | 2 | A tentative track is confirmed or dropped depending on unrelated events | E1 | [context-foundry#32](https://github.com/define-ai-foundry/context-foundry/issues/32) | Confirmation depends only on the track's own reports; size the window against the slowest sensor's revisit and measure ghost tracks under clutter. |
 | 3 | A site's own clutter leaves its swarms uncovered for 413 to 965 s and fills the track cap | E4 | [context-foundry#35](https://github.com/define-ai-foundry/context-foundry/issues/35) | Decided in that issue, after [context-foundry#33](https://github.com/define-ai-foundry/context-foundry/issues/33)'s profile. |
-| — | Late drops from senders' bursts | I-394.7 | rain-iam-platform, closed | Fusion's limits recorded there; not an engine change. |
-| — | Cross-site late gate | E3 | none | Small on the exercise; no change. |
+| 4 | Late drops from individual senders (lagging, offset clock, catch-up bursts) | I-394.7 | [pipeline-stages#58](https://github.com/define-ai-foundry/pipeline-stages/issues/58) | Decided in that issue: an event-time hold of a few seconds in the stage's merge and a clock offset per sender; old bursts stay known losses. |
+| — | Cross-site late gate | E3 | none | Covered by [context-foundry#33](https://github.com/define-ai-foundry/context-foundry/issues/33) and [pipeline-stages#58](https://github.com/define-ai-foundry/pipeline-stages/issues/58); no change of its own. |
 | — | The near pair (porvoo_oil_refinery, hamina_kotka) is unmeasured | [Inputs](#inputs) | none | Needs scenario configs; only relevant if clustering is revisited. |
 | — | Runbook line | Throughput | rain-iam-platform, separate change | Below. |
 
 **Proposed runbook line** (`rain-iam-platform`, `docs/pipelines-fusion-runbook.md`):
 
-> Splitting fusion by deployment raised the rate on the far pair without clutter by about a third on one core and about 2.7 times with a core per deployment; with 5 false reports a second at one site, the busiest deployment's engine bounds the rate and splitting gained about 5%. It would remove cross-site late drops, cost and cap refusals but not speed up the busiest deployment; it is not planned, since the platform has no sensor-to-deployment mapping. Absolute rates moved about 3.5 times between two laptops, so headroom needs a measurement on the iamrain node. Source: context-foundry `docs/03-evaluation/cluster-parallel-fusion.md`.
+> Splitting fusion by deployment raised the rate on the far pair without clutter by about a third on one core and about 2.7 times with a core per deployment; with 5 false reports a second at one site, the busiest deployment's engine bounds the rate and splitting gained about 5%. It would remove cross-site late drops, cost and cap refusals but not speed up the busiest deployment; it is not planned, since the platform has no sensor-to-deployment mapping today. Absolute rates moved about 3.5 times between two laptops, so headroom needs a measurement on the iamrain node. Source: context-foundry `docs/03-evaluation/cluster-parallel-fusion.md`.
 
 ---
 
@@ -370,4 +369,4 @@ Two targets, two radar groups whose footprints overlap. Tracks are counted by th
 
 * The near pair and the four-site run, until scenario configs exist for porvoo_oil_refinery and hamina_kotka.
 * Production code: no change to `src/`, to the pipeline-stages `fusion` stage or to any pipeline.
-* Recorded exercise data, until records can be mapped to cells (I-336.1).
+* Recorded exercise data: its records cannot be mapped to cells (I-336.1).
