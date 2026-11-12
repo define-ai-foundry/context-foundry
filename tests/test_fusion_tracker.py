@@ -2046,3 +2046,46 @@ def test_a_track_already_too_uncertain_is_always_checked_exactly():
 def test_a_coasted_track_is_always_checked_exactly():
     tracker = SapientAsynchronousTracker(coast_unmatched=True)
     assert tracker._may_be_wide(_wide_track(0.0, 0.0, 10.0), T0)
+
+
+def _books_hold_live_tracks_only(tracker):
+    live = {track.id for track in tracker.tracks}
+    for name in (
+        "_last_update_time",
+        "_swarm_counts",
+        "_class_kinds",
+        "_tentative",
+        "_declarations",
+        "_cot_uids",
+        "_posteriors",
+        "_narrow_until",
+        "_reach_rows",
+        "_association_rows",
+    ):
+        assert set(getattr(tracker, name)) <= live, name
+    assert set(tracker._object_tracks.values()) <= live
+    assert set(tracker._cot_seen) <= set(tracker._object_tracks)
+    assert set(tracker._track_ids) == tracker.tracks
+
+
+@pytest.mark.parametrize("seed", range(3))
+def test_after_every_event_the_books_hold_live_tracks_only(seed):
+    """Pruning rebuilds its books only when it prunes, which holds only if they never
+    keep a track no longer live: tracks seeded, bound by object id, declared by
+    self-reports whose declarations lapse, coasted out and refused alike."""
+    rng = np.random.default_rng(seed)
+    tracker = SapientAsynchronousTracker(confirm_hits=2, max_coast_seconds=6.0)
+    for step in range(120):
+        when = T0 + timedelta(seconds=step * 0.5)
+        group = set()
+        for _ in range(int(rng.integers(0, 4))):
+            east, north = rng.uniform(-3000, 3000, size=2)
+            group.add(_det(east, north, 50.0, when))
+        if rng.random() < 0.5:
+            group.add(_id_det(float(rng.uniform(-50, 50)), 0.0, when, f"obj-{rng.integers(3)}"))
+        if rng.random() < 0.3:
+            uid = f"ATAK-{rng.integers(3)}"
+            group.add(_self_report(float(rng.uniform(-2000, 2000)), when, uid=uid))
+        if group:
+            tracker.process_async_event(when, group)
+            _books_hold_live_tracks_only(tracker)
