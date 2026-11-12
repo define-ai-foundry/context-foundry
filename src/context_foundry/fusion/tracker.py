@@ -31,6 +31,9 @@ from . import association
 from .models import create_9d_constant_acceleration_model
 from .reach import reachable_rows, track_row
 
+# The margin pruning's bound keeps for the rounding between seconds and times.
+_PRUNE_MARGIN = timedelta(milliseconds=1)
+
 logger = logging.getLogger(__name__)
 
 # States kept per track, and the default for the tracker's max_track_history.
@@ -690,6 +693,9 @@ class SapientAsynchronousTracker:
         self._track_ids: dict = {}
         # The tracks the latest event appended a state to or started, for the engine.
         self.touched: set = set()
+        # No live track can be pruned before this time, or None when that is not known;
+        # see _prune_skippable.
+        self._prune_due: datetime | None = None
         # CoT object key -> time of its latest event fused; see _binding_lapsed.
         self._cot_seen: dict[tuple, datetime] = {}
         # Track id -> the latest self-report of the self-reporting uid bound to the track;
@@ -723,6 +729,7 @@ class SapientAsynchronousTracker:
         if not self.tracks:
             for det in detection_group:
                 self._initialize_new_track(det)
+            self._prune_due = None  # these tracks were not pruned, so not looked at
             return self.confirmed_tracks()
 
         # A detection whose sensor's stable objectId is already bound to a live
@@ -924,6 +931,46 @@ class SapientAsynchronousTracker:
             np.sqrt(max(self._predicted_axis(sv, covar, i, dt, axis_noise)[1] for i in (0, 3, 6)))
         )
 
+    def _drop_due(self, track, narrowed=False):
+        """The earliest time pruning could drop the track, or None if that may be any time.
+
+        Its coast horizon, its confirmation window while tentative, and the time until
+        which it cannot have widened past the sigma limit (`_may_be_wide`'s bound, kept
+        for its state and motion; `narrowed` when it was just worked out).
+        """
+        if self.coast_unmatched:
+            return None
+        due = self._last_detection(track) + timedelta(seconds=self.max_coast_seconds)
+        pending = self._tentative.get(self._id(track)) if self._tentative else None
+        if pending is not None:
+            due = min(due, pending[1] + timedelta(seconds=self.confirm_window_seconds))
+        if not narrowed:
+            self._may_be_wide(track, due)
+        until = self._narrow_until[self._id(track)][2]
+        return None if until is None else min(due, until)
+
+    def _prune_skippable(self, current_time):
+        """Whether no live track can be due for pruning at `current_time`.
+
+        `_prune_due` is the earliest drop time over the tracks the last full pruning
+        kept. Since then a track's inputs change only when an event touches it (a
+        detection, a coasted state, a new track), which lowers the bound by its own
+        drop time here, or when a declaration lapses, which clears it. A millisecond
+        of margin covers the rounding between the checks' seconds and these times.
+        """
+        due = self._prune_due
+        if due is None:
+            return False
+        for track in self.touched:
+            if track in self.tracks:
+                track_due = self._drop_due(track)
+                if track_due is None:
+                    self._prune_due = None
+                    return False
+                due = min(due, track_due)
+        self._prune_due = due
+        return current_time < due - _PRUNE_MARGIN
+
     def _may_be_wide(self, track, current_time):
         """Whether the track may have coasted past the position sigma it is dropped at.
 
@@ -1119,6 +1166,7 @@ class SapientAsynchronousTracker:
     def _undeclare(self, track_id) -> None:
         """Forget the declaration of the uid bound to a track, if the track is still live."""
         del self._declarations[track_id]
+        self._prune_due = None  # the track's motion, and so how fast it widens, changed
         for live in self.tracks:
             if live.id == track_id:
                 live.metadata.pop(DECLARATION_KEY, None)
@@ -1562,8 +1610,14 @@ class SapientAsynchronousTracker:
         covariance accepts most of the picture at a smaller distance than a
         well-tracked target does, and wins detections away from it.
         """
+        if self._prune_skippable(current_time):
+            self._cot_seen = {
+                k: seen for k, seen in self._cot_seen.items() if k in self._object_tracks
+            }
+            return
         active_set = set()
         dropped_wide = 0
+        known, due = not self.coast_unmatched, None
         for track in self.tracks:
             elapsed = (current_time - self._last_detection(track)).total_seconds()
             if elapsed > self.max_coast_seconds:
@@ -1582,6 +1636,13 @@ class SapientAsynchronousTracker:
                 dropped_wide += 1
                 continue
             active_set.add(track)
+            if known:
+                track_due = self._drop_due(track, narrowed=True)
+                if track_due is None:
+                    known = False
+                else:
+                    due = track_due if due is None else min(due, track_due)
+        self._prune_due = due if known else None
         if dropped_wide:
             self._report_wide_coast(dropped_wide)
         if len(active_set) == len(self.tracks):
