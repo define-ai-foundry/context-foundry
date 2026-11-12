@@ -684,6 +684,10 @@ class SapientAsynchronousTracker:
         self._reach_rows: dict[str, tuple] = {}
         # Track id -> (state, motion, arrays): what association needs, the same way.
         self._association_rows: dict[str, tuple] = {}
+        # Track -> its id. A Track's attributes are read through Stone Soup's own
+        # __getattribute__ and properties, several Python calls each, and the scans
+        # below read every live track's id on every event; see _id.
+        self._track_ids: dict = {}
         # CoT object key -> time of its latest event fused; see _binding_lapsed.
         self._cot_seen: dict[tuple, datetime] = {}
         # Track id -> the latest self-report of the self-reporting uid bound to the track;
@@ -837,11 +841,12 @@ class SapientAsynchronousTracker:
         for track in tracks:
             state = track.state
             motion = self._motion(track)
-            cached = self._reach_rows.get(track.id)
+            track_id = self._id(track)
+            cached = self._reach_rows.get(track_id)
             if cached is None or cached[0] is not state or cached[1] != motion:
                 noise = self._axis_noise if motion is None else self._motion_noise[motion]
                 cached = (state, motion, track_row(state, noise))
-                self._reach_rows[track.id] = cached
+                self._reach_rows[track_id] = cached
             rows.append(cached[2])
         reached = reachable_rows(np.stack(rows), detections, GATE_MAHALANOBIS_DISTANCE**2)
         return {track for track, hit in zip(tracks, reached, strict=True) if hit}
@@ -926,12 +931,13 @@ class SapientAsynchronousTracker:
             return True
         state = track.state
         motion = self._motion(track)
-        cached = self._narrow_until.get(track.id)
+        track_id = self._id(track)
+        cached = self._narrow_until.get(track_id)
         if cached is None or cached[0] is not state or cached[1] != motion:
             seconds = self._narrow_seconds(state, motion)
             until = None if seconds is None else state.timestamp + timedelta(seconds=seconds)
             cached = (state, motion, until)
-            self._narrow_until[track.id] = cached
+            self._narrow_until[track_id] = cached
         return cached[2] is None or current_time > cached[2]
 
     def _narrow_seconds(self, state, motion):
@@ -971,7 +977,9 @@ class SapientAsynchronousTracker:
 
     def confirmed_tracks(self):
         """The live tracks that have passed confirmation; tentative ones are held back."""
-        return {track for track in self.tracks if track.id not in self._tentative}
+        if not self._tentative:
+            return set(self.tracks)
+        return {track for track in self.tracks if self._id(track) not in self._tentative}
 
     def _count_confirmation_hit(self, track):
         """Counts a detection towards a tentative track's confirmation.
@@ -1164,8 +1172,20 @@ class SapientAsynchronousTracker:
 
     def _motion(self, track):
         """How its uid's latest self-report holds the track, STILL or STANDING, or None."""
-        declared = self._declarations.get(track.id)
+        if not self._declarations:
+            return None
+        declared = self._declarations.get(self._id(track))
         return None if declared is None else declared.motion
+
+    def _id(self, track):
+        """The track's id, from `_track_ids` when the tracker made the track."""
+        found = self._track_ids.get(track)
+        return track.id if found is None else found
+
+    def _last_detection(self, track):
+        """When the track last took a real detection: its seed's time if none is kept."""
+        seen = self._last_update_time.get(self._id(track))
+        return track.states[0].timestamp if seen is None else seen
 
     def _note_threat_evidence(self, track, detection, timestamp, motion=None) -> None:
         """Record what a hit tells the threat judgement: a declaration or a sensor's sighting.
@@ -1341,6 +1361,7 @@ class SapientAsynchronousTracker:
         # unclassified until its second detection.
         track = Track([prior], id=self._seed_id(detection), init_metadata=dict(detection.metadata))
         self.tracks.add(track)
+        self._track_ids[track] = track.id
         self._posteriors[track.id] = prior
         # The seeding hit is a real detection, so it anchors staleness.
         self._last_update_time[track.id] = detection.timestamp
@@ -1488,10 +1509,7 @@ class SapientAsynchronousTracker:
         gone = {
             track
             for track in self.tracks
-            if (
-                current_time - self._last_update_time.get(track.id, track.states[0].timestamp)
-            ).total_seconds()
-            > self.max_coast_seconds
+            if (current_time - self._last_detection(track)).total_seconds() > self.max_coast_seconds
         }
         if gone:
             self._forget(gone)
@@ -1499,7 +1517,9 @@ class SapientAsynchronousTracker:
     def _forget(self, gone) -> None:
         """Drop these tracks and everything kept of them."""
         self.tracks -= gone
-        ids = {track.id for track in gone}
+        ids = {self._id(track) for track in gone}
+        for track in gone:
+            self._track_ids.pop(track, None)
         books = (
             self._last_update_time,
             self._swarm_counts,
@@ -1538,11 +1558,10 @@ class SapientAsynchronousTracker:
         active_set = set()
         dropped_wide = 0
         for track in self.tracks:
-            last_detection = self._last_update_time.get(track.id, track.states[0].timestamp)
-            elapsed = (current_time - last_detection).total_seconds()
+            elapsed = (current_time - self._last_detection(track)).total_seconds()
             if elapsed > self.max_coast_seconds:
                 continue
-            pending = self._tentative.get(track.id)
+            pending = self._tentative.get(self._id(track)) if self._tentative else None
             if (
                 pending is not None
                 and (current_time - pending[1]).total_seconds() > self.confirm_window_seconds
@@ -1560,7 +1579,10 @@ class SapientAsynchronousTracker:
             self._report_wide_coast(dropped_wide)
         self.tracks = active_set
         # Forget pruned tracks, or the bookkeeping outlives them for the whole run.
-        active_ids = {track.id for track in active_set}
+        active_ids = {self._id(track) for track in active_set}
+        self._track_ids = {
+            track: track_id for track, track_id in self._track_ids.items() if track in active_set
+        }
         self._last_update_time = {
             track_id: seen
             for track_id, seen in self._last_update_time.items()
