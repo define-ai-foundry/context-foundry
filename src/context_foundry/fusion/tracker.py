@@ -1584,6 +1584,14 @@ class SapientAsynchronousTracker:
             active_set.add(track)
         if dropped_wide:
             self._report_wide_coast(dropped_wide)
+        if len(active_set) == len(self.tracks):
+            # Nothing pruned: every book is kept only for live tracks (they are filled
+            # for a live track and emptied by _forget and below), so only a uid's last
+            # event can outlive its binding, released by _release_expired.
+            self._cot_seen = {
+                k: seen for k, seen in self._cot_seen.items() if k in self._object_tracks
+            }
+            return
         self.tracks = active_set
         # Forget pruned tracks, or the bookkeeping outlives them for the whole run.
         active_ids = {self._id(track) for track in active_set}
