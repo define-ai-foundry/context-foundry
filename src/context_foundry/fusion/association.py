@@ -75,6 +75,7 @@ def distances(x, p, stamps, noise, detections, mapping, gate=np.inf) -> np.ndarr
 
     The detections share `mapping` and each track is predicted to each detection's own
     timestamp, the step taken from the track's own timestamp as the predictor takes it.
+    A pair that provably lies outside `gate` is left infinite without being worked out.
     """
     out = np.empty((len(stamps), len(detections)))
     rows = list(mapping)
@@ -96,7 +97,6 @@ def distances(x, p, stamps, noise, detections, mapping, gate=np.inf) -> np.ndarr
         )  # (D, k, k)
         s = hph[:, None, :, :] + noise_r[None, :, :, :]  # (N, D, k, k)
         delta = z[:, None, :] - measured[None, :, :]  # (N, D, k)
-        inverse = np.linalg.pinv(s)
         # A distance must match the measure's to the last bit, so that a tie between
         # identical reports is broken as the associator breaks it. For three measured
         # axes the measure's einsum over a flat list of pairs sums in its own order; for
@@ -104,12 +104,23 @@ def distances(x, p, stamps, noise, detections, mapping, gate=np.inf) -> np.ndarr
         # may gate are summed again one by one, exactly as the measure sums them.
         k = len(rows)
         flat = delta.reshape(-1, k)
-        inverse = inverse.reshape(-1, k, k)
-        squared = np.einsum("ni,nij,nj->n", flat, inverse, flat)
-        if k != 3:
-            for i in np.flatnonzero(squared < near_squared):
-                pair = flat[i : i + 1]
-                squared[i] = np.einsum("ij,jk,ik->i", pair, inverse[i], pair)[0]
+        flat_s = s.reshape(-1, k, k)
+        # The squared distance is at least the squared innovation over the largest
+        # eigenvalue of S, and that is at most S's trace: the reach check's bound, per
+        # pair, with its margin. Only the pairs it cannot rule out are inverted.
+        bound = np.einsum("ni,ni->n", flat, flat)
+        near = bound <= near_squared * (1.0 + 1e-6) * np.trace(flat_s, axis1=1, axis2=2)
+        squared = np.full(len(flat), np.inf)
+        kept = np.flatnonzero(near)
+        if kept.size:
+            pairs = flat[kept]
+            inverse = np.linalg.pinv(flat_s[kept])
+            exact = np.einsum("ni,nij,nj->n", pairs, inverse, pairs)
+            if k != 3:
+                for i in np.flatnonzero(exact < near_squared):
+                    pair = pairs[i : i + 1]
+                    exact[i] = np.einsum("ij,jk,ik->i", pair, inverse[i], pair)[0]
+            squared[kept] = exact
         out[:, columns] = np.sqrt(squared).reshape(delta.shape[:2])
     return out
 
@@ -120,7 +131,9 @@ def associate(tracker, tracks, detections, timestamp, rows_of) -> dict | None:
     `rows_of(track)` gives the track's state vector, covariance, timestamp and its
     motion's noise per axis. The result is ordered as the associator orders it: the
     tracks with no hypothesis first, as its set difference iterates them, then the rest
-    in track order. A track left unassigned gets a falsy missed hypothesis.
+    in track order. Every track left unassigned gets the same falsy missed hypothesis:
+    the tracker only asks whether a hypothesis holds a detection, and building one per
+    track was most of an event's association cost where many tracks were reachable.
     """
     tracks = list(tracks)
     detections = list(detections)
@@ -151,9 +164,10 @@ def associate(tracker, tracks, detections, timestamp, rows_of) -> dict | None:
                 table[row, column] = np.inf
     detected = [row for row in range(n) if np.isfinite(table[row]).any()]
     associations = {}
+    nothing = _missed(timestamp, missed)
     undetected = dict.fromkeys(tracks).keys() - {tracks[row] for row in detected}
     for track in undetected:
-        associations[track] = _missed(timestamp, missed)
+        associations[track] = nothing
     if not detected:
         return associations
     cost = np.full((len(detected), d + len(detected)), np.inf)
@@ -165,7 +179,7 @@ def associate(tracker, tracks, detections, timestamp, rows_of) -> dict | None:
         track = tracks[row]
         column = int(col4row[j])
         if column >= d:
-            associations[track] = _missed(timestamp, missed)
+            associations[track] = nothing
             continue
         det = detections[column]
         prediction = tracker.predictor.predict(track, timestamp=det.timestamp)
