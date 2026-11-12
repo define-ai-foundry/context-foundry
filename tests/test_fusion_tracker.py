@@ -2089,3 +2089,69 @@ def test_after_every_event_the_books_hold_live_tracks_only(seed):
         if group:
             tracker.process_async_event(when, group)
             _books_hold_live_tracks_only(tracker)
+
+
+def _would_prune(tracker, track, now):
+    """Whether pruning's own rules drop the track at `now`, worked out without the bound."""
+    if (now - tracker._last_detection(track)).total_seconds() > tracker.max_coast_seconds:
+        return True
+    pending = tracker._tentative.get(track.id)
+    if pending is not None and (now - pending[1]).total_seconds() > tracker.confirm_window_seconds:
+        return True
+    return (
+        tracker._may_be_wide(track, now)
+        and tracker._coasted_position_sigma(track, now) > tracker.max_coast_position_sigma
+    )
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_pruning_skips_only_events_at_which_it_would_drop_nothing(seed, monkeypatch):
+    rng = np.random.default_rng(seed)
+    tracker = SapientAsynchronousTracker(
+        confirm_hits=2, max_coast_seconds=6.0, max_coast_position_sigma=400.0
+    )
+    tracker.coast_unmatched = False  # as the engine runs it, publishing updates only
+    skippable = tracker._prune_skippable
+    skipped = []
+
+    def checked(now):
+        answer = skippable(now)
+        if answer:
+            skipped.append(now)
+            assert not any(_would_prune(tracker, t, now) for t in tracker.tracks)
+        return answer
+
+    monkeypatch.setattr(tracker, "_prune_skippable", checked)
+    for step in range(160):
+        # Mostly forward in time, sometimes a report up to 2 s late.
+        when = T0 + timedelta(seconds=step * 0.5 - float(rng.choice([0, 0, 0, 1.5])))
+        group = set()
+        for _ in range(int(rng.integers(0, 3))):
+            east, north = rng.uniform(-3000, 3000, size=2)
+            group.add(_det(east, north, 50.0, when))
+        if rng.random() < 0.4:
+            group.add(_id_det(float(rng.uniform(-50, 50)), 0.0, when, f"obj-{rng.integers(3)}"))
+        if rng.random() < 0.3:
+            uid = f"ATAK-{rng.integers(3)}"
+            stale = (when + timedelta(seconds=float(rng.uniform(1, 8)))).isoformat()
+            group.add(_self_report(float(rng.uniform(-2000, 2000)), when, uid=uid, stale=stale))
+        if group:
+            tracker.process_async_event(when, group)
+    assert len(skipped) > 20  # the bound is used, not just always declined
+
+
+def test_a_track_that_may_widen_any_time_keeps_pruning_scanning(monkeypatch):
+    tracker = SapientAsynchronousTracker(confirm_hits=1)
+    tracker.coast_unmatched = False
+    tracker.process_async_event(T0, {_det(0.0, 0.0, 50.0, T0)})
+    second = T0 + timedelta(seconds=1)
+    tracker.process_async_event(second, {_det(5000.0, 0.0, 50.0, second)})
+    assert tracker._prune_due is not None  # both tracks have a bound
+    # A track no bound covers: its next state could be wide at once.
+    monkeypatch.setattr(tracker, "_narrow_seconds", lambda state, motion: None)
+    third = T0 + timedelta(seconds=2)
+    tracker.process_async_event(third, {_det(5.0, 0.0, 50.0, third)})
+    assert tracker._prune_due is None
+    assert not tracker._prune_skippable(third)
+    tracker.coast_unmatched = True
+    assert tracker._drop_due(next(iter(tracker.tracks))) is None
