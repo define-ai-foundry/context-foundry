@@ -237,3 +237,35 @@ def test_tracks_are_coasted_each_event_only_when_a_predicted_state_can_be_sent(p
 
     engine.reset(SapientAsynchronousTracker())
     assert engine.tracker.coast_unmatched is coasts
+
+
+class _ScanningTracker(SapientAsynchronousTracker):
+    """The tracker without its touched set, so the engine looks at every live track."""
+
+    def process_async_event(self, timestamp, detection_group):
+        result = super().process_async_event(timestamp, detection_group)
+        self.touched = None
+        return result
+
+
+@pytest.mark.parametrize("policy", ["window", "all", "updates"])
+def test_sources_from_the_touched_tracks_are_those_of_every_track(policy):
+    def run(tracker):
+        engine = FusionEngine(tracker, PublishPolicy(policy))
+        seen = []
+        script = [
+            (0, [_report(0, object_id="W1", stable_object_id=True), _report(0, "RAD-2", "a", 900)]),
+            (1, [_report(1, "RAD-2", "a", 905)]),
+            (2, [_report(2, object_id="W1", stable_object_id=True, east=3)]),
+            (3, [_report(3, "RAD-3", "b", 5000)]),
+            (4, [_report(4, "RAD-2", "a", 912), _report(4, "RAD-3", "b", 5004)]),
+            (60, [_report(60, object_id="W1", stable_object_id=True)]),
+            (61, [_report(61, "RAD-2", "c", 2000), _report(61, "RAD-3", "b", 5100)]),
+        ]
+        for seconds, reports in script:
+            result = engine.process(T0 + timedelta(seconds=seconds), reports)
+            pending = {k: dict(v) for k, v in engine.pending_sources._pending.items()}
+            seen.append((result.sources, pending))
+        return seen
+
+    assert run(SapientAsynchronousTracker(confirm_hits=2)) == run(_ScanningTracker(confirm_hits=2))
