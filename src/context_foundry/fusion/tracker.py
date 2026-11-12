@@ -27,6 +27,7 @@ from stonesoup.types.state import GaussianState
 from stonesoup.types.track import Track
 from stonesoup.updater.kalman import KalmanUpdater, UnscentedKalmanUpdater
 
+from . import association
 from .models import create_9d_constant_acceleration_model
 from .reach import reachable_rows, track_row
 
@@ -648,6 +649,9 @@ class SapientAsynchronousTracker:
             excludes=self._excluded,
         )
         self.data_associator = GNNWith2DAssignment(self.hypothesiser)
+        # The same association with its distances worked out in array calls; see
+        # _associate. False takes the associator's own path, for comparison.
+        self.vector_association = True
 
         # Track storage manifest
         self.tracks = set()
@@ -678,6 +682,8 @@ class SapientAsynchronousTracker:
         # Track id -> (state, motion, row): the numbers the reach check needs, rebuilt
         # only when the track's state or motion changes; see _reachable.
         self._reach_rows: dict[str, tuple] = {}
+        # Track id -> (state, motion, arrays): what association needs, the same way.
+        self._association_rows: dict[str, tuple] = {}
         # CoT object key -> time of its latest event fused; see _binding_lapsed.
         self._cot_seen: dict[tuple, datetime] = {}
         # Track id -> the latest self-report of the self-reporting uid bound to the track;
@@ -726,9 +732,7 @@ class SapientAsynchronousTracker:
         # than every track in the picture.
         reachable = self._reachable(remaining_tracks, remaining_detections)
         if reachable:
-            associations.update(
-                self.data_associator.associate(reachable, remaining_detections, timestamp)
-            )
+            associations.update(self._associate(reachable, remaining_detections, timestamp))
         if self.coast_unmatched:
             for track in remaining_tracks - reachable:
                 track.append(self.predictor.predict(track, timestamp=timestamp))
@@ -787,6 +791,37 @@ class SapientAsynchronousTracker:
         self._prune_stale_tracks(timestamp)
 
         return self.confirmed_tracks()
+
+    def _associate(self, tracks, detections, timestamp):
+        """The associator's answer, its distances worked out for every pair in array calls.
+
+        `association.associate` gives the same assignment as `data_associator` (the same
+        gate, distances, table and assignment) without building a prediction and a
+        hypothesis per track and detection pair; an event with a detection that is not a
+        linear position model, or `vector_association` off, takes the associator itself.
+        """
+        if self.vector_association:
+            found = association.associate(self, tracks, detections, timestamp, self._arrays)
+            if found is not None:
+                return found
+        return self.data_associator.associate(tracks, detections, timestamp)
+
+    def _arrays(self, track):
+        """A track's state vector, covariance, timestamp and motion noise, kept per state."""
+        state = track.state
+        motion = self._motion(track)
+        cached = self._association_rows.get(track.id)
+        if cached is None or cached[0] is not state or cached[1] != motion:
+            noise = self._axis_noise if motion is None else self._motion_noise[motion]
+            arrays = (
+                np.asarray(state.state_vector, dtype=float).ravel(),
+                np.asarray(state.covar, dtype=float),
+                state.timestamp,
+                np.asarray(noise, dtype=float),
+            )
+            cached = (state, motion, arrays)
+            self._association_rows[track.id] = cached
+        return cached[2]
 
     def _reachable(self, tracks, detections):
         """The tracks that may fall inside a detection's gate, all checked in one array call.
@@ -1475,6 +1510,7 @@ class SapientAsynchronousTracker:
             self._posteriors,
             self._narrow_until,
             self._reach_rows,
+            self._association_rows,
         )
         for book in books:
             for track_id in ids:
@@ -1566,5 +1602,10 @@ class SapientAsynchronousTracker:
         }
         self._reach_rows = {
             track_id: row for track_id, row in self._reach_rows.items() if track_id in active_ids
+        }
+        self._association_rows = {
+            track_id: row
+            for track_id, row in self._association_rows.items()
+            if track_id in active_ids
         }
         self._cot_seen = {k: seen for k, seen in self._cot_seen.items() if k in self._object_tracks}
