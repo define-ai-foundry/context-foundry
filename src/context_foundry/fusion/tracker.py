@@ -688,6 +688,8 @@ class SapientAsynchronousTracker:
         # __getattribute__ and properties, several Python calls each, and the scans
         # below read every live track's id on every event; see _id.
         self._track_ids: dict = {}
+        # The tracks the latest event appended a state to or started, for the engine.
+        self.touched: set = set()
         # CoT object key -> time of its latest event fused; see _binding_lapsed.
         self._cot_seen: dict[tuple, datetime] = {}
         # Track id -> the latest self-report of the self-reporting uid bound to the track;
@@ -707,6 +709,7 @@ class SapientAsynchronousTracker:
         """
         # Bound the width of this pass before anything iterates over it.
         detection_group = self._limit_detections(detection_group)
+        self.touched = set()
 
         # Drop tracks already past their coast horizon before they can be matched: one
         # silent that long has a covariance wide enough to win a detection of another
@@ -740,6 +743,7 @@ class SapientAsynchronousTracker:
         if self.coast_unmatched:
             for track in remaining_tracks - reachable:
                 track.append(self.predictor.predict(track, timestamp=timestamp))
+                self.touched.add(track)
 
         associated_detections = set()
 
@@ -752,6 +756,7 @@ class SapientAsynchronousTracker:
                 # Track fell outside validation gates; coast forward using kinematics prediction
                 if self.coast_unmatched:
                     track.append(self.predictor.predict(track, timestamp=timestamp))
+                self.touched.add(track)
             else:
                 # High-Fidelity Step: Extract the measurement model embedded inside the SAPIENT detection
                 det = joint_hypothesis.measurement
@@ -771,6 +776,7 @@ class SapientAsynchronousTracker:
                 if motion is not None:
                     _hold(updated_state, motion)
                 track.append(updated_state)
+                self.touched.add(track)
                 self._posteriors[track.id] = updated_state
                 self._last_update_time[track.id] = timestamp
                 self._hold_swarm_count(track, det, timestamp)
@@ -1361,6 +1367,7 @@ class SapientAsynchronousTracker:
         # unclassified until its second detection.
         track = Track([prior], id=self._seed_id(detection), init_metadata=dict(detection.metadata))
         self.tracks.add(track)
+        self.touched.add(track)
         self._track_ids[track] = track.id
         self._posteriors[track.id] = prior
         # The seeding hit is a real detection, so it anchors staleness.
