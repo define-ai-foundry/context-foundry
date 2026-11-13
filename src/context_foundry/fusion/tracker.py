@@ -27,7 +27,12 @@ from stonesoup.types.state import GaussianState
 from stonesoup.types.track import Track
 from stonesoup.updater.kalman import KalmanUpdater, UnscentedKalmanUpdater
 
+from . import association
 from .models import create_9d_constant_acceleration_model
+from .reach import reachable_rows, track_row
+
+# The margin pruning's bound keeps for the rounding between seconds and times.
+_PRUNE_MARGIN = timedelta(milliseconds=1)
 
 logger = logging.getLogger(__name__)
 
@@ -544,6 +549,7 @@ class SapientAsynchronousTracker:
         confirm_hits: int = 1,
         confirm_window_seconds: float = CONFIRM_WINDOW_SECONDS,
         id_namespace: str = "",
+        coast_unmatched: bool = True,
     ):
         """Builds the fusion engine.
 
@@ -568,6 +574,12 @@ class SapientAsynchronousTracker:
         self.confirm_window_seconds = confirm_window_seconds
         # What makes this tracker's track ids its own; see _seed_id.
         self.id_namespace = id_namespace
+        # Whether every track an event does not update is predicted to it. Off, a track
+        # keeps its last real state until a detection updates it; association predicts
+        # it to the event's time in one step, and pruning works out how far it has
+        # coasted (_coasted_position_sigma). Only a publish rule that never sends a
+        # predicted state can turn it off (FusionEngine).
+        self.coast_unmatched = coast_unmatched
         # Tentative track id -> [detections gathered, time of its first detection].
         self._tentative = {}
 
@@ -640,6 +652,9 @@ class SapientAsynchronousTracker:
             excludes=self._excluded,
         )
         self.data_associator = GNNWith2DAssignment(self.hypothesiser)
+        # The same association with its distances worked out in array calls; see
+        # _associate. False takes the associator's own path, for comparison.
+        self.vector_association = True
 
         # Track storage manifest
         self.tracks = set()
@@ -663,6 +678,24 @@ class SapientAsynchronousTracker:
         self._cot_uids: dict[str, tuple] = {}
         # Track id -> its state as its latest detection left it, before any coasting.
         self._posteriors = {}
+        # Track id -> (state, motion, time until which it cannot be too uncertain to
+        # keep, or None), so pruning a track not coasted skips the exact check; see
+        # _may_be_wide.
+        self._narrow_until: dict[str, tuple] = {}
+        # Track id -> (state, motion, row): the numbers the reach check needs, rebuilt
+        # only when the track's state or motion changes; see _reachable.
+        self._reach_rows: dict[str, tuple] = {}
+        # Track id -> (state, motion, arrays): what association needs, the same way.
+        self._association_rows: dict[str, tuple] = {}
+        # Track -> its id. A Track's attributes are read through Stone Soup's own
+        # __getattribute__ and properties, several Python calls each, and the scans
+        # below read every live track's id on every event; see _id.
+        self._track_ids: dict = {}
+        # The tracks the latest event appended a state to or started, for the engine.
+        self.touched: set = set()
+        # No live track can be pruned before this time, or None when that is not known;
+        # see _prune_skippable.
+        self._prune_due: datetime | None = None
         # CoT object key -> time of its latest event fused; see _binding_lapsed.
         self._cot_seen: dict[tuple, datetime] = {}
         # Track id -> the latest self-report of the self-reporting uid bound to the track;
@@ -682,6 +715,7 @@ class SapientAsynchronousTracker:
         """
         # Bound the width of this pass before anything iterates over it.
         detection_group = self._limit_detections(detection_group)
+        self.touched = set()
 
         # Drop tracks already past their coast horizon before they can be matched: one
         # silent that long has a covariance wide enough to win a detection of another
@@ -695,6 +729,7 @@ class SapientAsynchronousTracker:
         if not self.tracks:
             for det in detection_group:
                 self._initialize_new_track(det)
+            self._prune_due = None  # these tracks were not pruned, so not looked at
             return self.confirmed_tracks()
 
         # A detection whose sensor's stable objectId is already bound to a live
@@ -709,15 +744,13 @@ class SapientAsynchronousTracker:
         # could only be assigned its missed-detection column, so leaving it out changes
         # no assignment; it is what keeps an event's cost to the tracks near it rather
         # than every track in the picture.
-        reachable = {
-            track for track in remaining_tracks if self._may_gate(track, remaining_detections)
-        }
+        reachable = self._reachable(remaining_tracks, remaining_detections)
         if reachable:
-            associations.update(
-                self.data_associator.associate(reachable, remaining_detections, timestamp)
-            )
-        for track in remaining_tracks - reachable:
-            track.append(self.predictor.predict(track, timestamp=timestamp))
+            associations.update(self._associate(reachable, remaining_detections, timestamp))
+        if self.coast_unmatched:
+            for track in remaining_tracks - reachable:
+                track.append(self.predictor.predict(track, timestamp=timestamp))
+                self.touched.add(track)
 
         associated_detections = set()
 
@@ -728,8 +761,9 @@ class SapientAsynchronousTracker:
             # updated from the same hit.
             if not joint_hypothesis:
                 # Track fell outside validation gates; coast forward using kinematics prediction
-                prediction = self.predictor.predict(track, timestamp=timestamp)
-                track.append(prediction)
+                if self.coast_unmatched:
+                    track.append(self.predictor.predict(track, timestamp=timestamp))
+                self.touched.add(track)
             else:
                 # High-Fidelity Step: Extract the measurement model embedded inside the SAPIENT detection
                 det = joint_hypothesis.measurement
@@ -749,6 +783,7 @@ class SapientAsynchronousTracker:
                 if motion is not None:
                     _hold(updated_state, motion)
                 track.append(updated_state)
+                self.touched.add(track)
                 self._posteriors[track.id] = updated_state
                 self._last_update_time[track.id] = timestamp
                 self._hold_swarm_count(track, det, timestamp)
@@ -773,6 +808,61 @@ class SapientAsynchronousTracker:
         self._prune_stale_tracks(timestamp)
 
         return self.confirmed_tracks()
+
+    def _associate(self, tracks, detections, timestamp):
+        """The associator's answer, its distances worked out for every pair in array calls.
+
+        `association.associate` gives the same assignment as `data_associator` (the same
+        gate, distances, table and assignment) without building a prediction and a
+        hypothesis per track and detection pair; an event with a detection that is not a
+        linear position model, or `vector_association` off, takes the associator itself.
+        """
+        if self.vector_association:
+            found = association.associate(self, tracks, detections, timestamp, self._arrays)
+            if found is not None:
+                return found
+        return self.data_associator.associate(tracks, detections, timestamp)
+
+    def _arrays(self, track):
+        """A track's state vector, covariance, timestamp and motion noise, kept per state."""
+        state = track.state
+        motion = self._motion(track)
+        cached = self._association_rows.get(track.id)
+        if cached is None or cached[0] is not state or cached[1] != motion:
+            noise = self._axis_noise if motion is None else self._motion_noise[motion]
+            arrays = (
+                np.asarray(state.state_vector, dtype=float).ravel(),
+                np.asarray(state.covar, dtype=float),
+                state.timestamp,
+                np.asarray(noise, dtype=float),
+            )
+            cached = (state, motion, arrays)
+            self._association_rows[track.id] = cached
+        return cached[2]
+
+    def _reachable(self, tracks, detections):
+        """The tracks that may fall inside a detection's gate, all checked in one array call.
+
+        `_may_gate`'s bound for every track at once (`reach.reachable_rows`): each track's
+        numbers are kept as a row, rebuilt only when its state or motion changes, so an
+        event costs a row lookup per live track rather than a prediction.
+        """
+        tracks = list(tracks)
+        if not tracks or not detections:
+            return set()
+        rows = []
+        for track in tracks:
+            state = track.state
+            motion = self._motion(track)
+            track_id = self._id(track)
+            cached = self._reach_rows.get(track_id)
+            if cached is None or cached[0] is not state or cached[1] != motion:
+                noise = self._axis_noise if motion is None else self._motion_noise[motion]
+                cached = (state, motion, track_row(state, noise))
+                self._reach_rows[track_id] = cached
+            rows.append(cached[2])
+        reached = reachable_rows(np.stack(rows), detections, GATE_MAHALANOBIS_DISTANCE**2)
+        return {track for track, hit in zip(tracks, reached, strict=True) if hit}
 
     def _may_gate(self, track, detections):
         """Whether a track could fall inside the validation gate of any of the detections.
@@ -822,9 +912,127 @@ class SapientAsynchronousTracker:
         variance += axis_noise[index // 3] * dt**5 / 20.0
         return position, variance
 
+    def _coasted_position_sigma(self, track, current_time):
+        """Worst-axis position sigma the track has coasted to by `current_time`.
+
+        Coasting every event leaves a track's last state at its prediction to now. Without
+        it, the last state is its last real one, predicted here in one step with its
+        motion's noise, which for this linear model is the chain of per-event predictions.
+        """
+        state = track.state
+        dt = (current_time - state.timestamp).total_seconds()
+        if self.coast_unmatched or dt <= 0:
+            return _position_sigma(state)
+        sv = state.state_vector.ravel().tolist()
+        covar = state.covar.tolist()
+        motion = self._motion(track)
+        axis_noise = self._axis_noise if motion is None else self._motion_noise[motion]
+        return float(
+            np.sqrt(max(self._predicted_axis(sv, covar, i, dt, axis_noise)[1] for i in (0, 3, 6)))
+        )
+
+    def _drop_due(self, track, narrowed=False):
+        """The earliest time pruning could drop the track, or None if that may be any time.
+
+        Its coast horizon, its confirmation window while tentative, and the time until
+        which it cannot have widened past the sigma limit (`_may_be_wide`'s bound, kept
+        for its state and motion; `narrowed` when it was just worked out).
+        """
+        if self.coast_unmatched:
+            return None
+        due = self._last_detection(track) + timedelta(seconds=self.max_coast_seconds)
+        pending = self._tentative.get(self._id(track)) if self._tentative else None
+        if pending is not None:
+            due = min(due, pending[1] + timedelta(seconds=self.confirm_window_seconds))
+        if not narrowed:
+            self._may_be_wide(track, due)
+        until = self._narrow_until[self._id(track)][2]
+        return None if until is None else min(due, until)
+
+    def _prune_skippable(self, current_time):
+        """Whether no live track can be due for pruning at `current_time`.
+
+        `_prune_due` is the earliest drop time over the tracks the last full pruning
+        kept. Since then a track's inputs change only when an event touches it (a
+        detection, a coasted state, a new track), which lowers the bound by its own
+        drop time here, or when a declaration lapses, which clears it. A millisecond
+        of margin covers the rounding between the checks' seconds and these times.
+        """
+        due = self._prune_due
+        if due is None:
+            return False
+        for track in self.touched:
+            if track in self.tracks:
+                track_due = self._drop_due(track)
+                if track_due is None:
+                    self._prune_due = None
+                    return False
+                due = min(due, track_due)
+        self._prune_due = due
+        return current_time < due - _PRUNE_MARGIN
+
+    def _may_be_wide(self, track, current_time):
+        """Whether the track may have coasted past the position sigma it is dropped at.
+
+        Only a track not coasted each event needs this: its uncertainty is predicted
+        from its last real state, so checking it exactly costs a prediction of every
+        track every event. Once per state, it is worked out until when the track
+        cannot be that uncertain, from a bound that only grows with time; until then
+        the exact check is skipped, after it the exact check decides, as before.
+        """
+        if self.coast_unmatched:
+            return True
+        state = track.state
+        motion = self._motion(track)
+        track_id = self._id(track)
+        cached = self._narrow_until.get(track_id)
+        if cached is None or cached[0] is not state or cached[1] != motion:
+            seconds = self._narrow_seconds(state, motion)
+            until = None if seconds is None else state.timestamp + timedelta(seconds=seconds)
+            cached = (state, motion, until)
+            self._narrow_until[track_id] = cached
+        return cached[2] is None or current_time > cached[2]
+
+    def _narrow_seconds(self, state, motion):
+        """Seconds after `state` for which no axis can pass the sigma limit, or None.
+
+        Per axis the predicted position variance is h'Ph + q dt^5/20, with
+        h = (1, dt, dt^2/2); by Cauchy-Schwarz h'Ph is at most (sum |h_i| sigma_i)^2,
+        which, unlike h'Ph itself, never falls as dt grows. The answer is the last
+        time that bound is inside the limit, found by bisection, so it errs early.
+        """
+        covar = state.covar
+        axis_noise = self._axis_noise if motion is None else self._motion_noise[motion]
+        limit = self.max_coast_position_sigma**2
+        sigmas = [
+            [float(np.sqrt(max(float(covar[i + k, i + k]), 0.0))) for k in range(3)]
+            for i in (0, 3, 6)
+        ]
+
+        def inside(dt):
+            return all(
+                (s[0] + dt * s[1] + 0.5 * dt * dt * s[2]) ** 2 + noise * dt**5 / 20.0 <= limit
+                for s, noise in zip(sigmas, axis_noise, strict=True)
+            )
+
+        if not inside(0.0):
+            return None
+        low, high = 0.0, self.max_coast_seconds
+        if inside(high):
+            return high
+        for _ in range(30):
+            middle = 0.5 * (low + high)
+            if inside(middle):
+                low = middle
+            else:
+                high = middle
+        return low
+
     def confirmed_tracks(self):
         """The live tracks that have passed confirmation; tentative ones are held back."""
-        return {track for track in self.tracks if track.id not in self._tentative}
+        if not self._tentative:
+            return set(self.tracks)
+        return {track for track in self.tracks if self._id(track) not in self._tentative}
 
     def _count_confirmation_hit(self, track):
         """Counts a detection towards a tentative track's confirmation.
@@ -958,6 +1166,7 @@ class SapientAsynchronousTracker:
     def _undeclare(self, track_id) -> None:
         """Forget the declaration of the uid bound to a track, if the track is still live."""
         del self._declarations[track_id]
+        self._prune_due = None  # the track's motion, and so how fast it widens, changed
         for live in self.tracks:
             if live.id == track_id:
                 live.metadata.pop(DECLARATION_KEY, None)
@@ -1017,8 +1226,20 @@ class SapientAsynchronousTracker:
 
     def _motion(self, track):
         """How its uid's latest self-report holds the track, STILL or STANDING, or None."""
-        declared = self._declarations.get(track.id)
+        if not self._declarations:
+            return None
+        declared = self._declarations.get(self._id(track))
         return None if declared is None else declared.motion
+
+    def _id(self, track):
+        """The track's id, from `_track_ids` when the tracker made the track."""
+        found = self._track_ids.get(track)
+        return track.id if found is None else found
+
+    def _last_detection(self, track):
+        """When the track last took a real detection: its seed's time if none is kept."""
+        seen = self._last_update_time.get(self._id(track))
+        return track.states[0].timestamp if seen is None else seen
 
     def _note_threat_evidence(self, track, detection, timestamp, motion=None) -> None:
         """Record what a hit tells the threat judgement: a declaration or a sensor's sighting.
@@ -1194,6 +1415,8 @@ class SapientAsynchronousTracker:
         # unclassified until its second detection.
         track = Track([prior], id=self._seed_id(detection), init_metadata=dict(detection.metadata))
         self.tracks.add(track)
+        self.touched.add(track)
+        self._track_ids[track] = track.id
         self._posteriors[track.id] = prior
         # The seeding hit is a real detection, so it anchors staleness.
         self._last_update_time[track.id] = detection.timestamp
@@ -1341,10 +1564,7 @@ class SapientAsynchronousTracker:
         gone = {
             track
             for track in self.tracks
-            if (
-                current_time - self._last_update_time.get(track.id, track.states[0].timestamp)
-            ).total_seconds()
-            > self.max_coast_seconds
+            if (current_time - self._last_detection(track)).total_seconds() > self.max_coast_seconds
         }
         if gone:
             self._forget(gone)
@@ -1352,7 +1572,9 @@ class SapientAsynchronousTracker:
     def _forget(self, gone) -> None:
         """Drop these tracks and everything kept of them."""
         self.tracks -= gone
-        ids = {track.id for track in gone}
+        ids = {self._id(track) for track in gone}
+        for track in gone:
+            self._track_ids.pop(track, None)
         books = (
             self._last_update_time,
             self._swarm_counts,
@@ -1361,6 +1583,9 @@ class SapientAsynchronousTracker:
             self._declarations,
             self._cot_uids,
             self._posteriors,
+            self._narrow_until,
+            self._reach_rows,
+            self._association_rows,
         )
         for book in books:
             for track_id in ids:
@@ -1385,28 +1610,55 @@ class SapientAsynchronousTracker:
         covariance accepts most of the picture at a smaller distance than a
         well-tracked target does, and wins detections away from it.
         """
+        if self._prune_skippable(current_time):
+            self._cot_seen = {
+                k: seen for k, seen in self._cot_seen.items() if k in self._object_tracks
+            }
+            return
         active_set = set()
         dropped_wide = 0
+        known, due = not self.coast_unmatched, None
         for track in self.tracks:
-            last_detection = self._last_update_time.get(track.id, track.states[0].timestamp)
-            elapsed = (current_time - last_detection).total_seconds()
+            elapsed = (current_time - self._last_detection(track)).total_seconds()
             if elapsed > self.max_coast_seconds:
                 continue
-            pending = self._tentative.get(track.id)
+            pending = self._tentative.get(self._id(track)) if self._tentative else None
             if (
                 pending is not None
                 and (current_time - pending[1]).total_seconds() > self.confirm_window_seconds
             ):
                 continue  # Never confirmed: a stray report, not an object.
-            if _position_sigma(track.state) > self.max_coast_position_sigma:
+            if (
+                self._may_be_wide(track, current_time)
+                and self._coasted_position_sigma(track, current_time)
+                > self.max_coast_position_sigma
+            ):
                 dropped_wide += 1
                 continue
             active_set.add(track)
+            if known:
+                track_due = self._drop_due(track, narrowed=True)
+                if track_due is None:
+                    known = False
+                else:
+                    due = track_due if due is None else min(due, track_due)
+        self._prune_due = due if known else None
         if dropped_wide:
             self._report_wide_coast(dropped_wide)
+        if len(active_set) == len(self.tracks):
+            # Nothing pruned: every book is kept only for live tracks (they are filled
+            # for a live track and emptied by _forget and below), so only a uid's last
+            # event can outlive its binding, released by _release_expired.
+            self._cot_seen = {
+                k: seen for k, seen in self._cot_seen.items() if k in self._object_tracks
+            }
+            return
         self.tracks = active_set
         # Forget pruned tracks, or the bookkeeping outlives them for the whole run.
-        active_ids = {track.id for track in active_set}
+        active_ids = {self._id(track) for track in active_set}
+        self._track_ids = {
+            track: track_id for track, track_id in self._track_ids.items() if track in active_set
+        }
         self._last_update_time = {
             track_id: seen
             for track_id, seen in self._last_update_time.items()
@@ -1439,6 +1691,19 @@ class SapientAsynchronousTracker:
         self._posteriors = {
             track_id: state
             for track_id, state in self._posteriors.items()
+            if track_id in active_ids
+        }
+        self._narrow_until = {
+            track_id: narrow
+            for track_id, narrow in self._narrow_until.items()
+            if track_id in active_ids
+        }
+        self._reach_rows = {
+            track_id: row for track_id, row in self._reach_rows.items() if track_id in active_ids
+        }
+        self._association_rows = {
+            track_id: row
+            for track_id, row in self._association_rows.items()
             if track_id in active_ids
         }
         self._cot_seen = {k: seen for k, seen in self._cot_seen.items() if k in self._object_tracks}

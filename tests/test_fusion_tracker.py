@@ -1923,3 +1923,235 @@ def test_a_stop_and_go_vehicle_drives_off_without_overshooting(period, most):
 def test_a_steady_mover_giving_a_standing_speed_is_not_held_for_long(period, most):
     error, _ = _follow(lambda s: 10.0 * s, lambda s: "0.5", period, 300)
     assert error < most
+
+
+# --- coasting only when a predicted state can be published ------------------------
+
+
+def test_without_coasting_an_unmatched_track_keeps_its_last_real_state():
+    tracker = SapientAsynchronousTracker(coast_unmatched=False)
+    tracker.process_async_event(T0, {_det(0.0, 0.0, 500.0, T0)})
+    (track,) = tuple(tracker.tracks)
+
+    tracker.process_async_event(T0 + timedelta(seconds=2), set())
+
+    assert tracker.tracks == {track}
+    assert len(track.states) == 1
+    assert track.state.timestamp == T0
+
+
+def _drop_time(coast_unmatched):
+    """Seconds after its last report at which a coasting track is dropped on its sigma."""
+    tracker = SapientAsynchronousTracker(
+        max_coast_seconds=10_000.0, max_coast_position_sigma=300.0, coast_unmatched=coast_unmatched
+    )
+    tracker.process_async_event(T0, {_det(0.0, 0.0, 500.0, T0)})
+    for step in range(1, 200):
+        tracker.process_async_event(T0 + timedelta(seconds=step), set())
+        if not tracker.tracks:
+            return step
+    raise AssertionError("the track was never dropped")
+
+
+def test_a_track_not_coasted_is_dropped_on_its_sigma_when_a_coasted_one_is():
+    """Without the per-event predictions, pruning predicts the last real state to now
+    in one step; for the linear motion model that is the same uncertainty."""
+    assert _drop_time(coast_unmatched=False) == _drop_time(coast_unmatched=True)
+
+
+def test_the_sigma_of_a_track_at_or_before_its_last_state_is_its_own():
+    tracker = SapientAsynchronousTracker(coast_unmatched=False)
+    track = _wide_track(0.0, 0.0, 400.0)
+
+    assert tracker._coasted_position_sigma(track, T0) == pytest.approx(400.0)
+    assert tracker._coasted_position_sigma(track, T0 + timedelta(seconds=5)) > 400.0
+
+
+def _follow_two_objects(coast_unmatched):
+    """One object reported every second, a second one every third: the second is
+    unmatched in between, and is coasted or not. The run ends on a report of both."""
+    tracker = SapientAsynchronousTracker(coast_unmatched=coast_unmatched)
+    for step in range(10):
+        moment = T0 + timedelta(seconds=step)
+        reports = {_det(20.0 * step, 0.0, 500.0, moment)}
+        if step % 3 == 0:
+            reports.add(_det(3000.0, 15.0 * step, 500.0, moment))
+        tracker.process_async_event(moment, reports)
+    return sorted(
+        (track.state.timestamp, track.state.state_vector.ravel().tolist())
+        for track in tracker.tracks
+    )
+
+
+def test_a_track_not_coasted_is_updated_to_the_same_state():
+    """The update predicts the track to the report's time from its last state; a
+    chain of coasts in between reaches the same prediction."""
+    lazy = _follow_two_objects(coast_unmatched=False)
+    coasted = _follow_two_objects(coast_unmatched=True)
+
+    assert len(lazy) == len(coasted) == 2
+    for (lazy_time, lazy_state), (coasted_time, coasted_state) in zip(lazy, coasted, strict=True):
+        assert lazy_time == coasted_time
+        assert lazy_state == pytest.approx(coasted_state, abs=1e-6)
+
+
+def test_a_track_is_never_too_uncertain_before_its_narrow_time():
+    """The shortcut only skips the exact check while the track cannot be too uncertain,
+    whatever the correlations in its covariance."""
+    tracker = SapientAsynchronousTracker(coast_unmatched=False, max_coast_position_sigma=500.0)
+    rng = np.random.default_rng(7)
+    for _ in range(200):
+        root = rng.normal(size=(9, 9)) * rng.uniform(1.0, 60.0)
+        covar = root @ root.T
+        state = GaussianState(StateVector(rng.normal(size=9)), covar, timestamp=T0)
+        track = Track([state])
+        seconds = tracker._narrow_seconds(state, None)
+        if seconds is None:
+            continue
+        for fraction in (0.0, 0.25, 0.5, 0.75, 1.0):
+            moment = T0 + timedelta(seconds=seconds * fraction)
+            assert tracker._coasted_position_sigma(track, moment) <= 500.0 + 1e-6
+
+
+def test_pruning_checks_a_narrow_track_exactly_only_once_it_may_be_wide(monkeypatch):
+    tracker = SapientAsynchronousTracker(
+        coast_unmatched=False, max_coast_seconds=10_000.0, max_coast_position_sigma=300.0
+    )
+    tracker.process_async_event(T0, {_det(0.0, 0.0, 500.0, T0)})
+    (track,) = tuple(tracker.tracks)
+    exact = []
+    original = tracker._coasted_position_sigma
+    monkeypatch.setattr(
+        tracker,
+        "_coasted_position_sigma",
+        lambda t, now: exact.append(now) or original(t, now),
+    )
+
+    tracker._prune_stale_tracks(T0 + timedelta(seconds=1))
+    assert exact == []
+
+    narrow = tracker._narrow_until[track.id][2]
+    tracker._prune_stale_tracks(narrow + timedelta(seconds=1))
+    assert exact == [narrow + timedelta(seconds=1)]
+
+
+def test_a_track_already_too_uncertain_is_always_checked_exactly():
+    tracker = SapientAsynchronousTracker(coast_unmatched=False, max_coast_position_sigma=300.0)
+    track = _wide_track(0.0, 0.0, 400.0)
+
+    assert tracker._may_be_wide(track, T0)
+    assert tracker._narrow_until[track.id][2] is None
+
+
+def test_a_coasted_track_is_always_checked_exactly():
+    tracker = SapientAsynchronousTracker(coast_unmatched=True)
+    assert tracker._may_be_wide(_wide_track(0.0, 0.0, 10.0), T0)
+
+
+def _books_hold_live_tracks_only(tracker):
+    live = {track.id for track in tracker.tracks}
+    for name in (
+        "_last_update_time",
+        "_swarm_counts",
+        "_class_kinds",
+        "_tentative",
+        "_declarations",
+        "_cot_uids",
+        "_posteriors",
+        "_narrow_until",
+        "_reach_rows",
+        "_association_rows",
+    ):
+        assert set(getattr(tracker, name)) <= live, name
+    assert set(tracker._object_tracks.values()) <= live
+    assert set(tracker._cot_seen) <= set(tracker._object_tracks)
+    assert set(tracker._track_ids) == tracker.tracks
+
+
+@pytest.mark.parametrize("seed", range(3))
+def test_after_every_event_the_books_hold_live_tracks_only(seed):
+    """Pruning rebuilds its books only when it prunes, which holds only if they never
+    keep a track no longer live: tracks seeded, bound by object id, declared by
+    self-reports whose declarations lapse, coasted out and refused alike."""
+    rng = np.random.default_rng(seed)
+    tracker = SapientAsynchronousTracker(confirm_hits=2, max_coast_seconds=6.0)
+    for step in range(120):
+        when = T0 + timedelta(seconds=step * 0.5)
+        group = set()
+        for _ in range(int(rng.integers(0, 4))):
+            east, north = rng.uniform(-3000, 3000, size=2)
+            group.add(_det(east, north, 50.0, when))
+        if rng.random() < 0.5:
+            group.add(_id_det(float(rng.uniform(-50, 50)), 0.0, when, f"obj-{rng.integers(3)}"))
+        if rng.random() < 0.3:
+            uid = f"ATAK-{rng.integers(3)}"
+            group.add(_self_report(float(rng.uniform(-2000, 2000)), when, uid=uid))
+        if group:
+            tracker.process_async_event(when, group)
+            _books_hold_live_tracks_only(tracker)
+
+
+def _would_prune(tracker, track, now):
+    """Whether pruning's own rules drop the track at `now`, worked out without the bound."""
+    if (now - tracker._last_detection(track)).total_seconds() > tracker.max_coast_seconds:
+        return True
+    pending = tracker._tentative.get(track.id)
+    if pending is not None and (now - pending[1]).total_seconds() > tracker.confirm_window_seconds:
+        return True
+    return (
+        tracker._may_be_wide(track, now)
+        and tracker._coasted_position_sigma(track, now) > tracker.max_coast_position_sigma
+    )
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_pruning_skips_only_events_at_which_it_would_drop_nothing(seed, monkeypatch):
+    rng = np.random.default_rng(seed)
+    tracker = SapientAsynchronousTracker(
+        confirm_hits=2, max_coast_seconds=6.0, max_coast_position_sigma=400.0
+    )
+    tracker.coast_unmatched = False  # as the engine runs it, publishing updates only
+    skippable = tracker._prune_skippable
+    skipped = []
+
+    def checked(now):
+        answer = skippable(now)
+        if answer:
+            skipped.append(now)
+            assert not any(_would_prune(tracker, t, now) for t in tracker.tracks)
+        return answer
+
+    monkeypatch.setattr(tracker, "_prune_skippable", checked)
+    for step in range(160):
+        # Mostly forward in time, sometimes a report up to 2 s late.
+        when = T0 + timedelta(seconds=step * 0.5 - float(rng.choice([0, 0, 0, 1.5])))
+        group = set()
+        for _ in range(int(rng.integers(0, 3))):
+            east, north = rng.uniform(-3000, 3000, size=2)
+            group.add(_det(east, north, 50.0, when))
+        if rng.random() < 0.4:
+            group.add(_id_det(float(rng.uniform(-50, 50)), 0.0, when, f"obj-{rng.integers(3)}"))
+        if rng.random() < 0.3:
+            uid = f"ATAK-{rng.integers(3)}"
+            stale = (when + timedelta(seconds=float(rng.uniform(1, 8)))).isoformat()
+            group.add(_self_report(float(rng.uniform(-2000, 2000)), when, uid=uid, stale=stale))
+        if group:
+            tracker.process_async_event(when, group)
+    assert len(skipped) > 20  # the bound is used, not just always declined
+
+
+def test_a_track_that_may_widen_any_time_keeps_pruning_scanning(monkeypatch):
+    tracker = SapientAsynchronousTracker(confirm_hits=1)
+    tracker.coast_unmatched = False
+    tracker.process_async_event(T0, {_det(0.0, 0.0, 50.0, T0)})
+    second = T0 + timedelta(seconds=1)
+    tracker.process_async_event(second, {_det(5000.0, 0.0, 50.0, second)})
+    assert tracker._prune_due is not None  # both tracks have a bound
+    # A track no bound covers: its next state could be wide at once.
+    monkeypatch.setattr(tracker, "_narrow_seconds", lambda state, motion: None)
+    third = T0 + timedelta(seconds=2)
+    tracker.process_async_event(third, {_det(5.0, 0.0, 50.0, third)})
+    assert tracker._prune_due is None
+    assert not tracker._prune_skippable(third)
+    tracker.coast_unmatched = True
+    assert tracker._drop_due(next(iter(tracker.tracks))) is None

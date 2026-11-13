@@ -22,7 +22,7 @@ from stonesoup.types.prediction import Prediction
 from stonesoup.types.update import Update
 
 from .augmentor import TacticalContextAugmentor
-from .publish import PendingSources, PublishPolicy, source_key
+from .publish import UPDATES_ONLY, PendingSources, PublishPolicy, source_key
 from .schemas import TacticalTrack
 from .tracker import SapientAsynchronousTracker
 
@@ -93,6 +93,7 @@ class FusionEngine:
     ):
         self.tracker = tracker
         self.publish_policy = publish_policy
+        self._coast_for(tracker)
         self.augmentor = augmentor or TacticalContextAugmentor()
         self.future_horizon_seconds = future_horizon_seconds
         self.late_tolerance_seconds = late_tolerance_seconds
@@ -107,8 +108,13 @@ class FusionEngine:
     def reset(self, tracker: SapientAsynchronousTracker) -> None:
         """Start again with a new tracker: a new scenario, not a continuation."""
         self.tracker = tracker
+        self._coast_for(tracker)
         self.latest_timestamp = None
         self.pending_sources = PendingSources()
+
+    def _coast_for(self, tracker: SapientAsynchronousTracker) -> None:
+        """Coast every unmatched track each event only if predicted states can be published."""
+        tracker.coast_unmatched = self.publish_policy.policy not in UPDATES_ONLY
 
     def process(self, timestamp: datetime, detections, now: datetime | None = None) -> EventResult:
         """Fuse one event, or drop it when its timestamp is out of step with the rest.
@@ -189,8 +195,17 @@ class FusionEngine:
         id. A track this event started holds its seed's metadata as `init_metadata`. A
         coasting track's Prediction names nothing. `reported` holds each source's time as
         its report gave it, before a live event was clamped to the present.
+
+        Only the tracks the event touched (`tracker.touched`: updated, coasted or
+        started) are looked at: any other live track holds the state an earlier event
+        left, whose detection is not one of `fed`. A tracker that does not say which it
+        touched has every live track looked at.
         """
-        for track in self.tracker.tracks:
+        live = self.tracker.tracks
+        touched = getattr(self.tracker, "touched", None)
+        for track in live if touched is None else touched:
+            if track not in live:
+                continue
             state = track.state
             if held_before.get(id(track)) is not track:
                 # A new track, possibly under the id of one just dropped.
