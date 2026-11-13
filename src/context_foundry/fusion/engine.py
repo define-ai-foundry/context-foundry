@@ -22,7 +22,7 @@ from stonesoup.types.prediction import Prediction
 from stonesoup.types.update import Update
 
 from .augmentor import TacticalContextAugmentor
-from .publish import PendingSources, PublishPolicy, source_key
+from .publish import UPDATES_ONLY, PendingSources, PublishPolicy, source_key
 from .schemas import TacticalTrack
 from .tracker import SapientAsynchronousTracker
 
@@ -93,6 +93,7 @@ class FusionEngine:
     ):
         self.tracker = tracker
         self.publish_policy = publish_policy
+        self._coast_for(tracker)
         self.augmentor = augmentor or TacticalContextAugmentor()
         self.future_horizon_seconds = future_horizon_seconds
         self.late_tolerance_seconds = late_tolerance_seconds
@@ -107,8 +108,13 @@ class FusionEngine:
     def reset(self, tracker: SapientAsynchronousTracker) -> None:
         """Start again with a new tracker: a new scenario, not a continuation."""
         self.tracker = tracker
+        self._coast_for(tracker)
         self.latest_timestamp = None
         self.pending_sources = PendingSources()
+
+    def _coast_for(self, tracker: SapientAsynchronousTracker) -> None:
+        """Coast every unmatched track each event only if predicted states can be published."""
+        tracker.coast_unmatched = self.publish_policy.policy not in UPDATES_ONLY
 
     def process(self, timestamp: datetime, detections, now: datetime | None = None) -> EventResult:
         """Fuse one event, or drop it when its timestamp is out of step with the rest.
