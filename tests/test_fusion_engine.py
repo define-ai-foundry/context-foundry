@@ -225,3 +225,15 @@ def test_a_track_started_again_under_its_old_id_names_only_its_new_seed():
     ((restarted, _),) = again.published
     assert restarted.id == track.id and restarted is not track
     assert again.sources[str(track.id)] == [_source("RAD-1", "W1", 60)]
+
+
+@pytest.mark.parametrize(
+    ("policy", "coasts"),
+    [("window", False), ("updates", False), ("all", True), ("coast", True), ("predicted", True)],
+)
+def test_tracks_are_coasted_each_event_only_when_a_predicted_state_can_be_sent(policy, coasts):
+    engine = FusionEngine(SapientAsynchronousTracker(), PublishPolicy(policy))
+    assert engine.tracker.coast_unmatched is coasts
+
+    engine.reset(SapientAsynchronousTracker())
+    assert engine.tracker.coast_unmatched is coasts

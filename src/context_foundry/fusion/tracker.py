@@ -544,6 +544,7 @@ class SapientAsynchronousTracker:
         confirm_hits: int = 1,
         confirm_window_seconds: float = CONFIRM_WINDOW_SECONDS,
         id_namespace: str = "",
+        coast_unmatched: bool = True,
     ):
         """Builds the fusion engine.
 
@@ -568,6 +569,12 @@ class SapientAsynchronousTracker:
         self.confirm_window_seconds = confirm_window_seconds
         # What makes this tracker's track ids its own; see _seed_id.
         self.id_namespace = id_namespace
+        # Whether every track an event does not update is predicted to it. Off, a track
+        # keeps its last real state until a detection updates it; association predicts
+        # it to the event's time in one step, and pruning works out how far it has
+        # coasted (_coasted_position_sigma). Only a publish rule that never sends a
+        # predicted state can turn it off (FusionEngine).
+        self.coast_unmatched = coast_unmatched
         # Tentative track id -> [detections gathered, time of its first detection].
         self._tentative = {}
 
@@ -716,8 +723,9 @@ class SapientAsynchronousTracker:
             associations.update(
                 self.data_associator.associate(reachable, remaining_detections, timestamp)
             )
-        for track in remaining_tracks - reachable:
-            track.append(self.predictor.predict(track, timestamp=timestamp))
+        if self.coast_unmatched:
+            for track in remaining_tracks - reachable:
+                track.append(self.predictor.predict(track, timestamp=timestamp))
 
         associated_detections = set()
 
@@ -728,8 +736,8 @@ class SapientAsynchronousTracker:
             # updated from the same hit.
             if not joint_hypothesis:
                 # Track fell outside validation gates; coast forward using kinematics prediction
-                prediction = self.predictor.predict(track, timestamp=timestamp)
-                track.append(prediction)
+                if self.coast_unmatched:
+                    track.append(self.predictor.predict(track, timestamp=timestamp))
             else:
                 # High-Fidelity Step: Extract the measurement model embedded inside the SAPIENT detection
                 det = joint_hypothesis.measurement
@@ -821,6 +829,25 @@ class SapientAsynchronousTracker:
         )
         variance += axis_noise[index // 3] * dt**5 / 20.0
         return position, variance
+
+    def _coasted_position_sigma(self, track, current_time):
+        """Worst-axis position sigma the track has coasted to by `current_time`.
+
+        Coasting every event leaves a track's last state at its prediction to now. Without
+        it, the last state is its last real one, predicted here in one step with its
+        motion's noise, which for this linear model is the chain of per-event predictions.
+        """
+        state = track.state
+        dt = (current_time - state.timestamp).total_seconds()
+        if self.coast_unmatched or dt <= 0:
+            return _position_sigma(state)
+        sv = state.state_vector.ravel().tolist()
+        covar = state.covar.tolist()
+        motion = self._motion(track)
+        axis_noise = self._axis_noise if motion is None else self._motion_noise[motion]
+        return float(
+            np.sqrt(max(self._predicted_axis(sv, covar, i, dt, axis_noise)[1] for i in (0, 3, 6)))
+        )
 
     def confirmed_tracks(self):
         """The live tracks that have passed confirmation; tentative ones are held back."""
@@ -1398,7 +1425,7 @@ class SapientAsynchronousTracker:
                 and (current_time - pending[1]).total_seconds() > self.confirm_window_seconds
             ):
                 continue  # Never confirmed: a stray report, not an object.
-            if _position_sigma(track.state) > self.max_coast_position_sigma:
+            if self._coasted_position_sigma(track, current_time) > self.max_coast_position_sigma:
                 dropped_wide += 1
                 continue
             active_set.add(track)
