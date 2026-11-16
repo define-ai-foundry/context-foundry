@@ -280,7 +280,10 @@ OBJECT_ID_GATE_MAHALANOBIS_DISTANCE = 3 * GATE_MAHALANOBIS_DISTANCE
 # reports of one object id (the median of its last REVISIT_SAMPLES, once it has two;
 # no sensor registration carries a rate) and capped at the coast time. A sensor's
 # first object after a start waits for the rate to be learned, at most four coast
-# times; a sensor without object ids keeps the 30 s. A one-off id, a stray report's,
+# times, and so do the first tracks of a tracker started again, until it has read a
+# few reports of each sensor; a rebuild from recent input re-learns most rates before
+# live reports arrive. A sensor without object ids keeps the 30 s. A one-off id, a
+# stray report's,
 # teaches nothing, so clutter does not widen the window: with 1, 2 and 5 random false
 # reports a second on the Joensuu attack fused with Alakurtti, 216, 554 and 1659 of
 # them confirmed, against 188, 502 and 1601 with a fixed 30 s and 400, 871 and 2029
@@ -721,8 +724,8 @@ class SapientAsynchronousTracker:
         #   - a new track (touched, in _initialize_new_track);
         #   - a declaration that lapses (_release_expired -> _undeclare clears it);
         #   - the first event, which seeds tracks pruning never saw (cleared).
-        # A new drop rule, or a new input to one, joins this list. _drop_unconfirmed
-        # drops tentative tracks by the same window before association; it only
+        # A new drop rule, or a new input to one, joins this list. _drop_coasted_out
+        # also drops tentative tracks by the same window before association; it only
         # removes tracks, so the bound stays sound.
         self._prune_due: datetime | None = None
         # CoT object key -> time of its latest event fused; see _binding_lapsed.
@@ -752,10 +755,9 @@ class SapientAsynchronousTracker:
         # tentative track past its confirmation window goes too, so a report after the
         # window starts a new track rather than confirming the old one, whether or not
         # some other event came in between and pruned it first.
-        self._drop_coasted_out(timestamp)
         if self.confirm_hits > 1:
             self._learn_revisits(timestamp, detection_group)
-            self._drop_unconfirmed(timestamp)
+        self._drop_coasted_out(timestamp)
         self._release_expired(timestamp)
 
         # If no tracks exist yet, bootstrap the tracking engine using current observations
@@ -1597,12 +1599,20 @@ class SapientAsynchronousTracker:
             del track.metadatas[:excess]
 
     def _drop_coasted_out(self, current_time) -> None:
-        """Drop the tracks silent for longer than max_coast_seconds, and what is kept of them."""
-        gone = {
-            track
-            for track in self.tracks
-            if (current_time - self._last_detection(track)).total_seconds() > self.max_coast_seconds
-        }
+        """Drop the tracks silent for longer than max_coast_seconds, the tentative ones
+        whose confirmation window has passed, and what is kept of them.
+        """
+        tentative = self._tentative
+        gone = set()
+        for track in self.tracks:
+            if (
+                current_time - self._last_detection(track)
+            ).total_seconds() > self.max_coast_seconds:
+                gone.add(track)
+            elif tentative:
+                pending = tentative.get(self._id(track))
+                if pending is not None and (current_time - pending[1]).total_seconds() > pending[2]:
+                    gone.add(track)
         if gone:
             self._forget(gone)
 
@@ -1644,18 +1654,6 @@ class SapientAsynchronousTracker:
             return self.confirm_window_seconds
         revisit = min(statistics.median(gaps), self.max_coast_seconds)
         return max(self.confirm_window_seconds, self.confirm_hits * revisit)
-
-    def _drop_unconfirmed(self, current_time) -> None:
-        """Drop the tentative tracks whose confirmation window has passed."""
-        if not self._tentative:
-            return
-        gone = set()
-        for track in self.tracks:
-            pending = self._tentative.get(self._id(track))
-            if pending is not None and (current_time - pending[1]).total_seconds() > pending[2]:
-                gone.add(track)
-        if gone:
-            self._forget(gone)
 
     def _forget(self, gone) -> None:
         """Drop these tracks and everything kept of them."""
