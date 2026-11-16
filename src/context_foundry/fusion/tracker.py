@@ -694,7 +694,14 @@ class SapientAsynchronousTracker:
         # The tracks the latest event appended a state to or started, for the engine.
         self.touched: set = set()
         # No live track can be pruned before this time, or None when that is not known;
-        # see _prune_skippable.
+        # see _prune_skippable. Every path that changes a kept track's inputs to
+        # pruning must either add the track to `touched` or clear this:
+        #   - an update by a detection, confirmation included (touched);
+        #   - a coasted state, with coast_unmatched (touched);
+        #   - a new track (touched, in _initialize_new_track);
+        #   - a declaration that lapses (_release_expired -> _undeclare clears it);
+        #   - the first event, which seeds tracks pruning never saw (cleared).
+        # A new drop rule, or a new input to one, joins this list.
         self._prune_due: datetime | None = None
         # CoT object key -> time of its latest event fused; see _binding_lapsed.
         self._cot_seen: dict[tuple, datetime] = {}

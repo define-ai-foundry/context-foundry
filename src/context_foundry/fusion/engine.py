@@ -113,7 +113,11 @@ class FusionEngine:
         self.pending_sources = PendingSources()
 
     def _coast_for(self, tracker: SapientAsynchronousTracker) -> None:
-        """Coast every unmatched track each event only if predicted states can be published."""
+        """Coast every unmatched track each event only if predicted states can be published.
+
+        Set here alone, from `__init__` and `reset`: assigning `publish_policy` later
+        leaves `tracker.coast_unmatched` as it was, so call this again after it.
+        """
         tracker.coast_unmatched = self.publish_policy.policy not in UPDATES_ONLY
 
     def process(self, timestamp: datetime, detections, now: datetime | None = None) -> EventResult:
