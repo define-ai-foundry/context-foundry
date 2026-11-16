@@ -4,6 +4,7 @@
 # src/fusion/tracker.py
 
 import logging
+import statistics
 import time
 import uuid
 from collections import deque
@@ -260,27 +261,41 @@ OBJECT_ID_GATE_MAHALANOBIS_DISTANCE = 3 * GATE_MAHALANOBIS_DISTANCE
 # real track at once: published, and kept coasting for max_coast_seconds while its
 # gate widens until it pulls in other stray reports kilometres away. A new track is
 # therefore tentative until it has gathered CONFIRM_HITS detections (its first one
-# included) within CONFIRM_WINDOW_SECONDS of starting; only confirmed tracks are
-# returned to the caller, and a tentative track that misses the window is dropped.
-# A real object is reported again and again, so it confirms within a few revisits;
-# a stray report never does. The tracker's own default is 1 (no confirmation), which
-# keeps its behaviour for callers that do not ask for it; the CLI asks for
-# DEFAULT_CONFIRM_HITS.
+# included) within its confirmation window of starting; only confirmed tracks are
+# returned to the caller, and a tentative track whose window has passed is dropped
+# before the next event is associated, so what becomes of it depends on its own
+# reports alone and not on when other events happen to arrive. A real object is
+# reported again and again, so it confirms within a few revisits; a stray report
+# never does. The tracker's own default is 1 (no confirmation), which keeps its
+# behaviour for callers that do not ask for it; the CLI asks for DEFAULT_CONFIRM_HITS.
 #
 # How many reports, and how long to gather them: 3 reports in 30 s shows a real
 # object quickly -- within about 36 s on the simulated Joensuu attack, against 72 s
 # for 5 reports in 60 s -- with the same tracks and accuracy on the four simulated
-# scenarios. The window has to hold three revisits of the slowest sensor that may
-# see an object first: long-range radars revisit every 15-30 s, and with 15 s an
-# object only they see could not be confirmed at all -- on the Joensuu attack five
-# of six swarms went unshown for 7 to 16 minutes. The cost is noisy sensors: with
-# 300 random false reports in two minutes, 3 reports let through 65-74 ghost
-# tracks, 5 reports in 60 s only 6-7.
+# scenarios. The window has to hold three revisits of the sensor that sees an object
+# first, and long-range radars revisit every 15-30 s: checked strictly, 30 s never
+# confirms an object only an 18 s radar sees. So the window is per sensor:
+# CONFIRM_WINDOW_SECONDS, or CONFIRM_HITS revisits of the sensor that started the
+# track when that is longer, the revisit learned from the gaps between the sensor's
+# reports of one object id (the median of its last REVISIT_SAMPLES, once it has two;
+# no sensor registration carries a rate) and capped at the coast time. A sensor's
+# first object after a start waits for the rate to be learned, at most four coast
+# times, and so do the first tracks of a tracker started again, until it has read a
+# few reports of each sensor; a rebuild from recent input re-learns most rates before
+# live reports arrive. A sensor without object ids keeps the 30 s. A one-off id, a
+# stray report's,
+# teaches nothing, so clutter does not widen the window: with 1, 2 and 5 random false
+# reports a second on the Joensuu attack fused with Alakurtti, 216, 554 and 1659 of
+# them confirmed, against 188, 502 and 1601 with a fixed 30 s and 400, 871 and 2029
+# with a fixed 60 s. The cost of confirming at all is noisy sensors: with 300 random
+# false reports in two minutes, 3 reports let through 65-74 ghost tracks, 5 reports
+# in 60 s only 6-7.
 #
 # A CoT object reporting its own position (see is_self_report) is no stray report: its
 # track is confirmed by its first self-report, whatever the setting.
 DEFAULT_CONFIRM_HITS = 3
 CONFIRM_WINDOW_SECONDS = 30.0
+REVISIT_SAMPLES = 5
 
 # Variance (m^2/s^2, east and north) of a new track's velocity, 100 m/s 1-sigma. One
 # detection gives a position and no speed, so a track starts at rest, and this is
@@ -580,8 +595,16 @@ class SapientAsynchronousTracker:
         # coasted (_coasted_position_sigma). Only a publish rule that never sends a
         # predicted state can turn it off (FusionEngine).
         self.coast_unmatched = coast_unmatched
-        # Tentative track id -> [detections gathered, time of its first detection].
+        # Tentative track id -> [detections gathered, time of its first detection, its
+        # confirmation window in seconds].
         self._tentative = {}
+        # nodeId -> the gaps, in seconds, between the sensor's last reports of one object
+        # id: its revisit, from REVISIT_SAMPLES of them. See _confirmation_window.
+        self._revisit_gaps = {}
+        # (nodeId, objectId) -> when the sensor last reported that object. Swept of
+        # objects not reported within the coast time, once per coast time.
+        self._last_report = {}
+        self._last_report_swept = None
 
         # 1. Instantiate the high-order Constant Acceleration transition model
         self.transition_model = create_9d_constant_acceleration_model(q_process_noise=q_noise)
@@ -701,7 +724,9 @@ class SapientAsynchronousTracker:
         #   - a new track (touched, in _initialize_new_track);
         #   - a declaration that lapses (_release_expired -> _undeclare clears it);
         #   - the first event, which seeds tracks pruning never saw (cleared).
-        # A new drop rule, or a new input to one, joins this list.
+        # A new drop rule, or a new input to one, joins this list. _drop_coasted_out
+        # also drops tentative tracks by the same window before association; it only
+        # removes tracks, so the bound stays sound.
         self._prune_due: datetime | None = None
         # CoT object key -> time of its latest event fused; see _binding_lapsed.
         self._cot_seen: dict[tuple, datetime] = {}
@@ -726,9 +751,12 @@ class SapientAsynchronousTracker:
 
         # Drop tracks already past their coast horizon before they can be matched: one
         # silent that long has a covariance wide enough to win a detection of another
-        # object anywhere, which would inherit its id, classification and threat. Only
-        # that rule: a tentative track still gets this event's detection before it is
-        # judged unconfirmed, as before.
+        # object anywhere, which would inherit its id, classification and threat. A
+        # tentative track past its confirmation window goes too, so a report after the
+        # window starts a new track rather than confirming the old one, whether or not
+        # some other event came in between and pruned it first.
+        if self.confirm_hits > 1:
+            self._learn_revisits(timestamp, detection_group)
         self._drop_coasted_out(timestamp)
         self._release_expired(timestamp)
 
@@ -950,7 +978,7 @@ class SapientAsynchronousTracker:
         due = self._last_detection(track) + timedelta(seconds=self.max_coast_seconds)
         pending = self._tentative.get(self._id(track)) if self._tentative else None
         if pending is not None:
-            due = min(due, pending[1] + timedelta(seconds=self.confirm_window_seconds))
+            due = min(due, pending[1] + timedelta(seconds=pending[2]))
         if not narrowed:
             self._may_be_wide(track, due)
         until = self._narrow_until[self._id(track)][2]
@@ -1431,7 +1459,11 @@ class SapientAsynchronousTracker:
         self._hold_class_kind(track, detection, detection.timestamp)
         self._note_threat_evidence(track, detection, detection.timestamp, motion)
         if self.confirm_hits > 1 and track.id not in self._declarations:
-            self._tentative[track.id] = [1, detection.timestamp]
+            self._tentative[track.id] = [
+                1,
+                detection.timestamp,
+                self._confirmation_window(detection),
+            ]
         self._bind_object_id(detection, track)
 
     def _hold_swarm_count(self, track, detection, timestamp) -> None:
@@ -1567,14 +1599,61 @@ class SapientAsynchronousTracker:
             del track.metadatas[:excess]
 
     def _drop_coasted_out(self, current_time) -> None:
-        """Drop the tracks silent for longer than max_coast_seconds, and what is kept of them."""
-        gone = {
-            track
-            for track in self.tracks
-            if (current_time - self._last_detection(track)).total_seconds() > self.max_coast_seconds
-        }
+        """Drop the tracks silent for longer than max_coast_seconds, the tentative ones
+        whose confirmation window has passed, and what is kept of them.
+        """
+        tentative = self._tentative
+        gone = set()
+        for track in self.tracks:
+            if (
+                current_time - self._last_detection(track)
+            ).total_seconds() > self.max_coast_seconds:
+                gone.add(track)
+            elif tentative:
+                pending = tentative.get(self._id(track))
+                if pending is not None and (current_time - pending[1]).total_seconds() > pending[2]:
+                    gone.add(track)
         if gone:
             self._forget(gone)
+
+    def _learn_revisits(self, current_time, detection_group) -> None:
+        """Notes each sensor's revisit from the gaps between its reports of one object id.
+
+        A report without an object id teaches nothing, and neither does a one-off id
+        such as a stray report's: only an object the sensor reports again gives a gap.
+        Objects not reported within the coast time are forgotten.
+        """
+        for det in detection_group:
+            metadata = det.metadata or {}
+            node, object_id = metadata.get("nodeId"), metadata.get("objectId")
+            if node is None or not object_id:
+                continue
+            key = (node, object_id)
+            last = self._last_report.get(key)
+            if last is not None and det.timestamp <= last:
+                continue  # A report out of order says nothing new about the revisit.
+            if last is not None:
+                gaps = self._revisit_gaps.setdefault(node, deque(maxlen=REVISIT_SAMPLES))
+                gaps.append((det.timestamp - last).total_seconds())
+            self._last_report[key] = det.timestamp
+        swept = self._last_report_swept
+        if swept is None or (current_time - swept).total_seconds() > self.max_coast_seconds:
+            horizon = current_time - timedelta(seconds=self.max_coast_seconds)
+            self._last_report = {k: t for k, t in self._last_report.items() if t >= horizon}
+            self._last_report_swept = current_time
+
+    def _confirmation_window(self, detection) -> float:
+        """Seconds a track started by this detection has to gather its confirmation hits.
+
+        confirm_window_seconds, or confirm_hits revisits of the detection's sensor when
+        that is longer: the median of the sensor's last REVISIT_SAMPLES gaps once it has
+        two, capped at the coast time, past which the track is gone anyway.
+        """
+        gaps = self._revisit_gaps.get((detection.metadata or {}).get("nodeId"))
+        if gaps is None or len(gaps) < 2:
+            return self.confirm_window_seconds
+        revisit = min(statistics.median(gaps), self.max_coast_seconds)
+        return max(self.confirm_window_seconds, self.confirm_hits * revisit)
 
     def _forget(self, gone) -> None:
         """Drop these tracks and everything kept of them."""
@@ -1630,10 +1709,7 @@ class SapientAsynchronousTracker:
             if elapsed > self.max_coast_seconds:
                 continue
             pending = self._tentative.get(self._id(track)) if self._tentative else None
-            if (
-                pending is not None
-                and (current_time - pending[1]).total_seconds() > self.confirm_window_seconds
-            ):
+            if pending is not None and (current_time - pending[1]).total_seconds() > pending[2]:
                 continue  # Never confirmed: a stray report, not an object.
             if (
                 self._may_be_wide(track, current_time)

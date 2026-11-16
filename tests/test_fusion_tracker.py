@@ -917,6 +917,134 @@ def test_the_confirmation_window_holds_three_revisits_of_a_slow_radar():
     assert len(tracker.process_async_event(times[2], {_det(0.0, 0.0, 0.0, times[2])})) == 1
 
 
+def _confirm_a_still_object(report_seconds, unrelated_seconds=None):
+    """What becomes of an object reported at `report_seconds`, with or without one
+    unrelated report ~50 km away at `unrelated_seconds`.
+
+    Returns, after each of the object's reports, whether one of its tracks is
+    confirmed and when each of its live tracks started.
+    """
+    tracker = SapientAsynchronousTracker(confirm_hits=3)
+    events = [(s, _det(0.0, 0.0, 0.0, T0 + timedelta(seconds=s))) for s in report_seconds]
+    if unrelated_seconds is not None:
+        t = T0 + timedelta(seconds=unrelated_seconds)
+        events.append((unrelated_seconds, _det(50_000.0, 0.0, 0.0, t)))
+    outcome = []
+    for seconds, det in sorted(events, key=lambda event: event[0]):
+        tracker.process_async_event(det.timestamp, {det})
+        if seconds == unrelated_seconds:
+            continue
+        mine = {track for track in tracker.tracks if abs(track.states[0].state_vector[0, 0]) < 1e3}
+        outcome.append(
+            (
+                bool(mine & tracker.confirmed_tracks()),
+                sorted(track.states[0].timestamp for track in mine),
+            )
+        )
+    return outcome
+
+
+@pytest.mark.parametrize(
+    "report_seconds, unrelated_seconds",
+    [((0, 18, 36), 33), ((0, 18, 36, 54), 33), ((0, 10, 20), 15)],
+)
+def test_confirmation_does_not_depend_on_unrelated_reports(report_seconds, unrelated_seconds):
+    # Whether a tentative track confirms, and which report a track starts from, is
+    # decided by the track's own reports, not by when other events happen to arrive.
+    alone = _confirm_a_still_object(report_seconds)
+    interleaved = _confirm_a_still_object(report_seconds, unrelated_seconds)
+    assert interleaved == alone
+
+
+def test_three_reports_well_inside_the_window_confirm_despite_unrelated_reports():
+    for unrelated_seconds in (None, 15):
+        outcome = _confirm_a_still_object((0, 10, 20), unrelated_seconds)
+        assert outcome[-1][0], unrelated_seconds
+
+
+def _report_object(tracker, node, object_id, east, seconds):
+    t = T0 + timedelta(seconds=seconds)
+    return tracker.process_async_event(t, {_id_det(east, 0.0, t, object_id, node_id=node)})
+
+
+def _teach_revisit(tracker, node, revisit, reports=4):
+    # One object reported `reports` times at `revisit` by `node`: enough gaps to learn from.
+    for i in range(reports):
+        _report_object(tracker, node, "taught", 0.0, revisit * i)
+
+
+def test_a_sensor_s_revisit_learned_from_its_object_ids_widens_its_window():
+    # An 18 s radar: once its revisit is known, its next object confirms on its third
+    # report, 36 s after its first, whether or not an unrelated report comes in between.
+    for unrelated in (None, 93):
+        tracker = SapientAsynchronousTracker(confirm_hits=3)
+        _teach_revisit(tracker, "R18", 18)
+        _report_object(tracker, "R18", "next", 20_000.0, 60)
+        _report_object(tracker, "R18", "next", 20_000.0, 78)
+        if unrelated is not None:
+            t = T0 + timedelta(seconds=unrelated)
+            tracker.process_async_event(t, {_det(80_000.0, 80_000.0, 0.0, t)})
+        confirmed = _report_object(tracker, "R18", "next", 20_000.0, 96)
+        assert [t.states[0].timestamp for t in confirmed if t.metadata["objectId"] == "next"] == [
+            T0 + timedelta(seconds=60)
+        ], unrelated
+
+
+def test_one_off_object_ids_do_not_teach_a_sensor_s_revisit():
+    # Clutter: a report a second, each with an id of its own, far from everything. The
+    # sensor's revisit is still the 18 s between its reports of one object.
+    tracker = SapientAsynchronousTracker(confirm_hits=3)
+    for i in range(96):
+        _report_object(tracker, "R18", f"stray-{i}", -100_000.0 - 8_000.0 * i, i + 0.5)
+    _teach_revisit(tracker, "R18", 18)
+    _report_object(tracker, "R18", "next", 20_000.0, 60)
+    _report_object(tracker, "R18", "next", 20_000.0, 78)
+    confirmed = _report_object(tracker, "R18", "next", 20_000.0, 96)
+    assert any(t.metadata["objectId"] == "next" for t in confirmed)
+
+
+def test_a_sensor_without_object_ids_keeps_the_default_window():
+    tracker = SapientAsynchronousTracker(confirm_hits=3)
+    for seconds in (0, 18, 36):
+        t = T0 + timedelta(seconds=seconds)
+        confirmed = tracker.process_async_event(t, {_det(0.0, 0.0, 0.0, t)})
+    assert confirmed == set()
+
+
+def test_the_learned_window_holds_three_revisits_but_no_more_than_three_coast_times():
+    tracker = SapientAsynchronousTracker(confirm_hits=3)
+    _teach_revisit(tracker, "R60", 60)
+    _report_object(tracker, "R60", "next", 20_000.0, 200)
+    (pending,) = [p for p in tracker._tentative.values() if p[1] == T0 + timedelta(seconds=200)]
+    assert pending[2] == pytest.approx(3 * tracker.max_coast_seconds)
+
+    tracker = SapientAsynchronousTracker(confirm_hits=3)
+    _teach_revisit(tracker, "R5", 5)
+    _report_object(tracker, "R5", "next", 20_000.0, 30)
+    (pending,) = [p for p in tracker._tentative.values() if p[1] == T0 + timedelta(seconds=30)]
+    assert pending[2] == pytest.approx(tracker.confirm_window_seconds)
+
+
+def test_pruning_s_due_time_takes_the_track_s_own_window():
+    # Without coasting, pruning skips its scan until some track may be due; a tentative
+    # track of a sensor with a learned 18 s revisit is due at the end of its 54 s window,
+    # not of the 30 s default.
+    tracker = SapientAsynchronousTracker(confirm_hits=3, coast_unmatched=False)
+    _teach_revisit(tracker, "R18", 18)
+    _report_object(tracker, "R18", "next", 20_000.0, 60)
+    _report_object(tracker, "R18", "next", 20_000.0, 78)
+    (track,) = [t for t in tracker.tracks if t.metadata["objectId"] == "next"]
+    assert tracker._drop_due(track) == T0 + timedelta(seconds=60 + 54)
+
+
+def test_object_ids_not_reported_within_the_coast_time_are_forgotten():
+    tracker = SapientAsynchronousTracker(confirm_hits=3)
+    for i in range(10):
+        _report_object(tracker, "R18", f"stray-{i}", -100_000.0 - 8_000.0 * i, i)
+    _report_object(tracker, "R18", "kept", 0.0, 100)
+    assert set(tracker._last_report) == {("R18", "kept")}
+
+
 def test_a_new_track_may_be_moving_fast_horizontally_only():
     tracker = SapientAsynchronousTracker()
     tracker.process_async_event(T0, {_det(0.0, 0.0, 0.0, T0)})
