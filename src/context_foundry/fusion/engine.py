@@ -113,7 +113,11 @@ class FusionEngine:
         self.pending_sources = PendingSources()
 
     def _coast_for(self, tracker: SapientAsynchronousTracker) -> None:
-        """Coast every unmatched track each event only if predicted states can be published."""
+        """Coast every unmatched track each event only if predicted states can be published.
+
+        Set here alone, from `__init__` and `reset`: assigning `publish_policy` later
+        leaves `tracker.coast_unmatched` as it was, so call this again after it.
+        """
         tracker.coast_unmatched = self.publish_policy.policy not in UPDATES_ONLY
 
     def process(self, timestamp: datetime, detections, now: datetime | None = None) -> EventResult:
@@ -195,8 +199,17 @@ class FusionEngine:
         id. A track this event started holds its seed's metadata as `init_metadata`. A
         coasting track's Prediction names nothing. `reported` holds each source's time as
         its report gave it, before a live event was clamped to the present.
+
+        Only the tracks the event touched (`tracker.touched`: updated, coasted or
+        started) are looked at: any other live track holds the state an earlier event
+        left, whose detection is not one of `fed`. A tracker that does not say which it
+        touched has every live track looked at.
         """
-        for track in self.tracker.tracks:
+        live = self.tracker.tracks
+        touched = getattr(self.tracker, "touched", None)
+        for track in live if touched is None else touched:
+            if track not in live:
+                continue
             state = track.state
             if held_before.get(id(track)) is not track:
                 # A new track, possibly under the id of one just dropped.
