@@ -115,7 +115,7 @@ def _primary_chain(classification) -> list:
 
 class SapientValidator(ProtocolValidator):
     def validate(self, raw_payload: dict[str, Any]) -> tuple[bool, str]:
-        msg, error = self._parse(raw_payload)
+        msg, error = self.parse(raw_payload)
         return msg is not None, error
 
     def process_message(self, raw_payload: dict[str, Any]) -> InternalDetection | None:
@@ -124,18 +124,32 @@ class SapientValidator(ProtocolValidator):
         The JSON-to-protobuf parse is most of a report's cost on the way in, and
         `validate` and `normalize` would each make the same one.
         """
-        msg, error = self._parse(raw_payload)
+        msg, error = self.parse(raw_payload)
         if msg is None:
             base.logger.warning(f"Message rejected by {self.__class__.__name__}: {error}")
             return None
+        return self.process_parsed(raw_payload, msg)
+
+    def process_parsed(
+        self, raw_payload: dict[str, Any], msg: SapientMessage
+    ) -> InternalDetection | None:
+        """`process_message` of a payload `parse` has already accepted, as `msg`.
+
+        For a caller that validates a report on arrival and normalizes it later: the
+        parse it kept stands for the one this would make, so it is not made again.
+        """
         try:
             return self._normalize(raw_payload, msg)
         except Exception as e:
             base.logger.error(f"Normalization failed in {self.__class__.__name__}: {e!s}")
             return None
 
-    def _parse(self, raw_payload: dict[str, Any]) -> tuple[SapientMessage | None, str]:
-        """The parsed detection report, or None and why the payload is refused."""
+    def parse(self, raw_payload: dict[str, Any]) -> tuple[SapientMessage | None, str]:
+        """The parsed detection report, or None and why the payload is refused.
+
+        What `validate` checks: a SAPIENT message the schema takes, unknown fields
+        refused, whose content is a detection report with a location.
+        """
         if "sapientMessage" not in raw_payload:
             return None, "Missing 'sapientMessage' root dictionary key."
 

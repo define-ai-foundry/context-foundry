@@ -586,3 +586,17 @@ def test_process_message_reports_a_normalize_failure(
     with caplog.at_level(logging.ERROR):
         assert validator.process_message(payload) is None
     assert any("Normalization failed" in r.message for r in caplog.records)
+
+
+def test_process_parsed_matches_process_message(validator, sapient_detection_report_message):
+    payload = copy.deepcopy(sapient_detection_report_message)
+    msg, error = validator.parse(payload)
+    assert error == ""
+    assert validator.process_parsed(payload, msg) == validator.process_message(
+        copy.deepcopy(sapient_detection_report_message)
+    )
+
+
+def test_parse_says_why_it_refuses(validator):
+    msg, error = validator.parse({"nope": {}})
+    assert msg is None and "sapientMessage" in error

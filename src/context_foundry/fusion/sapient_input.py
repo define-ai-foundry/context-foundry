@@ -77,12 +77,18 @@ class SapientRecordReader:
             return False
         return record.get("content_type") == "detection_report"
 
-    def detection(self, record: dict):
+    def detection(self, record: dict, parsed=None):
         """(timestamp, sensor id, Detection) of a detection report record, or None.
 
         None when the report does not validate or carries no position fusion can use.
+        `parsed` is the validator's `parse` of the record's message, when the caller
+        made it already (on the record's arrival, say): it is then not parsed again.
         """
-        clean_det = self.validator.process_message({"sapientMessage": record.get("message")})
+        payload = {"sapientMessage": record.get("message")}
+        if parsed is None:
+            clean_det = self.validator.process_message(payload)
+        else:
+            clean_det = self.validator.process_parsed(payload, parsed)
         if clean_det is None:
             self.records_rejected += 1
             return None
