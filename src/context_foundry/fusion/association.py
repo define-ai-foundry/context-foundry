@@ -186,9 +186,10 @@ def associate(tracker, tracks, detections, timestamp, rows_of) -> dict | None:
         measurement_prediction = tracker.updater.predict_measurement(
             prediction, det.measurement_model
         )
-        distance = tracker.hypothesiser.measure(measurement_prediction, det)
+        # The table's distance is the measure's to the last bit (`distances`), so it is
+        # not worked out again.
         associations[track] = SingleDistanceHypothesis(
-            prediction, det, distance, measurement_prediction
+            prediction, det, float(table[row, column]), measurement_prediction
         )
     return associations
 
