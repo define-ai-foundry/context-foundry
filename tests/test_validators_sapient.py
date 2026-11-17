@@ -600,3 +600,25 @@ def test_process_parsed_matches_process_message(validator, sapient_detection_rep
 def test_parse_says_why_it_refuses(validator):
     msg, error = validator.parse({"nope": {}})
     assert msg is None and "sapientMessage" in error
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        {},
+        {"object_id": "obj-1"},
+        {"report_id": "01J", "object_id": ""},
+        {"object_info": [{"type": "estimatedSwarmCount", "value": "9"}]},
+        {"object_info": [{"type": "estimatedSwarmCount"}, {"value": "x", "error": 0.5}, {}]},
+        {"report_id": "r", "object_id": "o", "object_info": [{"type": "t", "value": "v"}]},
+    ],
+)
+def test_the_read_fields_are_message_to_dicts_own(report):
+    from google.protobuf.json_format import MessageToDict, ParseDict
+
+    from sapient_msg.bsi_flex_335_v2_0.detection_report_pb2 import DetectionReport
+
+    msg = ParseDict(report, DetectionReport())
+    full = MessageToDict(msg, preserving_proto_field_name=False)
+    wanted = {k: full[k] for k in ("objectId", "reportId", "objectInfo") if k in full}
+    assert sapient_module._report_fields(msg) == wanted
