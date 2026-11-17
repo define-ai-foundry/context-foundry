@@ -2197,6 +2197,8 @@ def _books_hold_live_tracks_only(tracker):
     assert set(tracker._object_tracks.values()) <= live
     assert set(tracker._cot_seen) <= set(tracker._object_tracks)
     assert set(tracker._track_ids) == tracker.tracks
+    # The kept id map is the one a scan of the live tracks would make.
+    assert tracker._by_id() == {track.id: track for track in tracker.tracks}
 
 
 @pytest.mark.parametrize("seed", range(3))

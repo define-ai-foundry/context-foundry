@@ -725,6 +725,10 @@ class SapientAsynchronousTracker:
         # engine, which would otherwise look at every live track to find them.
         self.started: set = set()
         self.dropped_ids: set = set()
+        # Live track id -> track, kept as tracks start and are dropped, for the set
+        # object `self.tracks` is (one assigned anew has it made again); see _by_id.
+        self._tracks_by_id: dict = {}
+        self._tracks_by_id_of = None
         # No live track can be pruned before this time, or None when that is not known;
         # see _prune_skippable. Every path that changes a kept track's inputs to
         # pruning must either add the track to `touched` or clear this:
@@ -1129,7 +1133,7 @@ class SapientAsynchronousTracker:
         and it falls inside OBJECT_ID_GATE_MAHALANOBIS_DISTANCE of that track.
         Everything else is left to position-based association.
         """
-        tracks_by_id = {track.id: track for track in self.tracks}
+        tracks_by_id = self._by_id()
         bound = {}
         for det in detection_group:
             key = _object_key(det)
@@ -1304,6 +1308,18 @@ class SapientAsynchronousTracker:
         declared = self._declarations.get(self._id(track))
         return None if declared is None else declared.motion
 
+    def _by_id(self) -> dict:
+        """Live track id -> track. Live ids are unique (`_seed_id`), so one map holds them.
+
+        Kept up to date where tracks start (`_initialize_new_track`) and are dropped
+        (`_forget`), and made again whenever `self.tracks` is another set than the one it
+        was made for, as after pruning or when a caller assigns the tracks.
+        """
+        if self._tracks_by_id_of is not self.tracks:
+            self._tracks_by_id = {track.id: track for track in self.tracks}
+            self._tracks_by_id_of = self.tracks
+        return self._tracks_by_id
+
     def _id(self, track):
         """The track's id, from `_track_ids` when the tracker made the track."""
         found = self._track_ids.get(track)
@@ -1383,7 +1399,7 @@ class SapientAsynchronousTracker:
         ]
         if not expired:
             return
-        tracks_by_id = {track.id: track for track in self.tracks}
+        tracks_by_id = self._by_id()
         released = []
         for track_id in expired:
             declared = self._declarations[track_id]
@@ -1487,6 +1503,7 @@ class SapientAsynchronousTracker:
         # accumulates metadata from Updates, so without this the track is
         # unclassified until its second detection.
         track = Track([prior], id=self._seed_id(detection), init_metadata=dict(detection.metadata))
+        self._by_id()[track.id] = track
         self.tracks.add(track)
         self.touched.add(track)
         self.started.add(track)
@@ -1572,7 +1589,7 @@ class SapientAsynchronousTracker:
                 detection.timestamp.isoformat(),
             )
         seed = "|".join(parts)
-        live = {track.id for track in self.tracks}
+        live = self._by_id()
         candidate = str(uuid.uuid5(uuid.NAMESPACE_URL, f"context-foundry-track:{seed}"))
         count = 1
         while candidate in live:
@@ -1703,9 +1720,13 @@ class SapientAsynchronousTracker:
 
     def _forget(self, gone) -> None:
         """Drop these tracks and everything kept of them."""
+        by_id = self._by_id()
         self.tracks -= gone
         ids = {self._id(track) for track in gone}
         self.dropped_ids |= ids
+        for track in gone:
+            if by_id.get(track.id) is track:
+                del by_id[track.id]
         for track in gone:
             self._track_ids.pop(track, None)
         books = (
