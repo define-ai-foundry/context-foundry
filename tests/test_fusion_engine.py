@@ -265,7 +265,46 @@ def test_sources_from_the_touched_tracks_are_those_of_every_track(policy):
         for seconds, reports in script:
             result = engine.process(T0 + timedelta(seconds=seconds), reports)
             pending = {k: dict(v) for k, v in engine.pending_sources._pending.items()}
-            seen.append((result.sources, pending))
+            # As a set: two trackers list their tracks in their own set order.
+            published = sorted(track.id for track, _ in result.published)
+            sent = dict(engine.publish_policy._last_sent)
+            seen.append((result.sources, pending, published, sent))
         return seen
 
     assert run(SapientAsynchronousTracker(confirm_hits=2)) == run(_ScanningTracker(confirm_hits=2))
+
+
+@pytest.mark.parametrize("policy", ["window", "all", "updates"])
+@pytest.mark.parametrize("confirm_hits", [1, 2])
+def test_events_at_one_time_publish_as_a_scan_of_every_track_would(policy, confirm_hits):
+    # Several sensors' events at the same second: a track one of them updated has its
+    # state at that time while the next event, at the same mark, does not touch it.
+    def run(tracker):
+        engine = FusionEngine(tracker, PublishPolicy(policy))
+        seen = []
+        script = [
+            (0, [_report(0, "RAD-1", "a", 0)]),
+            (0, [_report(0, "RAD-2", "b", 3000)]),
+            (0, [_report(0, "RAD-3", "c", 6000)]),
+            (1, [_report(1, "RAD-1", "a", 2)]),
+            (1, [_report(1, "RAD-2", "b", 3003)]),
+            (1, [_report(1, "RAD-1", "a", 4)]),
+            (2, [_report(2, "RAD-3", "c", 6004), _report(2, "RAD-2", "b", 3006)]),
+            (2, [_report(2, "RAD-1", "a", 6)]),
+            (9, [_report(9, "RAD-2", "b", 3020)]),
+            (9, [_report(9, "RAD-2", "b", 3020)]),
+            (70, [_report(70, "RAD-1", "a", 10)]),
+            (70, [_report(70, "RAD-3", "d", 9000)]),
+        ]
+        for seconds, reports in script:
+            result = engine.process(T0 + timedelta(seconds=seconds), reports)
+            published = sorted(track.id for track, _ in result.published)
+            pending = {k: dict(v) for k, v in engine.pending_sources._pending.items()}
+            seen.append(
+                (published, result.sources, pending, dict(engine.publish_policy._last_sent))
+            )
+        return seen
+
+    fast = run(SapientAsynchronousTracker(confirm_hits=confirm_hits))
+    assert fast == run(_ScanningTracker(confirm_hits=confirm_hits))
+    assert any(published for published, *_ in fast), "something was published"

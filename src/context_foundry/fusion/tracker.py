@@ -721,6 +721,10 @@ class SapientAsynchronousTracker:
         self._track_ids: dict = {}
         # The tracks the latest event appended a state to or started, for the engine.
         self.touched: set = set()
+        # The tracks the latest event started, and the ids of those it dropped, for the
+        # engine, which would otherwise look at every live track to find them.
+        self.started: set = set()
+        self.dropped_ids: set = set()
         # No live track can be pruned before this time, or None when that is not known;
         # see _prune_skippable. Every path that changes a kept track's inputs to
         # pruning must either add the track to `touched` or clear this:
@@ -753,6 +757,8 @@ class SapientAsynchronousTracker:
         # Bound the width of this pass before anything iterates over it.
         detection_group = self._limit_detections(detection_group)
         self.touched = set()
+        self.started = set()
+        self.dropped_ids = set()
 
         # Drop tracks already past their coast horizon before they can be matched: one
         # silent that long has a covariance wide enough to win a detection of another
@@ -1481,6 +1487,7 @@ class SapientAsynchronousTracker:
         track = Track([prior], id=self._seed_id(detection), init_metadata=dict(detection.metadata))
         self.tracks.add(track)
         self.touched.add(track)
+        self.started.add(track)
         self._track_ids[track] = track.id
         self._posteriors[track.id] = prior
         # The seeding hit is a real detection, so it anchors staleness.
@@ -1696,6 +1703,7 @@ class SapientAsynchronousTracker:
         """Drop these tracks and everything kept of them."""
         self.tracks -= gone
         ids = {self._id(track) for track in gone}
+        self.dropped_ids |= ids
         for track in gone:
             self._track_ids.pop(track, None)
         books = (
@@ -1772,6 +1780,7 @@ class SapientAsynchronousTracker:
                 k: seen for k, seen in self._cot_seen.items() if k in self._object_tracks
             }
             return
+        self.dropped_ids |= {self._id(track) for track in self.tracks - active_set}
         self.tracks = active_set
         # Forget pruned tracks, or the bookkeeping outlives them for the whole run.
         active_ids = {self._id(track) for track in active_set}

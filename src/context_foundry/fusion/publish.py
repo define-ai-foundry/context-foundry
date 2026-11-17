@@ -81,6 +81,11 @@ class PublishPolicy:
             self._last_sent[track.id] = moment
         return send
 
+    def forget(self, track_ids) -> None:
+        """Drop the memory of these tracks, as for tracks no longer live."""
+        for track_id in track_ids:
+            self._last_sent.pop(track_id, None)
+
     def forget_all_but(self, live_track_ids):
         """Drop the memory of tracks that are no longer live."""
         live = set(live_track_ids)
