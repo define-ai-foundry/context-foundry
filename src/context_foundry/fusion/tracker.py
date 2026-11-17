@@ -806,10 +806,12 @@ class SapientAsynchronousTracker:
             # A detection is assigned to at most one track, so no two tracks are
             # updated from the same hit.
             if not joint_hypothesis:
-                # Track fell outside validation gates; coast forward using kinematics prediction
+                # Track fell outside validation gates; coast forward using kinematics
+                # prediction. Touched only when it coasts: without a new state nothing of
+                # it changed, so nothing that reads `touched` has to look at it again.
                 if self.coast_unmatched:
                     track.append(self.predictor.predict(track, timestamp=timestamp))
-                self.touched.add(track)
+                    self.touched.add(track)
             else:
                 # High-Fidelity Step: Extract the measurement model embedded inside the SAPIENT detection
                 det = joint_hypothesis.measurement
