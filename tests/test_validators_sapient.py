@@ -551,3 +551,38 @@ def test_a_known_unregistered_node_is_reported_once(validator, registry, caplog)
             assert validator.process_message(payload) is None
 
     assert len([r for r in caplog.records if "not in the sensor registry" in r.message]) == 1
+
+
+def test_process_message_parses_once_and_matches_normalize(
+    validator, sapient_detection_report_message, monkeypatch
+):
+    calls = []
+    real = sapient_module.ParseDict
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(sapient_module, "ParseDict", counting)
+    payload = copy.deepcopy(sapient_detection_report_message)
+    got = validator.process_message(payload)
+    assert len(calls) == 1, "one parse validates and normalizes"
+    assert got == validator.normalize(copy.deepcopy(sapient_detection_report_message))
+
+
+def test_process_message_refuses_what_validate_refuses(validator, caplog):
+    payload = {"sapientMessage": {"thisFieldDoesNotExist": "boom"}}
+    with caplog.at_level(logging.WARNING):
+        assert validator.process_message(payload) is None
+    assert any("rejected" in r.message for r in caplog.records)
+    assert validator.validate(payload)[0] is False
+
+
+def test_process_message_reports_a_normalize_failure(
+    validator, sapient_detection_report_message, caplog
+):
+    payload = copy.deepcopy(sapient_detection_report_message)
+    payload["sapientMessage"]["detectionReport"]["location"]["y"] = 95.0  # off the world
+    with caplog.at_level(logging.ERROR):
+        assert validator.process_message(payload) is None
+    assert any("Normalization failed" in r.message for r in caplog.records)
