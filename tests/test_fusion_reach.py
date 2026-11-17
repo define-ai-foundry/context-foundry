@@ -159,19 +159,24 @@ def _brute_reachable(tracker, tracks, detections):
 
 
 def test_the_kept_matrix_reaches_what_a_fresh_check_would_on_every_call():
-    # Targets moving through clutter: tracks start, update, coast and drop, and the
-    # matrix fills with dropped tracks' rows until it is rebuilt.
-    calls, rebuilt = [], []
+    # Targets moving through clutter: tracks start, update, coast and drop, and a
+    # dropped track's row and mark leave with it.
+    calls, dropped = [], []
 
     class Checked(SapientAsynchronousTracker):
         def _reachable(self, tracks, detections):
-            before = len(self._reach_tracks)
             got = super()._reachable(tracks, detections)
-            if len(self._reach_tracks) < before:
-                rebuilt.append(1)
             assert got == _brute_reachable(self, tracks, detections)
             calls.append(1)
             return got
+
+        def process_async_event(self, timestamp, detection_group):
+            out = super().process_async_event(timestamp, detection_group)
+            dropped.extend(self.dropped_ids)
+            assert set(self._reach_tracks) <= self.tracks, "rows of live tracks only"
+            assert self._reach_dirty <= self.tracks, "marks of live tracks only"
+            assert len(self._reach_matrix) == len(self._reach_tracks)
+            return out
 
     tracker = Checked()
     rng = np.random.default_rng(7)
@@ -191,7 +196,7 @@ def test_the_kept_matrix_reaches_what_a_fresh_check_would_on_every_call():
             for det in dets:
                 det.metadata = {"classification": "UAS", "swarm_count": 1}
             tracker.process_async_event(when, dets)
-    assert len(calls) > 300 and rebuilt, "checked on every call, through a rebuild"
+    assert len(calls) > 300 and dropped, "checked on every call, through drops"
 
 
 def test_an_ended_declaration_marks_its_tracks_row_changed():

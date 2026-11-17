@@ -610,6 +610,7 @@ def test_parse_says_why_it_refuses(validator):
         {"report_id": "01J", "object_id": ""},
         {"object_info": [{"type": "estimatedSwarmCount", "value": "9"}]},
         {"object_info": [{"type": "estimatedSwarmCount"}, {"value": "x", "error": 0.5}, {}]},
+        {"object_info": [{"type": "t", "value": "v", "error": 0.1}]},
         {"report_id": "r", "object_id": "o", "object_info": [{"type": "t", "value": "v"}]},
     ],
 )

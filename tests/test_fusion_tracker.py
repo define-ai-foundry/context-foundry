@@ -2191,9 +2191,9 @@ def _books_hold_live_tracks_only(tracker):
     ):
         assert set(getattr(tracker, name)) <= live, name
     # The reach matrix and its changed set keep dropped tracks only up to a bound.
-    bound = 2 * len(tracker.tracks) + 64
-    assert len(tracker._reach_tracks) <= bound + 1
-    assert len(tracker._reach_dirty) <= bound
+    # A dropped track's reach row and mark go with it.
+    assert set(tracker._reach_tracks) <= tracker.tracks
+    assert tracker._reach_dirty <= tracker.tracks
     assert set(tracker._object_tracks.values()) <= live
     assert set(tracker._cot_seen) <= set(tracker._object_tracks)
     assert set(tracker._track_ids) == tracker.tracks
@@ -2288,3 +2288,53 @@ def test_a_track_that_may_widen_any_time_keeps_pruning_scanning(monkeypatch):
     assert not tracker._prune_skippable(third)
     tracker.coast_unmatched = True
     assert tracker._drop_due(next(iter(tracker.tracks))) is None
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda tracks, extra, one: tracks.add(extra),
+        lambda tracks, extra, one: tracks.remove(one),
+        lambda tracks, extra, one: tracks.discard(one),
+        lambda tracks, extra, one: tracks.pop(),
+        lambda tracks, extra, one: tracks.clear(),
+        lambda tracks, extra, one: tracks.update({extra}),
+        lambda tracks, extra, one: tracks.difference_update({one}),
+        lambda tracks, extra, one: tracks.intersection_update({one}),
+        lambda tracks, extra, one: tracks.symmetric_difference_update({one, extra}),
+    ],
+)
+def test_the_id_map_follows_tracks_changed_in_place_by_a_caller(change):
+    tracker = SapientAsynchronousTracker()
+    tracker.process_async_event(T0, {_det(0.0, 0.0, 0.0, T0), _det(5000.0, 0.0, 0.0, T0)})
+    assert tracker._by_id() == {t.id: t for t in tracker.tracks}
+    extra = SapientAsynchronousTracker()
+    extra.process_async_event(T0, {_det(0.0, 9000.0, 0.0, T0)})
+    change(tracker.tracks, next(iter(extra.tracks)), next(iter(tracker.tracks)))
+    assert tracker._by_id() == {t.id: t for t in tracker.tracks}
+
+
+def test_the_id_map_follows_in_place_operators_and_assignment():
+    tracker = SapientAsynchronousTracker()
+    tracker.process_async_event(T0, {_det(0.0, 0.0, 0.0, T0), _det(5000.0, 0.0, 0.0, T0)})
+    one = next(iter(tracker.tracks))
+    for apply in (
+        lambda t: t.__isub__({one}),
+        lambda t: t.__ior__({one}),
+        lambda t: t.__iand__({one}),
+        lambda t: t.__ixor__({one}),
+    ):
+        apply(tracker.tracks)
+        assert tracker._by_id() == {t.id: t for t in tracker.tracks}
+    tracker.tracks = {one}
+    assert tracker._by_id() == {one.id: one}
+
+
+def test_a_track_a_caller_removed_is_not_bound_by_object_id():
+    tracker = SapientAsynchronousTracker()
+    tracker.process_async_event(T0, {_id_det(0.0, 0.0, T0, "w")})
+    tracker._by_id()  # the map made while the track is live
+    (track,) = tracker.tracks
+    tracker.tracks.remove(track)
+    when = T0 + timedelta(seconds=1)
+    assert tracker._associate_by_object_id({_id_det(1.0, 0.0, when, "w")}) == {}

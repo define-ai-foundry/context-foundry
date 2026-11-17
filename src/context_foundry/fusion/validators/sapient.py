@@ -7,7 +7,7 @@ import time
 from datetime import timezone
 from typing import Any
 
-from google.protobuf.json_format import ParseDict, ParseError
+from google.protobuf.json_format import MessageToDict, ParseDict, ParseError
 
 from context_foundry.fusion import config
 from context_foundry.fusion.schemas import InternalDetection
@@ -274,7 +274,8 @@ def _report_fields(report) -> dict[str, Any]:
 
     The object id, the report id and the object info (where a swarm count is), each
     only when the report sets it, under their JSON names. Rendering the whole report
-    was a large part of reading one, for fields nothing reads.
+    was a large part of reading one, for fields nothing reads. Each object info entry is
+    rendered by `MessageToDict` itself, so its float error reads as it always did.
     """
     out: dict[str, Any] = {}
     if report.HasField("object_id"):
@@ -283,12 +284,7 @@ def _report_fields(report) -> dict[str, Any]:
         out["reportId"] = report.report_id
     if report.object_info:
         out["objectInfo"] = [
-            {
-                name: getattr(info, name)
-                for name in ("type", "value", "error")
-                if info.HasField(name)
-            }
-            for info in report.object_info
+            MessageToDict(info, preserving_proto_field_name=False) for info in report.object_info
         ]
     return out
 
