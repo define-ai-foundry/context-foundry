@@ -108,7 +108,7 @@ def test_naive_and_aware_times_count_from_the_same_epoch():
     assert later > reach.seconds(aware)
 
 
-def test_a_tracks_row_is_rebuilt_only_when_its_state_changes(monkeypatch):
+def test_a_tracks_row_is_rebuilt_only_when_the_tracker_changes_it(monkeypatch):
     tracker = SapientAsynchronousTracker(coast_unmatched=False)
     rng = np.random.default_rng(4)
     track = _random_track(rng, 0.0)
@@ -125,7 +125,9 @@ def test_a_tracks_row_is_rebuilt_only_when_its_state_changes(monkeypatch):
     tracker._reachable({track}, detections)
     assert len(built) == 1
 
+    # An event that appends a state marks the track changed at its end, as here.
     track.append(GaussianState(track.state.state_vector, track.state.covar, timestamp=T0))
+    tracker._reach_dirty.add(track)
     tracker._reachable({track}, detections)
     assert len(built) == 2
 
@@ -140,3 +142,63 @@ def test_the_tracker_reaches_the_same_tracks_through_the_array():
 
     assert reached == {track for track in tracks if tracker._may_gate(track, detections)}
     assert tracker._reachable(set(), detections) == set()
+
+
+def _brute_reachable(tracker, tracks, detections):
+    """The reach check worked out afresh for each track, as before the kept matrix."""
+    tracks = list(tracks)
+    if not tracks or not detections:
+        return set()
+    rows = []
+    for track in tracks:
+        motion = tracker._motion(track)
+        noise = tracker._axis_noise if motion is None else tracker._motion_noise[motion]
+        rows.append(reach.track_row(track.state, noise))
+    hits = reach.reachable_rows(np.stack(rows), detections, GATE_MAHALANOBIS_DISTANCE**2)
+    return {track for track, hit in zip(tracks, hits, strict=True) if hit}
+
+
+def test_the_kept_matrix_reaches_what_a_fresh_check_would_on_every_call():
+    # Targets moving through clutter: tracks start, update, coast and drop, and the
+    # matrix fills with dropped tracks' rows until it is rebuilt.
+    calls, rebuilt = [], []
+
+    class Checked(SapientAsynchronousTracker):
+        def _reachable(self, tracks, detections):
+            before = len(self._reach_tracks)
+            got = super()._reachable(tracks, detections)
+            if len(self._reach_tracks) < before:
+                rebuilt.append(1)
+            assert got == _brute_reachable(self, tracks, detections)
+            calls.append(1)
+            return got
+
+    tracker = Checked()
+    rng = np.random.default_rng(7)
+    model = LinearGaussian(ndim_state=9, mapping=(0, 3, 6), noise_covar=np.diag([400.0] * 3))
+    targets = [(rng.uniform(-4e3, 4e3, 3), rng.uniform(-30, 30, 3)) for _ in range(5)]
+    for step in range(400):
+        when = T0 + timedelta(seconds=step)
+        dets = set()
+        for start, velocity in targets:
+            if rng.random() < 0.7:
+                where = start + velocity * step + rng.normal(scale=15.0, size=3)
+                dets.add(Detection(StateVector(where), measurement_model=model, timestamp=when))
+        for _ in range(rng.integers(0, 4)):
+            where = rng.uniform(-6e3, 6e3, 3)
+            dets.add(Detection(StateVector(where), measurement_model=model, timestamp=when))
+        if dets:
+            for det in dets:
+                det.metadata = {"classification": "UAS", "swarm_count": 1}
+            tracker.process_async_event(when, dets)
+    assert len(calls) > 300 and rebuilt, "checked on every call, through a rebuild"
+
+
+def test_an_ended_declaration_marks_its_tracks_row_changed():
+    tracker = SapientAsynchronousTracker()
+    rng = np.random.default_rng(8)
+    track = _random_track(rng, 0.0)
+    tracker.tracks = {track}
+    tracker._declarations[track.id] = object()
+    tracker._undeclare(track.id)
+    assert track in tracker._reach_dirty

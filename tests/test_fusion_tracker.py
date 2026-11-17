@@ -2187,10 +2187,13 @@ def _books_hold_live_tracks_only(tracker):
         "_cot_uids",
         "_posteriors",
         "_narrow_until",
-        "_reach_rows",
         "_association_rows",
     ):
         assert set(getattr(tracker, name)) <= live, name
+    # The reach matrix and its changed set keep dropped tracks only up to a bound.
+    bound = 2 * len(tracker.tracks) + 64
+    assert len(tracker._reach_tracks) <= bound + 1
+    assert len(tracker._reach_dirty) <= bound
     assert set(tracker._object_tracks.values()) <= live
     assert set(tracker._cot_seen) <= set(tracker._object_tracks)
     assert set(tracker._track_ids) == tracker.tracks

@@ -30,6 +30,7 @@ from stonesoup.updater.kalman import KalmanUpdater, UnscentedKalmanUpdater
 
 from . import association
 from .models import create_9d_constant_acceleration_model
+from .reach import WIDTH as REACH_WIDTH
 from .reach import reachable_rows, track_row
 
 # The margin pruning's bound keeps for the rounding between seconds and times.
@@ -705,9 +706,13 @@ class SapientAsynchronousTracker:
         # keep, or None), so pruning a track not coasted skips the exact check; see
         # _may_be_wide.
         self._narrow_until: dict[str, tuple] = {}
-        # Track id -> (state, motion, row): the numbers the reach check needs, rebuilt
-        # only when the track's state or motion changes; see _reachable.
-        self._reach_rows: dict[str, tuple] = {}
+        # The numbers the reach check needs, one row per track in `_reach_tracks`, and
+        # each track's row; `_reach_dirty` holds the tracks whose state or motion changed
+        # since their row was made. See _reachable.
+        self._reach_matrix = np.empty((0, REACH_WIDTH))
+        self._reach_tracks: list = []
+        self._reach_slot: dict = {}
+        self._reach_dirty: set = set()
         # Track id -> (state, motion, arrays): what association needs, the same way.
         self._association_rows: dict[str, tuple] = {}
         # Track -> its id. A Track's attributes are read through Stone Soup's own
@@ -843,6 +848,11 @@ class SapientAsynchronousTracker:
         # Track Pruning: Drop stale tracks that have spent too long coasting without verification
         self._prune_stale_tracks(timestamp)
 
+        # What this event appended to has a new state: its reach row is made again. A
+        # track dropped before it was looked at again is let go once enough gather.
+        self._reach_dirty |= self.touched
+        if len(self._reach_dirty) > 2 * len(self.tracks) + 64:
+            self._reach_dirty &= self.tracks
         return self.confirmed_tracks()
 
     def _associate(self, tracks, detections, timestamp):
@@ -879,26 +889,44 @@ class SapientAsynchronousTracker:
     def _reachable(self, tracks, detections):
         """The tracks that may fall inside a detection's gate, all checked in one array call.
 
-        `_may_gate`'s bound for every track at once (`reach.reachable_rows`): each track's
-        numbers are kept as a row, rebuilt only when its state or motion changes, so an
-        event costs a row lookup per live track rather than a prediction.
+        `_may_gate`'s bound for every track at once (`reach.reachable_rows`). Each track's
+        numbers are kept as a row of one matrix, made again only for a track whose state
+        or motion changed: a state changes only when an event appends one, which makes
+        the track touched and so dirty at the event's end, and a motion only when a
+        declaration is made, on a touched track, or ended, which marks its track dirty.
+        So an event does no work per live track, only per changed one, and the check
+        runs over the whole matrix, the rows of dropped tracks included until it is
+        rebuilt; only the rows of `tracks` count.
         """
-        tracks = list(tracks)
         if not tracks or not detections:
             return set()
-        rows = []
-        for track in tracks:
-            state = track.state
-            motion = self._motion(track)
-            track_id = self._id(track)
-            cached = self._reach_rows.get(track_id)
-            if cached is None or cached[0] is not state or cached[1] != motion:
+        tracks = tracks if isinstance(tracks, (set, frozenset)) else set(tracks)
+        if len(self._reach_tracks) > 2 * len(self.tracks) + 64:
+            # Mostly dropped tracks' rows: start again from the live ones.
+            self._reach_matrix = np.empty((0, REACH_WIDTH))
+            self._reach_tracks, self._reach_slot = [], {}
+            self._reach_dirty &= self.tracks
+        slot = self._reach_slot
+        stale = (self._reach_dirty & tracks) | (tracks - slot.keys())
+        if stale:
+            fresh = []
+            for track in stale:
+                motion = self._motion(track)
                 noise = self._axis_noise if motion is None else self._motion_noise[motion]
-                cached = (state, motion, track_row(state, noise))
-                self._reach_rows[track_id] = cached
-            rows.append(cached[2])
-        reached = reachable_rows(np.stack(rows), detections, GATE_MAHALANOBIS_DISTANCE**2)
-        return {track for track, hit in zip(tracks, reached, strict=True) if hit}
+                row = track_row(track.state, noise)
+                index = slot.get(track)
+                if index is None:
+                    slot[track] = len(self._reach_tracks)
+                    self._reach_tracks.append(track)
+                    fresh.append(row)
+                else:
+                    self._reach_matrix[index] = row
+            if fresh:
+                self._reach_matrix = np.vstack([self._reach_matrix, *fresh])
+            self._reach_dirty -= stale
+        reached = reachable_rows(self._reach_matrix, detections, GATE_MAHALANOBIS_DISTANCE**2)
+        live = self._reach_tracks
+        return {live[i] for i in np.flatnonzero(reached) if live[i] in tracks}
 
     def _may_gate(self, track, detections):
         """Whether a track could fall inside the validation gate of any of the detections.
@@ -1206,6 +1234,7 @@ class SapientAsynchronousTracker:
         for live in self.tracks:
             if live.id == track_id:
                 live.metadata.pop(DECLARATION_KEY, None)
+                self._reach_dirty.add(live)  # its motion, and so its reach row
 
     def _excluded(self, track, detection) -> bool:
         """Whether a CoT event of one uid is kept off a track because of another uid.
@@ -1678,7 +1707,6 @@ class SapientAsynchronousTracker:
             self._cot_uids,
             self._posteriors,
             self._narrow_until,
-            self._reach_rows,
             self._association_rows,
         )
         for book in books:
@@ -1788,9 +1816,6 @@ class SapientAsynchronousTracker:
             track_id: narrow
             for track_id, narrow in self._narrow_until.items()
             if track_id in active_ids
-        }
-        self._reach_rows = {
-            track_id: row for track_id, row in self._reach_rows.items() if track_id in active_ids
         }
         self._association_rows = {
             track_id: row

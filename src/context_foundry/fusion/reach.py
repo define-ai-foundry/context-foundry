@@ -25,6 +25,7 @@ _STATE = 1
 _VARIANCE = 10
 _NOISE = 28
 _WIDTH = 31
+WIDTH = _WIDTH  # a row's length, for a caller that keeps rows of its own
 
 
 def seconds(moment: datetime) -> float:
