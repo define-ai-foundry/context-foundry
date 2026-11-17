@@ -827,8 +827,9 @@ class SapientAsynchronousTracker:
                 self._bind_object_id(det, track)
                 self._count_confirmation_hit(track)
 
-        # This event appended a state to every track above; cap what is retained.
-        for live_track in self.tracks:
+        # This event appended a state to the tracks it touched, and to no other: cap
+        # what those retain. An untouched track was capped when it last grew.
+        for live_track in self.touched:
             self._trim_history(live_track)
 
         # Track Initiation: Handle unassociated hits to capture newly emerging threat vectors
@@ -1601,7 +1602,14 @@ class SapientAsynchronousTracker:
     def _drop_coasted_out(self, current_time) -> None:
         """Drop the tracks silent for longer than max_coast_seconds, the tentative ones
         whose confirmation window has passed, and what is kept of them.
+
+        Skipped while `_prune_due`, the earliest time the last pruning found any live
+        track could be dropped, is still ahead: it is no later than every track's coast
+        horizon and confirmation window, and an event touches no track before this runs.
         """
+        due = self._prune_due
+        if due is not None and current_time < due - _PRUNE_MARGIN:
+            return
         tentative = self._tentative
         gone = set()
         for track in self.tracks:
