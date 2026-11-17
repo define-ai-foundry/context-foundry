@@ -360,3 +360,15 @@ def test_a_tracker_assigned_without_reset_forgets_the_old_ones_ids():
     live = {track.id for track in engine.tracker.tracks}
     assert set(engine.publish_policy._last_sent) <= live
     assert set(engine.pending_sources._pending) <= live
+
+
+def test_a_track_coasted_and_pruned_in_one_event_is_not_placed_again():
+    # Pruning's wide-covariance rule runs after coasting: one event can touch a track and
+    # drop it. It must not be placed again under its dead id.
+    tracker = SapientAsynchronousTracker(max_coast_position_sigma=50.0)
+    engine = FusionEngine(tracker, PublishPolicy("coast"))
+    engine.process(T0, [_report(0, "RAD-1", "a")])
+    for step in range(1, 40):
+        when = T0 + timedelta(seconds=step)
+        engine.process(when, [_report(step, "RAD-2", f"far-{step}", 9000.0 + 3000.0 * step)])
+        assert set(engine._time_of) <= {track.id for track in tracker.tracks}

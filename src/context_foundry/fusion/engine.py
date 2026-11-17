@@ -252,7 +252,9 @@ class FusionEngine:
                 was = time_of.pop(track_id, None)
                 if was is not None:
                     _unplace(at_time, *was)
-            changed = tracker.touched
+            # Only live ones: pruning, after coasting, can drop a track the event touched.
+            live = tracker.tracks
+            changed = [track for track in tracker.touched if track in live]
         for track in changed:
             when = track.state.timestamp
             was = time_of.get(track.id)
