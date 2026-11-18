@@ -172,3 +172,25 @@ def test_the_reports_own_id_reaches_the_detection():
     record["message"]["detection_report"]["report_id"] = "rep-7"
     _, _, detection = reader.detection(record)
     assert detection.metadata["reportId"] == "rep-7"
+
+
+def test_a_parse_made_on_arrival_stands_for_the_readers_own(monkeypatch):
+    from context_foundry.fusion.validators import sapient as sapient_module
+
+    reader = SapientRecordReader()
+    reader.learn(_registration(error=_linear()))
+    reader.learn(_status(62.9, 29.8))
+    record = _detection()
+    parsed, error = reader.validator.parse({"sapientMessage": record["message"]})
+    assert parsed is not None and error == ""
+    calls = []
+    real = sapient_module.ParseDict
+    monkeypatch.setattr(
+        sapient_module, "ParseDict", lambda *a, **k: calls.append(1) or real(*a, **k)
+    )
+    when, node, given = reader.detection(record, parsed=parsed)
+    assert calls == [], "the parse it was given is not made again"
+    _, _, own = reader.detection(_detection())
+    assert (when, node) == (own.timestamp, RADAR)
+    assert (given.state_vector == own.state_vector).all()
+    assert given.metadata == own.metadata

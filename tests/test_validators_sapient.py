@@ -551,3 +551,75 @@ def test_a_known_unregistered_node_is_reported_once(validator, registry, caplog)
             assert validator.process_message(payload) is None
 
     assert len([r for r in caplog.records if "not in the sensor registry" in r.message]) == 1
+
+
+def test_process_message_parses_once_and_matches_normalize(
+    validator, sapient_detection_report_message, monkeypatch
+):
+    calls = []
+    real = sapient_module.ParseDict
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(sapient_module, "ParseDict", counting)
+    payload = copy.deepcopy(sapient_detection_report_message)
+    got = validator.process_message(payload)
+    assert len(calls) == 1, "one parse validates and normalizes"
+    assert got == validator.normalize(copy.deepcopy(sapient_detection_report_message))
+
+
+def test_process_message_refuses_what_validate_refuses(validator, caplog):
+    payload = {"sapientMessage": {"thisFieldDoesNotExist": "boom"}}
+    with caplog.at_level(logging.WARNING):
+        assert validator.process_message(payload) is None
+    assert any("rejected" in r.message for r in caplog.records)
+    assert validator.validate(payload)[0] is False
+
+
+def test_process_message_reports_a_normalize_failure(
+    validator, sapient_detection_report_message, caplog
+):
+    payload = copy.deepcopy(sapient_detection_report_message)
+    payload["sapientMessage"]["detectionReport"]["location"]["y"] = 95.0  # off the world
+    with caplog.at_level(logging.ERROR):
+        assert validator.process_message(payload) is None
+    assert any("Normalization failed" in r.message for r in caplog.records)
+
+
+def test_process_parsed_matches_process_message(validator, sapient_detection_report_message):
+    payload = copy.deepcopy(sapient_detection_report_message)
+    msg, error = validator.parse(payload)
+    assert error == ""
+    assert validator.process_parsed(payload, msg) == validator.process_message(
+        copy.deepcopy(sapient_detection_report_message)
+    )
+
+
+def test_parse_says_why_it_refuses(validator):
+    msg, error = validator.parse({"nope": {}})
+    assert msg is None and "sapientMessage" in error
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        {},
+        {"object_id": "obj-1"},
+        {"report_id": "01J", "object_id": ""},
+        {"object_info": [{"type": "estimatedSwarmCount", "value": "9"}]},
+        {"object_info": [{"type": "estimatedSwarmCount"}, {"value": "x", "error": 0.5}, {}]},
+        {"object_info": [{"type": "t", "value": "v", "error": 0.1}]},
+        {"report_id": "r", "object_id": "o", "object_info": [{"type": "t", "value": "v"}]},
+    ],
+)
+def test_the_read_fields_are_message_to_dicts_own(report):
+    from google.protobuf.json_format import MessageToDict, ParseDict
+
+    from sapient_msg.bsi_flex_335_v2_0.detection_report_pb2 import DetectionReport
+
+    msg = ParseDict(report, DetectionReport())
+    full = MessageToDict(msg, preserving_proto_field_name=False)
+    wanted = {k: full[k] for k in ("objectId", "reportId", "objectInfo") if k in full}
+    assert sapient_module._report_fields(msg) == wanted

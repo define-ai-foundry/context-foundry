@@ -30,6 +30,7 @@ from stonesoup.updater.kalman import KalmanUpdater, UnscentedKalmanUpdater
 
 from . import association
 from .models import create_9d_constant_acceleration_model
+from .reach import WIDTH as REACH_WIDTH
 from .reach import reachable_rows, track_row
 
 # The margin pruning's bound keeps for the rounding between seconds and times.
@@ -534,6 +535,77 @@ class _TrackwisePredictor(_ConstantAccelerationPredictor):
         return super().predict(prior, *args, **kwargs)
 
 
+class _TrackSet(set):
+    """The live tracks, counting every change made to them in place.
+
+    The tracker keeps maps over its tracks (`_by_id`); a caller that adds or removes a
+    track in place, as tests do, changes the count, so a map made for an earlier count
+    is made again rather than read stale.
+    """
+
+    version = 0
+
+    def _changed(self):
+        self.version += 1
+
+    def add(self, item):
+        super().add(item)
+        self._changed()
+
+    def discard(self, item):
+        super().discard(item)
+        self._changed()
+
+    def remove(self, item):
+        super().remove(item)
+        self._changed()
+
+    def pop(self):
+        item = super().pop()
+        self._changed()
+        return item
+
+    def clear(self):
+        super().clear()
+        self._changed()
+
+    def update(self, *others):
+        super().update(*others)
+        self._changed()
+
+    def difference_update(self, *others):
+        super().difference_update(*others)
+        self._changed()
+
+    def intersection_update(self, *others):
+        super().intersection_update(*others)
+        self._changed()
+
+    def symmetric_difference_update(self, other):
+        super().symmetric_difference_update(other)
+        self._changed()
+
+    def __ior__(self, other):
+        super().__ior__(other)
+        self._changed()
+        return self
+
+    def __iand__(self, other):
+        super().__iand__(other)
+        self._changed()
+        return self
+
+    def __isub__(self, other):
+        super().__isub__(other)
+        self._changed()
+        return self
+
+    def __ixor__(self, other):
+        super().__ixor__(other)
+        self._changed()
+        return self
+
+
 class SapientAsynchronousTracker:
     """Fuses asynchronous multi-sensor detections into 9D tracks.
 
@@ -679,7 +751,7 @@ class SapientAsynchronousTracker:
         # _associate. False takes the associator's own path, for comparison.
         self.vector_association = True
 
-        # Track storage manifest
+        # Track storage manifest: a set that counts its changes; see `tracks`.
         self.tracks = set()
         self.p_init_val = p_init_variance
         # Horizontal velocity only: a fast object needs room to be moving, but
@@ -705,9 +777,13 @@ class SapientAsynchronousTracker:
         # keep, or None), so pruning a track not coasted skips the exact check; see
         # _may_be_wide.
         self._narrow_until: dict[str, tuple] = {}
-        # Track id -> (state, motion, row): the numbers the reach check needs, rebuilt
-        # only when the track's state or motion changes; see _reachable.
-        self._reach_rows: dict[str, tuple] = {}
+        # The numbers the reach check needs, one row per track in `_reach_tracks`, and
+        # each track's row; `_reach_dirty` holds the tracks whose state or motion changed
+        # since their row was made. See _reachable.
+        self._reach_matrix = np.empty((0, REACH_WIDTH))
+        self._reach_tracks: list = []
+        self._reach_slot: dict = {}
+        self._reach_dirty: set = set()
         # Track id -> (state, motion, arrays): what association needs, the same way.
         self._association_rows: dict[str, tuple] = {}
         # Track -> its id. A Track's attributes are read through Stone Soup's own
@@ -716,6 +792,14 @@ class SapientAsynchronousTracker:
         self._track_ids: dict = {}
         # The tracks the latest event appended a state to or started, for the engine.
         self.touched: set = set()
+        # The tracks the latest event started, and the ids of those it dropped, for the
+        # engine, which would otherwise look at every live track to find them.
+        self.started: set = set()
+        self.dropped_ids: set = set()
+        # Live track id -> track, kept as tracks start and are dropped, for the set
+        # object `self.tracks` is (one assigned anew has it made again); see _by_id.
+        self._tracks_by_id: dict = {}
+        self._tracks_by_id_of = None
         # No live track can be pruned before this time, or None when that is not known;
         # see _prune_skippable. Every path that changes a kept track's inputs to
         # pruning must either add the track to `touched` or clear this:
@@ -748,6 +832,8 @@ class SapientAsynchronousTracker:
         # Bound the width of this pass before anything iterates over it.
         detection_group = self._limit_detections(detection_group)
         self.touched = set()
+        self.started = set()
+        self.dropped_ids = set()
 
         # Drop tracks already past their coast horizon before they can be matched: one
         # silent that long has a covariance wide enough to win a detection of another
@@ -795,10 +881,12 @@ class SapientAsynchronousTracker:
             # A detection is assigned to at most one track, so no two tracks are
             # updated from the same hit.
             if not joint_hypothesis:
-                # Track fell outside validation gates; coast forward using kinematics prediction
+                # Track fell outside validation gates; coast forward using kinematics
+                # prediction. Touched only when it coasts: without a new state nothing of
+                # it changed, so nothing that reads `touched` has to look at it again.
                 if self.coast_unmatched:
                     track.append(self.predictor.predict(track, timestamp=timestamp))
-                self.touched.add(track)
+                    self.touched.add(track)
             else:
                 # High-Fidelity Step: Extract the measurement model embedded inside the SAPIENT detection
                 det = joint_hypothesis.measurement
@@ -827,8 +915,9 @@ class SapientAsynchronousTracker:
                 self._bind_object_id(det, track)
                 self._count_confirmation_hit(track)
 
-        # This event appended a state to every track above; cap what is retained.
-        for live_track in self.tracks:
+        # This event appended a state to the tracks it touched, and to no other: cap
+        # what those retain. An untouched track was capped when it last grew.
+        for live_track in self.touched:
             self._trim_history(live_track)
 
         # Track Initiation: Handle unassociated hits to capture newly emerging threat vectors
@@ -842,6 +931,9 @@ class SapientAsynchronousTracker:
         # Track Pruning: Drop stale tracks that have spent too long coasting without verification
         self._prune_stale_tracks(timestamp)
 
+        # What this event appended to has a new state: its reach row is made again.
+        # Only a live one: a track dropped is let go with its row (`_reach_forget`).
+        self._reach_dirty |= self.touched & self.tracks
         return self.confirmed_tracks()
 
     def _associate(self, tracks, detections, timestamp):
@@ -878,26 +970,67 @@ class SapientAsynchronousTracker:
     def _reachable(self, tracks, detections):
         """The tracks that may fall inside a detection's gate, all checked in one array call.
 
-        `_may_gate`'s bound for every track at once (`reach.reachable_rows`): each track's
-        numbers are kept as a row, rebuilt only when its state or motion changes, so an
-        event costs a row lookup per live track rather than a prediction.
+        `_may_gate`'s bound for every track at once (`reach.reachable_rows`). Each track's
+        numbers are kept as a row of one matrix, made again only for a track whose state
+        or motion changed: a state changes only when an event appends one, which makes
+        the track touched and so dirty at the event's end, and a motion only when a
+        declaration is made, on a touched track, or ended, which marks its track dirty.
+        So an event does no work per live track, only per changed one. A dropped track's
+        row goes with it (`_reach_forget`), and the check runs over the whole matrix, of
+        which only the rows of `tracks` count.
         """
-        tracks = list(tracks)
         if not tracks or not detections:
             return set()
-        rows = []
-        for track in tracks:
-            state = track.state
-            motion = self._motion(track)
-            track_id = self._id(track)
-            cached = self._reach_rows.get(track_id)
-            if cached is None or cached[0] is not state or cached[1] != motion:
+        tracks = tracks if isinstance(tracks, (set, frozenset)) else set(tracks)
+        if len(self._reach_tracks) > self._reach_bound():
+            # A backstop for tracks taken away other than by the tracker: start again.
+            self._reach_matrix = np.empty((0, REACH_WIDTH))
+            self._reach_tracks, self._reach_slot = [], {}
+            self._reach_dirty &= self.tracks
+        slot = self._reach_slot
+        stale = (self._reach_dirty & tracks) | (tracks - slot.keys())
+        if stale:
+            fresh = []
+            for track in stale:
+                motion = self._motion(track)
                 noise = self._axis_noise if motion is None else self._motion_noise[motion]
-                cached = (state, motion, track_row(state, noise))
-                self._reach_rows[track_id] = cached
-            rows.append(cached[2])
-        reached = reachable_rows(np.stack(rows), detections, GATE_MAHALANOBIS_DISTANCE**2)
-        return {track for track, hit in zip(tracks, reached, strict=True) if hit}
+                row = track_row(track.state, noise)
+                index = slot.get(track)
+                if index is None:
+                    slot[track] = len(self._reach_tracks)
+                    self._reach_tracks.append(track)
+                    fresh.append(row)
+                else:
+                    self._reach_matrix[index] = row
+            if fresh:
+                self._reach_matrix = np.vstack([self._reach_matrix, *fresh])
+            self._reach_dirty -= stale
+        reached = reachable_rows(self._reach_matrix, detections, GATE_MAHALANOBIS_DISTANCE**2)
+        live = self._reach_tracks
+        return {live[i] for i in np.flatnonzero(reached) if live[i] in tracks}
+
+    def _reach_bound(self) -> int:
+        """The most rows the reach matrix keeps before it is made again from the live
+        tracks: dropped tracks leave it as they go, so only tracks removed other than
+        by the tracker can take it past this."""
+        return 2 * len(self.tracks) + 64
+
+    def _reach_forget(self, gone) -> None:
+        """Take dropped tracks' rows out of the reach matrix, each swapped with the last."""
+        slot, rows = self._reach_slot, self._reach_tracks
+        for track in gone:
+            self._reach_dirty.discard(track)
+            index = slot.pop(track, None)
+            if index is None:
+                continue
+            last = len(rows) - 1
+            if index != last:
+                moved = rows[last]
+                rows[index] = moved
+                self._reach_matrix[index] = self._reach_matrix[last]
+                slot[moved] = index
+            rows.pop()
+            self._reach_matrix = self._reach_matrix[:last]
 
     def _may_gate(self, track, detections):
         """Whether a track could fall inside the validation gate of any of the detections.
@@ -1092,7 +1225,7 @@ class SapientAsynchronousTracker:
         and it falls inside OBJECT_ID_GATE_MAHALANOBIS_DISTANCE of that track.
         Everything else is left to position-based association.
         """
-        tracks_by_id = {track.id: track for track in self.tracks}
+        tracks_by_id = self._by_id()
         bound = {}
         for det in detection_group:
             key = _object_key(det)
@@ -1205,6 +1338,7 @@ class SapientAsynchronousTracker:
         for live in self.tracks:
             if live.id == track_id:
                 live.metadata.pop(DECLARATION_KEY, None)
+                self._reach_dirty.add(live)  # its motion, and so its reach row
 
     def _excluded(self, track, detection) -> bool:
         """Whether a CoT event of one uid is kept off a track because of another uid.
@@ -1265,6 +1399,32 @@ class SapientAsynchronousTracker:
             return None
         declared = self._declarations.get(self._id(track))
         return None if declared is None else declared.motion
+
+    @property
+    def tracks(self):
+        """The live tracks, a set that counts the changes made to it in place."""
+        return self._tracks
+
+    @tracks.setter
+    def tracks(self, tracks) -> None:
+        self._tracks = tracks if isinstance(tracks, _TrackSet) else _TrackSet(tracks)
+
+    def _by_id(self) -> dict:
+        """Live track id -> track. Live ids are unique (`_seed_id`), so one map holds them.
+
+        Kept up to date where tracks start (`_initialize_new_track`) and are dropped
+        (`_forget`), and made again whenever the tracks are another set, or the same set
+        changed in place by anything else, than the map was made for.
+        """
+        tracks = self._tracks
+        if self._tracks_by_id_of != (id(tracks), tracks.version):
+            self._tracks_by_id = {track.id: track for track in tracks}
+            self._by_id_synced()
+        return self._tracks_by_id
+
+    def _by_id_synced(self) -> None:
+        """The id map is up to date with the tracks as they are now."""
+        self._tracks_by_id_of = (id(self._tracks), self._tracks.version)
 
     def _id(self, track):
         """The track's id, from `_track_ids` when the tracker made the track."""
@@ -1345,7 +1505,7 @@ class SapientAsynchronousTracker:
         ]
         if not expired:
             return
-        tracks_by_id = {track.id: track for track in self.tracks}
+        tracks_by_id = self._by_id()
         released = []
         for track_id in expired:
             declared = self._declarations[track_id]
@@ -1449,8 +1609,11 @@ class SapientAsynchronousTracker:
         # accumulates metadata from Updates, so without this the track is
         # unclassified until its second detection.
         track = Track([prior], id=self._seed_id(detection), init_metadata=dict(detection.metadata))
+        self._by_id()[track.id] = track
         self.tracks.add(track)
+        self._by_id_synced()
         self.touched.add(track)
+        self.started.add(track)
         self._track_ids[track] = track.id
         self._posteriors[track.id] = prior
         # The seeding hit is a real detection, so it anchors staleness.
@@ -1533,7 +1696,7 @@ class SapientAsynchronousTracker:
                 detection.timestamp.isoformat(),
             )
         seed = "|".join(parts)
-        live = {track.id for track in self.tracks}
+        live = self._by_id()
         candidate = str(uuid.uuid5(uuid.NAMESPACE_URL, f"context-foundry-track:{seed}"))
         count = 1
         while candidate in live:
@@ -1601,7 +1764,14 @@ class SapientAsynchronousTracker:
     def _drop_coasted_out(self, current_time) -> None:
         """Drop the tracks silent for longer than max_coast_seconds, the tentative ones
         whose confirmation window has passed, and what is kept of them.
+
+        Skipped while `_prune_due`, the earliest time the last pruning found any live
+        track could be dropped, is still ahead: it is no later than every track's coast
+        horizon and confirmation window, and an event touches no track before this runs.
         """
+        due = self._prune_due
+        if due is not None and current_time < due - _PRUNE_MARGIN:
+            return
         tentative = self._tentative
         gone = set()
         for track in self.tracks:
@@ -1657,8 +1827,15 @@ class SapientAsynchronousTracker:
 
     def _forget(self, gone) -> None:
         """Drop these tracks and everything kept of them."""
+        by_id = self._by_id()
         self.tracks -= gone
         ids = {self._id(track) for track in gone}
+        self.dropped_ids |= ids
+        for track in gone:
+            if by_id.get(track.id) is track:
+                del by_id[track.id]
+        self._by_id_synced()
+        self._reach_forget(gone)
         for track in gone:
             self._track_ids.pop(track, None)
         books = (
@@ -1670,7 +1847,6 @@ class SapientAsynchronousTracker:
             self._cot_uids,
             self._posteriors,
             self._narrow_until,
-            self._reach_rows,
             self._association_rows,
         )
         for book in books:
@@ -1736,6 +1912,9 @@ class SapientAsynchronousTracker:
                 k: seen for k, seen in self._cot_seen.items() if k in self._object_tracks
             }
             return
+        pruned = self.tracks - active_set
+        self.dropped_ids |= {self._id(track) for track in pruned}
+        self._reach_forget(pruned)
         self.tracks = active_set
         # Forget pruned tracks, or the bookkeeping outlives them for the whole run.
         active_ids = {self._id(track) for track in active_set}
@@ -1780,9 +1959,6 @@ class SapientAsynchronousTracker:
             track_id: narrow
             for track_id, narrow in self._narrow_until.items()
             if track_id in active_ids
-        }
-        self._reach_rows = {
-            track_id: row for track_id, row in self._reach_rows.items() if track_id in active_ids
         }
         self._association_rows = {
             track_id: row

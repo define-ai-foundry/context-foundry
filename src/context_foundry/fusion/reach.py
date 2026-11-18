@@ -24,7 +24,7 @@ _TIME = 0
 _STATE = 1
 _VARIANCE = 10
 _NOISE = 28
-_WIDTH = 31
+WIDTH = 31
 
 
 def seconds(moment: datetime) -> float:
@@ -35,7 +35,7 @@ def seconds(moment: datetime) -> float:
 
 def track_row(state, axis_noise) -> np.ndarray:
     """The numbers the reach check needs from one track's state."""
-    row = np.empty(_WIDTH)
+    row = np.empty(WIDTH)
     row[_TIME] = seconds(state.timestamp)
     row[_STATE:_VARIANCE] = np.asarray(state.state_vector, dtype=float).ravel()
     covar = np.asarray(state.covar, dtype=float)

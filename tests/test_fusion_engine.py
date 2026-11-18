@@ -240,11 +240,16 @@ def test_tracks_are_coasted_each_event_only_when_a_predicted_state_can_be_sent(p
 
 
 class _ScanningTracker(SapientAsynchronousTracker):
-    """The tracker without its touched set, so the engine looks at every live track."""
+    """The tracker saying what changed as a scan of every live track would find it:
+    every live track touched, the tracks not live before started, the gone ids dropped."""
 
     def process_async_event(self, timestamp, detection_group):
+        before = set(self.tracks)
         result = super().process_async_event(timestamp, detection_group)
-        self.touched = None
+        now = set(self.tracks)
+        self.touched = now
+        self.started = now - before
+        self.dropped_ids = {track.id for track in before - now}
         return result
 
 
@@ -265,7 +270,105 @@ def test_sources_from_the_touched_tracks_are_those_of_every_track(policy):
         for seconds, reports in script:
             result = engine.process(T0 + timedelta(seconds=seconds), reports)
             pending = {k: dict(v) for k, v in engine.pending_sources._pending.items()}
-            seen.append((result.sources, pending))
+            # As a set: two trackers list their tracks in their own set order.
+            published = sorted(track.id for track, _ in result.published)
+            sent = dict(engine.publish_policy._last_sent)
+            seen.append((result.sources, pending, published, sent))
         return seen
 
     assert run(SapientAsynchronousTracker(confirm_hits=2)) == run(_ScanningTracker(confirm_hits=2))
+
+
+@pytest.mark.parametrize("policy", ["window", "all", "updates"])
+@pytest.mark.parametrize("confirm_hits", [1, 2])
+def test_events_at_one_time_publish_as_a_scan_of_every_track_would(policy, confirm_hits):
+    # Several sensors' events at the same second: a track one of them updated has its
+    # state at that time while the next event, at the same mark, does not touch it.
+    def run(tracker):
+        engine = FusionEngine(tracker, PublishPolicy(policy))
+        seen = []
+        script = [
+            (0, [_report(0, "RAD-1", "a", 0)]),
+            (0, [_report(0, "RAD-2", "b", 3000)]),
+            (0, [_report(0, "RAD-3", "c", 6000)]),
+            (1, [_report(1, "RAD-1", "a", 2)]),
+            (1, [_report(1, "RAD-2", "b", 3003)]),
+            (1, [_report(1, "RAD-1", "a", 4)]),
+            (2, [_report(2, "RAD-3", "c", 6004), _report(2, "RAD-2", "b", 3006)]),
+            (2, [_report(2, "RAD-1", "a", 6)]),
+            (9, [_report(9, "RAD-2", "b", 3020)]),
+            (9, [_report(9, "RAD-2", "b", 3020)]),
+            (70, [_report(70, "RAD-1", "a", 10)]),
+            (70, [_report(70, "RAD-3", "d", 9000)]),
+        ]
+        for seconds, reports in script:
+            result = engine.process(T0 + timedelta(seconds=seconds), reports)
+            published = sorted(track.id for track, _ in result.published)
+            pending = {k: dict(v) for k, v in engine.pending_sources._pending.items()}
+            seen.append(
+                (published, result.sources, pending, dict(engine.publish_policy._last_sent))
+            )
+        return seen
+
+    fast = run(SapientAsynchronousTracker(confirm_hits=confirm_hits))
+    assert fast == run(_ScanningTracker(confirm_hits=confirm_hits))
+    assert any(published for published, *_ in fast), "something was published"
+
+
+def test_a_coarse_clock_keeps_no_dropped_track_in_the_engines_time_map():
+    # Three marks only, and clutter starting and dropping tracks: what the engine keeps
+    # of each track's state time is the live tracks', whatever the number of marks.
+    tracker = SapientAsynchronousTracker(confirm_hits=2, max_coast_seconds=2.0)
+    engine = FusionEngine(tracker, PublishPolicy("window"))
+    rng = np.random.default_rng(3)
+    dropped = 0
+    for step in range(200):
+        when = T0 + timedelta(seconds=3 * (step // 60) + (step % 3))
+        reports = [
+            _report(0, f"RAD-{k}", f"x{step}-{k}", float(rng.uniform(-9e3, 9e3)))
+            for k in range(int(rng.integers(1, 4)))
+        ]
+        for report in reports:
+            report.timestamp = when
+        engine.process(when, reports)
+        dropped += len(tracker.dropped_ids)
+        assert set(engine._time_of) <= {t.id for t in tracker.tracks}
+        assert all(engine._at_time.values()), "no empty time is kept"
+    assert dropped
+
+
+def test_a_tracker_fed_before_the_engine_sees_it_publishes_as_a_scan_would():
+    def run(tracker):
+        # Fed directly first: the engine has not seen these tracks' state times. With
+        # coasting off ("window"), the next event at the same mark touches none of them.
+        engine = FusionEngine(tracker, PublishPolicy("window"))
+        tracker.process_async_event(T0, {_report(0, "RAD-1", "a"), _report(0, "RAD-2", "b", 4000)})
+        result = engine.process(T0, [_report(0, "RAD-3", "c", 9000)])
+        return sorted(track.id for track, _ in result.published)
+
+    fast = run(SapientAsynchronousTracker())
+    assert fast == run(_ScanningTracker())
+    assert len(fast) == 3, "the two it was fed at the mark are published too"
+
+
+def test_a_tracker_assigned_without_reset_forgets_the_old_ones_ids():
+    engine = _engine()
+    engine.process(T0, [_report(0)])
+    assert engine.publish_policy._last_sent
+    engine.tracker = SapientAsynchronousTracker()
+    engine.process(T0 + timedelta(seconds=1), [_report(1, "RAD-9", "z", 7000)])
+    live = {track.id for track in engine.tracker.tracks}
+    assert set(engine.publish_policy._last_sent) <= live
+    assert set(engine.pending_sources._pending) <= live
+
+
+def test_a_track_coasted_and_pruned_in_one_event_is_not_placed_again():
+    # Pruning's wide-covariance rule runs after coasting: one event can touch a track and
+    # drop it. It must not be placed again under its dead id.
+    tracker = SapientAsynchronousTracker(max_coast_position_sigma=50.0)
+    engine = FusionEngine(tracker, PublishPolicy("coast"))
+    engine.process(T0, [_report(0, "RAD-1", "a")])
+    for step in range(1, 40):
+        when = T0 + timedelta(seconds=step)
+        engine.process(when, [_report(step, "RAD-2", f"far-{step}", 9000.0 + 3000.0 * step)])
+        assert set(engine._time_of) <= {track.id for track in tracker.tracks}

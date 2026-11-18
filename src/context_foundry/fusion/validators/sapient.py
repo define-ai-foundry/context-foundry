@@ -11,6 +11,7 @@ from google.protobuf.json_format import MessageToDict, ParseDict, ParseError
 
 from context_foundry.fusion import config
 from context_foundry.fusion.schemas import InternalDetection
+from context_foundry.fusion.validators import base
 from context_foundry.fusion.validators.base import ProtocolValidator
 from sapient_msg.bsi_flex_335_v2_0.range_bearing_pb2 import RangeBearing
 
@@ -114,8 +115,43 @@ def _primary_chain(classification) -> list:
 
 class SapientValidator(ProtocolValidator):
     def validate(self, raw_payload: dict[str, Any]) -> tuple[bool, str]:
+        msg, error = self.parse(raw_payload)
+        return msg is not None, error
+
+    def process_message(self, raw_payload: dict[str, Any]) -> InternalDetection | None:
+        """The base pipeline, validating and normalizing from one parse of the message.
+
+        The JSON-to-protobuf parse is most of a report's cost on the way in, and
+        `validate` and `normalize` would each make the same one.
+        """
+        msg, error = self.parse(raw_payload)
+        if msg is None:
+            base.logger.warning(f"Message rejected by {self.__class__.__name__}: {error}")
+            return None
+        return self.process_parsed(raw_payload, msg)
+
+    def process_parsed(
+        self, raw_payload: dict[str, Any], msg: SapientMessage
+    ) -> InternalDetection | None:
+        """`process_message` of a payload `parse` has already accepted, as `msg`.
+
+        For a caller that validates a report on arrival and normalizes it later: the
+        parse it kept stands for the one this would make, so it is not made again.
+        """
+        try:
+            return self._normalize(raw_payload, msg)
+        except Exception as e:
+            base.logger.error(f"Normalization failed in {self.__class__.__name__}: {e!s}")
+            return None
+
+    def parse(self, raw_payload: dict[str, Any]) -> tuple[SapientMessage | None, str]:
+        """The parsed detection report, or None and why the payload is refused.
+
+        What `validate` checks: a SAPIENT message the schema takes, unknown fields
+        refused, whose content is a detection report with a location.
+        """
         if "sapientMessage" not in raw_payload:
-            return False, "Missing 'sapientMessage' root dictionary key."
+            return None, "Missing 'sapientMessage' root dictionary key."
 
         try:
             msg = SapientMessage()
@@ -124,17 +160,17 @@ class SapientValidator(ProtocolValidator):
             # Check the 'oneof' field instead of checking for the message type directly
             if msg.WhichOneof("content") != "detection_report":
                 return (
-                    False,
+                    None,
                     f"Valid SAPIENT message, but content is {msg.WhichOneof('content')} (expected detection_report).",
                 )
 
             if not msg.detection_report.HasField("location_oneof"):
-                return False, "DetectionReport missing required location_oneof block."
+                return None, "DetectionReport missing required location_oneof block."
 
-            return True, ""
+            return msg, ""
 
         except ParseError as e:
-            return False, f"Protobuf schema violation: {e}"
+            return None, f"Protobuf schema violation: {e}"
 
     def _range_bearing_to_wgs84(
         self, node_id: str, rb: RangeBearing
@@ -176,6 +212,10 @@ class SapientValidator(ProtocolValidator):
     def normalize(self, raw_payload: dict[str, Any]) -> InternalDetection:
         msg = SapientMessage()
         ParseDict(raw_payload["sapientMessage"], msg)
+        return self._normalize(raw_payload, msg)
+
+    def _normalize(self, raw_payload: dict[str, Any], msg: SapientMessage) -> InternalDetection:
+        """`normalize` of a message already parsed from `raw_payload`."""
         report = msg.detection_report
         dt = msg.timestamp.ToDatetime().replace(tzinfo=timezone.utc)
 
@@ -224,9 +264,29 @@ class SapientValidator(ProtocolValidator):
             # raw dict, which ParseDict also accepts in snake_case.
             raw_metadata={
                 "original_envelope": raw_payload,
-                "original_report": MessageToDict(report, preserving_proto_field_name=False),
+                "original_report": _report_fields(report),
             },
         )
+
+
+def _report_fields(report) -> dict[str, Any]:
+    """What sources read of a detection report, as `MessageToDict` renders it.
+
+    The object id, the report id and the object info (where a swarm count is), each
+    only when the report sets it, under their JSON names. Rendering the whole report
+    was a large part of reading one, for fields nothing reads. Each object info entry is
+    rendered by `MessageToDict` itself, so its float error reads as it always did.
+    """
+    out: dict[str, Any] = {}
+    if report.HasField("object_id"):
+        out["objectId"] = report.object_id
+    if report.HasField("report_id"):
+        out["reportId"] = report.report_id
+    if report.object_info:
+        out["objectInfo"] = [
+            MessageToDict(info, preserving_proto_field_name=False) for info in report.object_info
+        ]
+    return out
 
 
 def _finite(value) -> bool:

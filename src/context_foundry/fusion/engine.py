@@ -15,7 +15,7 @@ rule, so both fuse the same way.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from stonesoup.types.prediction import Prediction
@@ -52,6 +52,15 @@ def sensor_ids(detections) -> str:
     return ", ".join(sorted(str(node_id) for node_id in ids if node_id)) or "an unnamed sensor"
 
 
+def _unplace(at_time: dict, when, track) -> None:
+    """Take `track` from the tracks placed at `when`, and the time when none is left."""
+    placed = at_time.get(when)
+    if placed is not None:
+        placed.discard(track)
+        if not placed:
+            del at_time[when]
+
+
 @dataclass
 class EventResult:
     """What one event did.
@@ -81,6 +90,11 @@ class FusionEngine:
     `future_horizon_seconds` is for a live run, measured against the `now` its caller
     passes; a replay, or a stream of records carrying their sensors' own event_time,
     passes no `now` and keeps its own timestamps throughout.
+
+    The tracker says what each `process_async_event` changed, as sets: `touched`, the
+    tracks it appended a state to or started; `started`, those it started; and
+    `dropped_ids`, the ids of those it dropped. The engine reads only those tracks, not
+    every live one, to find what to publish and what to forget.
     """
 
     def __init__(
@@ -104,6 +118,7 @@ class FusionEngine:
         # Kept here rather than read from track history: history is capped, and a
         # record must name every report since the previous one, however many.
         self.pending_sources = PendingSources()
+        self._at_time_reset()
 
     def reset(self, tracker: SapientAsynchronousTracker) -> None:
         """Start again with a new tracker: a new scenario, not a continuation."""
@@ -111,6 +126,20 @@ class FusionEngine:
         self._coast_for(tracker)
         self.latest_timestamp = None
         self.pending_sources = PendingSources()
+        self._at_time_reset()
+
+    def _at_time_reset(self) -> None:
+        """Forget which track's state is at which time, until the next event.
+
+        Each live track's state time (by id) and the tracks at each time, kept from what
+        every event touches, as a state changes only when an event touches its track.
+        The first event for a tracker (after construction, `reset`, or `tracker` assigned
+        another) takes them from every live track and forgets the publish memory of
+        every track not live; later events take what the tracker says changed.
+        """
+        self._time_of: dict = {}
+        self._at_time: dict = {}
+        self._mapped = None
 
     def _coast_for(self, tracker: SapientAsynchronousTracker) -> None:
         """Coast every unmatched track each event only if predicted states can be published.
@@ -171,27 +200,82 @@ class FusionEngine:
                 detection.timestamp = mark
 
         fed = set(detections)
-        # By identity, holding each track so no new one can reuse its address.
-        held_before = {id(track): track for track in self.tracker.tracks}
-        active = list(self.tracker.process_async_event(mark, fed))
-        self._note_sources(fed, held_before, reported)
+        confirmed = self.tracker.process_async_event(mark, fed)
+        active = list(confirmed)
+        self._note_sources(fed, reported)
+        first = self._mapped is not self.tracker
+        at_mark = self._tracks_at(mark, first)
         published = []
         sources = {}
         for track in active:
             # Only a track this event updated, and only when the publish rule lets it
             # out (by default: a state a sensor report made, at most once per track per
-            # window), so tracks that have not changed are not sent again.
-            if track.state.timestamp == mark and self.publish_policy.should_publish(track, mark):
+            # window), so tracks that have not changed are not sent again. A track whose
+            # state is at the mark is one this event touched, or one an earlier event at
+            # the same time touched: `at_mark` holds both, kept without reading a state.
+            if track in at_mark and self.publish_policy.should_publish(track, mark):
                 published.append((track, self.augmentor.extract_tactical_track(track)))
                 # Taken whether or not the caller writes the record: a rebuild's
                 # re-read publishes nothing, and its sources are behind it.
                 sources[str(track.id)] = self.pending_sources.take(track.id)
-        self.publish_policy.forget_all_but(t.id for t in active)
-        # Tentative tracks keep theirs: their seed is named once they are published.
-        self.pending_sources.forget_all_but(t.id for t in self.tracker.tracks)
+        if not first:
+            # What a scan of the live tracks would let go: the ids dropped, but for one a
+            # track started in this event took again, kept for the publish memory only
+            # when that track is already confirmed, as the memory keeps confirmed ones.
+            dropped, started = self.tracker.dropped_ids, self.tracker.started
+            if dropped:
+                self.publish_policy.forget(dropped - {t.id for t in started if t in confirmed})
+                for track_id in dropped - {t.id for t in started}:
+                    self.pending_sources.forget(track_id)
+        else:
+            self.publish_policy.forget_all_but(t.id for t in active)
+            # Tentative tracks keep theirs: their seed is named once they are published.
+            self.pending_sources.forget_all_but(t.id for t in self.tracker.tracks)
         return EventResult(mark=mark, published=published, active=active, sources=sources)
 
-    def _note_sources(self, fed: set, held_before: dict, reported: dict) -> None:
+    def _tracks_at(self, mark, first: bool) -> set:
+        """The live tracks whose state is at `mark`.
+
+        Kept from what the tracker says each event changed: the ids it dropped leave,
+        then the tracks it touched are placed at their state's time; a dropped id a
+        started track took again is placed anew. The first event for a tracker places
+        every live track, so tracks it was given before are found too.
+        """
+        tracker, time_of, at_time = self.tracker, self._time_of, self._at_time
+        if first:
+            time_of.clear()
+            at_time.clear()
+            self._mapped = tracker
+            changed = tracker.tracks
+        else:
+            for track_id in tracker.dropped_ids:
+                was = time_of.pop(track_id, None)
+                if was is not None:
+                    _unplace(at_time, *was)
+            # Only live ones: pruning, after coasting, can drop a track the event touched.
+            live = tracker.tracks
+            changed = [track for track in tracker.touched if track in live]
+        for track in changed:
+            when = track.state.timestamp
+            was = time_of.get(track.id)
+            if was is not None:
+                if was[1] is track and was[0] == when:
+                    continue
+                _unplace(at_time, *was)
+            time_of[track.id] = (when, track)
+            at_time.setdefault(when, set()).add(track)
+        # A backstop: a time before the newest less the late tolerance is never a mark
+        # again, so what is still placed there goes, should a drop have been missed.
+        if len(at_time) > 64:
+            oldest = self.latest_timestamp - timedelta(seconds=self.late_tolerance_seconds + 1)
+            for when in [w for w in at_time if w < oldest]:
+                for track in at_time.pop(when):
+                    was = time_of.get(track.id)
+                    if was is not None and was[1] is track:
+                        del time_of[track.id]
+        return at_time.get(mark, set())
+
+    def _note_sources(self, fed: set, reported: dict) -> None:
         """Record the report each held track took in this event, if any.
 
         A track updated from one of `fed` holds an Update whose hypothesis carries the
@@ -202,16 +286,15 @@ class FusionEngine:
 
         Only the tracks the event touched (`tracker.touched`: updated, coasted or
         started) are looked at: any other live track holds the state an earlier event
-        left, whose detection is not one of `fed`. A tracker that does not say which it
-        touched has every live track looked at.
+        left, whose detection is not one of `fed`. A new track is one the tracker says
+        the event started (`tracker.started`).
         """
         live = self.tracker.tracks
-        touched = getattr(self.tracker, "touched", None)
-        for track in live if touched is None else touched:
+        for track in self.tracker.touched:
             if track not in live:
                 continue
             state = track.state
-            if held_before.get(id(track)) is not track:
+            if track in self.tracker.started:
                 # A new track, possibly under the id of one just dropped.
                 self.pending_sources.forget(track.id)
                 if not isinstance(state, (Update, Prediction)):

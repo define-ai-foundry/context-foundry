@@ -104,16 +104,28 @@ class _ResettableEventsSource:
         self.calls = 0
 
 
+def _say_changes(tracker, before):
+    """What the engine asks a tracker after an event, worked out by scanning its tracks:
+    every live track touched, the new ones started, the gone ones' ids dropped."""
+    now = set(tracker.tracks)
+    tracker.touched = now
+    tracker.started = now - before
+    tracker.dropped_ids = {track.id for track in before - now}
+
+
 class _FakeTracker:
     def __init__(self, tracks_by_call):
         self._tracks_by_call = tracks_by_call
         self.calls = 0
         self.tracks = []
+        _say_changes(self, set())
 
     def process_async_event(self, timestamp, detection_group):
+        before = set(self.tracks)
         tracks = self._tracks_by_call[min(self.calls, len(self._tracks_by_call) - 1)]
         self.calls += 1
         self.tracks = list(tracks)
+        _say_changes(self, before)
         return tracks
 
 
@@ -138,9 +150,14 @@ def _fake_track(track_id, timestamp, tactical_kwargs=None):
     if tactical_kwargs:
         kwargs.update(tactical_kwargs)
     tactical = TacticalTrack(**kwargs)
-    return SimpleNamespace(
-        id=tactical.track_id, state=SimpleNamespace(timestamp=timestamp), tactical=tactical
-    )
+    return _Track(tactical.track_id, SimpleNamespace(timestamp=timestamp), tactical)
+
+
+class _Track:
+    """A stand-in track, hashed by identity as a real one is."""
+
+    def __init__(self, track_id, state, tactical):
+        self.id, self.state, self.tactical = track_id, state, tactical
 
 
 @pytest.fixture(autouse=True)
@@ -792,10 +809,13 @@ class _EchoTracker:
         self.track_id = track_id
         self.seen = []
         self.tracks = []
+        _say_changes(self, set())
 
     def process_async_event(self, timestamp, detection_group):
+        before = set(self.tracks)
         self.seen.append(timestamp)
         self.tracks = [_fake_track(self.track_id, timestamp)]
+        _say_changes(self, before)
         return self.tracks
 
 
@@ -1885,11 +1905,14 @@ class _DetectionStampedTracker:
         self.track_id = track_id
         self.seen = []
         self.tracks = []
+        _say_changes(self, set())
 
     def process_async_event(self, timestamp, detection_group):
+        before = set(self.tracks)
         self.seen.append(timestamp)
         stamp = next(iter(detection_group)).timestamp
         self.tracks = [_fake_track(self.track_id, stamp)]
+        _say_changes(self, before)
         return self.tracks
 
 
