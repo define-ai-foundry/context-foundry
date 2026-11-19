@@ -259,6 +259,16 @@ def test_the_shared_models_are_bounded():
     from context_foundry.fusion import measurement
 
     measurement._SHARED_MODELS.clear()
+    for k in range(measurement.MAX_SHARED_MODELS + 10):
+        constant = {"geometric_error": {"variation_type": "constant", "base_m": 1.0 + k}}
+        measurement.measurement_model_for(constant, (0.0, 0.0, 0.0), (1.0, 0.0, 0.0))
+    assert len(measurement._SHARED_MODELS) <= measurement.MAX_SHARED_MODELS
+
+
+def test_an_error_that_grows_with_range_is_never_shared_nor_kept():
+    from context_foundry.fusion import measurement
+
+    measurement._SHARED_MODELS.clear()
     growing = {
         "geometric_error": {
             "variation_type": "linear_with_range",
@@ -267,6 +277,24 @@ def test_the_shared_models_are_bounded():
         },
         "range_m": 10000.0,
     }
-    for k in range(measurement.MAX_SHARED_MODELS + 10):
-        measurement.measurement_model_for(growing, (0.0, 0.0, 0.0), (float(k), 0.0, 0.0))
-    assert len(measurement._SHARED_MODELS) <= measurement.MAX_SHARED_MODELS
+    for k in range(50):
+        measurement.position_measurement(
+            growing, (0.0, 0.0, 0.0), (100.0 * k, 0.0, 0.0), k % 2 == 0
+        )
+    assert measurement._SHARED_MODELS == {}
+
+
+def test_a_shared_model_cannot_be_changed_through_another():
+    from context_foundry.fusion import measurement
+
+    measurement._SHARED_MODELS.clear()
+    constant = {"geometric_error": {"variation_type": "constant", "base_m": 35.0}}
+    _, full = measurement.position_measurement(constant, (0.0, 0.0, 0.0), (1000.0, 0.0, 9.0), True)
+    _, horizontal = measurement.position_measurement(
+        constant, (0.0, 0.0, 0.0), (1000.0, 0.0, 0.0), False
+    )
+    assert not np.shares_memory(horizontal.noise_covar, full.noise_covar)
+    for model in (full, horizontal):
+        assert not model.noise_covar.flags.writeable
+        with pytest.raises(ValueError):
+            model.noise_covar[0, 0] *= 2

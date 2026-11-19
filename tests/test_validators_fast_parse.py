@@ -180,6 +180,8 @@ ODD_TIMESTAMPS = [
     "2026-11-15T02:45:00Zjunk",
     "2026-11-15 02:45:00Z",
     "yesterday",
+    "2026-\uff11\uff11-15T02:45:00Z",
+    "\u0662026-11-15T02:45:00Z",
 ]
 
 
@@ -251,3 +253,55 @@ def test_bytes_maps_and_other_well_known_types_end_as_parsedict_ends_them(kind, 
         cls, lambda p, m: ParseDict(p, m, ignore_unknown_fields=False), payload
     )
     assert fallbacks == [1]
+
+
+@pytest.mark.parametrize("stamp", ODD_TIMESTAMPS)
+def test_any_other_timestamp_is_parsedicts_alone(stamp):
+    # Not tried by FromJsonString first: the whole payload goes to ParseDict once.
+    from google.protobuf.timestamp_pb2 import Timestamp
+
+    if fast_parse._TS.fullmatch(stamp) is None:
+        with pytest.raises(fast_parse._Unsure):
+            fast_parse._timestamp(Timestamp(), stamp)
+
+
+NUMPY = {
+    "a numpy float32": _report(detectionConfidence=__import__("numpy").float32(0.5)),
+    "a numpy float64": _report(detectionConfidence=__import__("numpy").float64(0.25)),
+    "a numpy int64": _report(
+        classification=[
+            {"type": "a", "subClass": [{"type": "b", "level": __import__("numpy").int64(2)}]}
+        ]
+    ),
+}
+
+
+@pytest.mark.parametrize("payload", NUMPY.values(), ids=NUMPY.keys())
+def test_numpy_numbers_are_read_by_the_fast_path_as_parsedict_reads_them(payload, fallbacks):
+    assert _outcome(fast_parse.parse_dict, payload) == _outcome(_slow, payload)
+    assert fallbacks == []
+
+
+@pytest.mark.parametrize(
+    "value",
+    [__import__("numpy").bool_(True), __import__("numpy").float32("nan")],
+    ids=["a numpy bool for an integer", "a numpy NaN"],
+)
+def test_numpy_values_parsedict_reads_its_own_way_end_as_parsedict_ends_them(value, fallbacks):
+    import numpy as np
+
+    payload = (
+        _report(classification=[{"type": "a", "subClass": [{"type": "b", "level": value}]}])
+        if isinstance(value, np.bool_)
+        else _report(detectionConfidence=value)
+    )
+    assert _outcome(fast_parse.parse_dict, payload) == _outcome(_slow, payload)
+    assert fallbacks == [1]
+
+
+def test_each_fallback_is_counted_and_logged(caplog):
+    before = fast_parse.fallbacks()
+    with caplog.at_level("DEBUG", logger=fast_parse.__name__):
+        _outcome(fast_parse.parse_dict, _report(colourOfSky="blue"))
+    assert fast_parse.fallbacks() == before + 1
+    assert any("ParseDict reads a payload" in r.message for r in caplog.records)

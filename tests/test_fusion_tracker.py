@@ -2457,3 +2457,26 @@ def test_a_new_track_set_is_never_taken_for_the_one_a_cache_was_made_from(monkey
     tracker._tracks = swapped
     assert tracker.confirmed_tracks() == {other}
     assert set(tracker._by_id()) == {other.id}
+
+
+def test_a_keyed_dict_counts_no_change_that_is_not_one():
+    d = _KeyedDict(a=1, b=2)
+    before = d.version
+    d.pop("missing", None)
+    d.update(a=3)
+    d |= {"b": 4}
+    _KeyedDict().clear()
+    d["a"] = 5
+    assert d.version == before
+
+
+def test_a_replaced_track_set_leaves_no_cache_holding_the_old_one():
+    tracker = SapientAsynchronousTracker(confirm_hits=1)
+    tracker.process_async_event(T0, {_det(0.0, 0.0, 0.0, T0)})
+    tracker._tentative["someone"] = [1, T0, 30.0]
+    tracker.confirmed_tracks()
+    tracker._by_id()
+    old = tracker._tracks
+    tracker.tracks = set(old)
+    assert tracker._confirmed is None and tracker._tracks_by_id_of is None
+    assert tracker.confirmed_tracks() == _confirmed_by_scan(tracker)

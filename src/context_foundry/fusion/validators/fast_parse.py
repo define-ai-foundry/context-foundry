@@ -6,18 +6,22 @@
 `ParseDict` is pure Python and checks every value through several layers; on a busy feed
 it is most of what reading a report costs. `parse_dict` fills the message straight from
 the descriptor for the shapes it knows: fields by their proto or JSON name, nested
-messages, repeated fields, enums by name, strings, bools, integers given as integers,
-floats given as numbers, and `Timestamp` in UTC with Z. Anything else, and anything `ParseDict` might
-refuse or read differently (an unknown field, a null, a field given twice, two members of
-one oneof, a number where a string belongs, a map, bytes, another well-known type, a
-lone surrogate, a float out of range), sends the whole payload to `ParseDict` instead, so
-the message, or the `ParseError`, is always the one `ParseDict` gives.
+messages, repeated fields, enums by name, strings, bools, integers given as integers (numpy's
+too), floats given as numbers, and `Timestamp` in UTC with Z and ASCII digits. Anything else,
+and anything `ParseDict` might refuse or read differently (an unknown field, a null, a field
+given twice, two members of one oneof, a number where a string belongs, a map, bytes, another
+well-known type, a lone surrogate, a float out of range, another timestamp form), sends the
+whole payload to `ParseDict` instead, so the message, or the `ParseError`, is always the one
+`ParseDict` gives. Each such payload is counted (`fallbacks`) and logged at debug level, so a
+feed that the fast path no longer reads shows.
 """
 
 from __future__ import annotations
 
 import datetime
+import logging
 import math
+import numbers
 import re
 from typing import Any
 
@@ -51,6 +55,17 @@ _PLANS: dict[Any, dict[str, tuple]] = {}
 _MESSAGE, _REPEATED_MESSAGE, _TIMESTAMP_FIELD, _SCALAR, _REPEATED_SCALAR, _UNSURE = range(6)
 
 
+logger = logging.getLogger(__name__)
+
+# Payloads handed to ParseDict since the process started.
+_fallbacks = 0
+
+
+def fallbacks() -> int:
+    """How many payloads `parse_dict` has handed to `ParseDict` since the process started."""
+    return _fallbacks
+
+
 def parse_dict(value: Any, message: Message) -> Message:
     """`ParseDict(value, message)` with unknown fields refused, faster for plain shapes.
 
@@ -58,9 +73,12 @@ def parse_dict(value: Any, message: Message) -> Message:
     `ParseDict` reads `value` into it, so the result or the `ParseError` raised is
     `ParseDict`'s.
     """
+    global _fallbacks
     try:
         _fill(message, value)
-    except (_Unsure, TypeError, ValueError, OverflowError):
+    except (_Unsure, TypeError, ValueError, OverflowError) as e:
+        _fallbacks += 1
+        logger.debug("parse_dict: ParseDict reads a payload the fast path does not (%r)", e)
         message.Clear()
         ParseDict(value, message, ignore_unknown_fields=False)
     return message
@@ -131,18 +149,21 @@ def _fill(message: Message, value: Any) -> None:
             raise _Unsure
 
 
-# The one timestamp form read here: UTC with Z and up to nine fractional digits. Anything
-# else goes to protobuf's own FromJsonString.
-_TS = re.compile(r"(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(?:\.(\d{1,9}))?Z")
+# The one timestamp form read here: UTC with Z, up to nine fractional digits, ASCII digits only
+# (\d would also take digits strptime refuses, such as fullwidth ones). Anything else is
+# ParseDict's.
+_TS = re.compile(
+    r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,9}))?Z"
+)
 _EPOCH = datetime.datetime(1970, 1, 1)
 
 
 def _timestamp(message: Message, text: str) -> None:
-    """`message.FromJsonString(text)`, by its own arithmetic, for the plain UTC form."""
+    """`message.FromJsonString(text)`, by its own arithmetic, for the plain UTC form; any other
+    form is ParseDict's to read, once."""
     match = _TS.fullmatch(text)
     if match is None:
-        message.FromJsonString(text)
-        return
+        raise _Unsure
     year, month, day, hour, minute, second, fraction = match.groups()
     try:
         moment = datetime.datetime(
@@ -189,7 +210,8 @@ def _string(value):
 
 
 def _float64(value):
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    # Any real number, numpy's included, as ParseDict takes it with float(); not a bool.
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
         raise _Unsure
     value = float(value)
     if math.isnan(value) or math.isinf(value):
@@ -205,9 +227,10 @@ def _float32(value):
 
 
 def _integer(value):
-    if isinstance(value, bool) or not isinstance(value, int):
+    # Any integer, numpy's included, as ParseDict takes it with int(); not a bool.
+    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
         raise _Unsure
-    return value
+    return int(value)
 
 
 def _boolean(value):

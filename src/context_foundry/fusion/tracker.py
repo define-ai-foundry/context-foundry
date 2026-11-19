@@ -701,13 +701,15 @@ class _KeyedDict(dict):
         super().__delitem__(key)
         self.version += 1
 
-    def pop(self, *args):
-        self.version += 1
-        return super().pop(*args)
+    def pop(self, key, *default):
+        if key in self:
+            self.version += 1
+        return super().pop(key, *default)
 
     def popitem(self):
+        item = super().popitem()
         self.version += 1
-        return super().popitem()
+        return item
 
     def setdefault(self, key, default=None):
         if key not in self:
@@ -715,16 +717,23 @@ class _KeyedDict(dict):
         return super().setdefault(key, default)
 
     def update(self, *args, **kwargs):
-        self.version += 1
+        # Keys only come, never go: a change of keys is a longer dict.
+        before = len(self)
         super().update(*args, **kwargs)
+        if len(self) != before:
+            self.version += 1
 
     def clear(self):
-        self.version += 1
+        if self:
+            self.version += 1
         super().clear()
 
     def __ior__(self, other):
-        self.version += 1
-        return super().__ior__(other)
+        before = len(self)
+        result = super().__ior__(other)
+        if len(self) != before:
+            self.version += 1
+        return result
 
 
 class SapientAsynchronousTracker:
@@ -890,7 +899,7 @@ class SapientAsynchronousTracker:
         # into, for sensors whose objectId is stable. Pruned with the tracks.
         self._object_tracks = {}
         # Track id -> (timestamp, swarm count) its detections gave within the window.
-        self._swarm_counts: dict[str, deque] = {}
+        self._swarm_counts: dict[str, _MaxQueue] = {}
         # Track id -> (timestamp, class kind) its detections gave within the window.
         self._class_kinds: dict[str, _CountQueue] = {}
         # Track id -> (object key, time) of the latest CoT uid's event the track took.
@@ -1553,6 +1562,9 @@ class SapientAsynchronousTracker:
     @tracks.setter
     def tracks(self, tracks) -> None:
         self._tracks = tracks if isinstance(tracks, _TrackSet) else _TrackSet(tracks)
+        # Caches made from the set replaced would keep it, and every track in it, alive.
+        self._confirmed = None
+        self._tracks_by_id_of = None
 
     def _by_id(self) -> dict:
         """Live track id -> track. Live ids are unique (`_seed_id`), so one map holds them.
