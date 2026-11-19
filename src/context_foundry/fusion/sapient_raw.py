@@ -20,12 +20,13 @@ import time
 import uuid
 from datetime import datetime
 
-from google.protobuf.json_format import MessageToDict, ParseDict
+from google.protobuf.json_format import MessageToDict
 
 from sapient_msg.bsi_flex_335_v2_0.sapient_message_pb2 import SapientMessage
 
 from .schemas import TacticalTrack
 from .timeutil import as_utc
+from .validators.fast_parse import parse_dict
 from .validators.sapient import CLASS_PATH_SEPARATOR
 
 SCHEMA = "sapient-raw:1.0"
@@ -189,7 +190,7 @@ def track_message(
     }
     # Round-trip: rejects anything the definition does not declare and writes the
     # timestamp the way the JSON mapping does, the form event_time must repeat.
-    return MessageToDict(ParseDict(message, SapientMessage()), preserving_proto_field_name=True)
+    return MessageToDict(parse_dict(message, SapientMessage()), preserving_proto_field_name=True)
 
 
 def track_record(

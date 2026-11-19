@@ -92,6 +92,47 @@ MAX_COAST_SECONDS = 45.0
 # radar's is about 18 s), short enough that a swarm that splits shows it within a minute.
 SWARM_COUNT_WINDOW_SECONDS = 60.0
 
+
+class _MaxQueue:
+    """A first-in, first-out queue of (time, value) that knows its largest value.
+
+    `_peaks` keeps, in queue order, each entry no later entry is at least as large as, with
+    its position, so the largest is the first of them and each entry joins and leaves it
+    at most once: the cost per entry stays constant however many the window holds. It
+    counts positions, not times, so entries out of time order are kept as they come.
+    """
+
+    __slots__ = ("_items", "_peaks", "_popped", "_pushed")
+
+    def __init__(self) -> None:
+        self._items: deque = deque()
+        self._peaks: deque = deque()
+        self._pushed = 0
+        self._popped = 0
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def append(self, time, value) -> None:
+        while self._peaks and self._peaks[-1][1] <= value:
+            self._peaks.pop()
+        self._peaks.append((self._pushed, value))
+        self._items.append((time, value))
+        self._pushed += 1
+
+    def popleft(self) -> None:
+        if self._peaks[0][0] == self._popped:
+            self._peaks.popleft()
+        self._items.popleft()
+        self._popped += 1
+
+    def oldest_time(self):
+        return self._items[0][0]
+
+    def largest(self):
+        return self._peaks[0][1]
+
+
 # Track metadata keys the tracker writes from its own per-hit bookkeeping, for the
 # augmentor's threat judgement. No detection carries them, so Stone Soup's merge of a
 # hit's metadata into the track never overwrites them.
@@ -606,6 +647,95 @@ class _TrackSet(set):
         return self
 
 
+class _CountQueue:
+    """A first-in, first-out queue of (time, value) that knows which values it holds.
+
+    A count per value, raised as an entry joins and lowered as it leaves, so the values
+    held are known without a pass over the window, whatever order the times come in.
+    """
+
+    __slots__ = ("_counts", "_items")
+
+    def __init__(self) -> None:
+        self._items: deque = deque()
+        self._counts: dict = {}
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def append(self, time, value) -> None:
+        self._items.append((time, value))
+        self._counts[value] = self._counts.get(value, 0) + 1
+
+    def popleft(self) -> None:
+        _, value = self._items.popleft()
+        left = self._counts[value] - 1
+        if left:
+            self._counts[value] = left
+        else:
+            del self._counts[value]
+
+    def oldest_time(self):
+        return self._items[0][0]
+
+    def values(self):
+        """The distinct values held: a view, not a copy."""
+        return self._counts.keys()
+
+
+class _KeyedDict(dict):
+    """A dict counting every change to its keys, as `_TrackSet` counts its tracks.
+
+    Its values may change in place without counting: only which keys it holds is
+    vouched for, which is what a set made from its keys needs to stay true.
+    """
+
+    version = 0
+
+    def __setitem__(self, key, value):
+        if key not in self:
+            self.version += 1
+        super().__setitem__(key, value)
+
+    def __delitem__(self, key):
+        super().__delitem__(key)
+        self.version += 1
+
+    def pop(self, key, *default):
+        if key in self:
+            self.version += 1
+        return super().pop(key, *default)
+
+    def popitem(self):
+        item = super().popitem()
+        self.version += 1
+        return item
+
+    def setdefault(self, key, default=None):
+        if key not in self:
+            self.version += 1
+        return super().setdefault(key, default)
+
+    def update(self, *args, **kwargs):
+        # Keys only come, never go: a change of keys is a longer dict.
+        before = len(self)
+        super().update(*args, **kwargs)
+        if len(self) != before:
+            self.version += 1
+
+    def clear(self):
+        if self:
+            self.version += 1
+        super().clear()
+
+    def __ior__(self, other):
+        before = len(self)
+        result = super().__ior__(other)
+        if len(self) != before:
+            self.version += 1
+        return result
+
+
 class SapientAsynchronousTracker:
     """Fuses asynchronous multi-sensor detections into 9D tracks.
 
@@ -669,7 +799,10 @@ class SapientAsynchronousTracker:
         self.coast_unmatched = coast_unmatched
         # Tentative track id -> [detections gathered, time of its first detection, its
         # confirmation window in seconds].
-        self._tentative = {}
+        self._tentative = _KeyedDict()
+        # The confirmed tracks as last made, with the track set and tentative map, and their
+        # versions, they were made from (confirmed_tracks).
+        self._confirmed = None
         # nodeId -> the gaps, in seconds, between the sensor's last reports of one object
         # id: its revisit, from REVISIT_SAMPLES of them. See _confirmation_window.
         self._revisit_gaps = {}
@@ -766,9 +899,9 @@ class SapientAsynchronousTracker:
         # into, for sensors whose objectId is stable. Pruned with the tracks.
         self._object_tracks = {}
         # Track id -> (timestamp, swarm count) its detections gave within the window.
-        self._swarm_counts: dict[str, deque] = {}
+        self._swarm_counts: dict[str, _MaxQueue] = {}
         # Track id -> (timestamp, class kind) its detections gave within the window.
-        self._class_kinds: dict[str, deque] = {}
+        self._class_kinds: dict[str, _CountQueue] = {}
         # Track id -> (object key, time) of the latest CoT uid's event the track took.
         self._cot_uids: dict[str, tuple] = {}
         # Track id -> its state as its latest detection left it, before any coasting.
@@ -1198,9 +1331,30 @@ class SapientAsynchronousTracker:
 
     def confirmed_tracks(self):
         """The live tracks that have passed confirmation; tentative ones are held back."""
-        if not self._tentative:
-            return set(self.tracks)
-        return {track for track in self.tracks if self._id(track) not in self._tentative}
+        tracks, tentative = self._tracks, self._tentative
+        if not tentative:
+            return set(tracks)
+        if not isinstance(tentative, _KeyedDict):
+            return {track for track in tracks if self._id(track) not in tentative}
+        # Made again only once a track or a tentative id has come or gone since, or either is
+        # another object than it was made from: held, not by id, as a dropped object's id can
+        # come back on a new one.
+        kept = self._confirmed
+        if (
+            kept is None
+            or kept[0] is not tracks
+            or kept[1] != tracks.version
+            or kept[2] is not tentative
+            or kept[3] != tentative.version
+        ):
+            kept = self._confirmed = (
+                tracks,
+                tracks.version,
+                tentative,
+                tentative.version,
+                {track for track in tracks if self._id(track) not in tentative},
+            )
+        return set(kept[4])
 
     def _count_confirmation_hit(self, track):
         """Counts a detection towards a tentative track's confirmation.
@@ -1408,6 +1562,9 @@ class SapientAsynchronousTracker:
     @tracks.setter
     def tracks(self, tracks) -> None:
         self._tracks = tracks if isinstance(tracks, _TrackSet) else _TrackSet(tracks)
+        # Caches made from the set replaced would keep it, and every track in it, alive.
+        self._confirmed = None
+        self._tracks_by_id_of = None
 
     def _by_id(self) -> dict:
         """Live track id -> track. Live ids are unique (`_seed_id`), so one map holds them.
@@ -1417,14 +1574,16 @@ class SapientAsynchronousTracker:
         changed in place by anything else, than the map was made for.
         """
         tracks = self._tracks
-        if self._tracks_by_id_of != (id(tracks), tracks.version):
+        made_for = self._tracks_by_id_of
+        if made_for is None or made_for[0] is not tracks or made_for[1] != tracks.version:
             self._tracks_by_id = {track.id: track for track in tracks}
             self._by_id_synced()
         return self._tracks_by_id
 
     def _by_id_synced(self) -> None:
         """The id map is up to date with the tracks as they are now."""
-        self._tracks_by_id_of = (id(self._tracks), self._tracks.version)
+        # The set itself, not its id: a set dropped and another made could share an id.
+        self._tracks_by_id_of = (self._tracks, self._tracks.version)
 
     def _id(self, track):
         """The track's id, from `_track_ids` when the tracker made the track."""
@@ -1636,14 +1795,18 @@ class SapientAsynchronousTracker:
         largest in place. Once the window holds no count the track has none, so the
         augmentor falls back to its default rather than an old count carried forward.
         """
-        seen = self._swarm_counts.setdefault(track.id, deque())
+        seen = self._swarm_counts.get(track.id)
+        if seen is None:
+            seen = self._swarm_counts[track.id] = _MaxQueue()
         count = (detection.metadata or {}).get("swarm_count")
         if isinstance(count, int) and not isinstance(count, bool):
-            seen.append((timestamp, count))
-        while seen and (timestamp - seen[0][0]).total_seconds() > SWARM_COUNT_WINDOW_SECONDS:
+            seen.append(timestamp, count)
+        while (
+            seen and (timestamp - seen.oldest_time()).total_seconds() > SWARM_COUNT_WINDOW_SECONDS
+        ):
             seen.popleft()
         if seen:
-            track.metadata["swarm_count"] = max(c for _, c in seen)
+            track.metadata["swarm_count"] = seen.largest()
         else:
             track.metadata.pop("swarm_count", None)
 
@@ -1655,17 +1818,21 @@ class SapientAsynchronousTracker:
         "animal" or "ground", so a single confident sighting of anything else, a drone
         among them, takes it away for the window's length.
         """
-        seen = self._class_kinds.setdefault(track.id, deque())
+        seen = self._class_kinds.get(track.id)
+        if seen is None:
+            seen = self._class_kinds[track.id] = _CountQueue()
         kind = class_kind(detection.metadata or {})
         if kind is not None:
-            seen.append((timestamp, kind))
-        while seen and (timestamp - seen[0][0]).total_seconds() > CLASS_KIND_WINDOW_SECONDS:
+            seen.append(timestamp, kind)
+        while seen and (timestamp - seen.oldest_time()).total_seconds() > CLASS_KIND_WINDOW_SECONDS:
             seen.popleft()
-        kinds = {k for _, k in seen}
-        if len(kinds) == 1 and kinds <= {"animal", "ground"}:
-            track.metadata[CLASS_KIND_KEY] = kinds.pop()
-        else:
-            track.metadata.pop(CLASS_KIND_KEY, None)
+        kinds = seen.values()
+        if len(kinds) == 1:
+            (only,) = kinds
+            if only in ("animal", "ground"):
+                track.metadata[CLASS_KIND_KEY] = only
+                return
+        track.metadata.pop(CLASS_KIND_KEY, None)
 
     def _seed_id(self, detection) -> str:
         """A track id fixed by the detection that starts the track, within `id_namespace`.
@@ -1937,11 +2104,11 @@ class SapientAsynchronousTracker:
         self._class_kinds = {
             track_id: seen for track_id, seen in self._class_kinds.items() if track_id in active_ids
         }
-        self._tentative = {
-            track_id: pending
+        self._tentative = _KeyedDict(
+            (track_id, pending)
             for track_id, pending in self._tentative.items()
             if track_id in active_ids
-        }
+        )
         self._declarations = {
             track_id: declared
             for track_id, declared in self._declarations.items()

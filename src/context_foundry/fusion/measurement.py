@@ -145,15 +145,38 @@ def far_end_error(geometric_error, range_m):
     return far
 
 
-def measurement_model_for(sensor_meta, sensor_enu, detection_enu):
-    """The position measurement model of one detection from the sensor that reported it.
+# One model per mapping and constant covariance: a sensor whose error is constant gives each of
+# its detections the same covariance, so they share one model rather than each building its own.
+# A shared covariance is a read-only copy, so no model can change another's. An error that grows
+# with range gives each detection its own covariance and model, as before. The cap is never
+# reached by a feed's own sensors; it bounds one that declares ever-new constant errors.
+MAX_SHARED_MODELS = 1024
+_SHARED_MODELS: dict = {}
 
-    The sensor's declared geometric_error when it has one; otherwise a cautious
-    default for its kind of sensor (default_geometric_error). A sensor fusion knows
-    nothing of gets the unknown-kind default; one whose position is not known gets
-    its error at the far end of its reach (far_end_error), since range and bearing
-    cannot be measured without it.
-    """
+
+def _shared_model(mapping, covar):
+    covar = np.array(covar, dtype=float)
+    covar.setflags(write=False)
+    key = (mapping, covar.shape, covar.tobytes())
+    model = _SHARED_MODELS.get(key)
+    if model is None:
+        if len(_SHARED_MODELS) >= MAX_SHARED_MODELS:
+            _SHARED_MODELS.clear()
+        model = _SHARED_MODELS[key] = LinearGaussian(
+            ndim_state=9, mapping=mapping, noise_covar=covar
+        )
+    return model
+
+
+def _model(mapping, covar, constant):
+    if constant:
+        return _shared_model(mapping, covar)
+    return LinearGaussian(ndim_state=9, mapping=mapping, noise_covar=covar)
+
+
+def _covariance(sensor_meta, sensor_enu, detection_enu):
+    """(constant, covariance) of one detection: constant when it is the same for every detection
+    of the sensor, so its model can be shared."""
     if sensor_meta is None:
         geometric_error = UNKNOWN_SENSOR_GEOMETRIC_ERROR
     else:
@@ -163,7 +186,20 @@ def measurement_model_for(sensor_meta, sensor_enu, detection_enu):
         geometric_error = far_end_error(geometric_error, range_m)
         sensor_enu = detection_enu
     covar = noise_covariance(geometric_error, sensor_enu, detection_enu, range_m)
-    return LinearGaussian(ndim_state=9, mapping=POSITION_MAPPING, noise_covar=covar)
+    return geometric_error["variation_type"] == "constant", covar
+
+
+def measurement_model_for(sensor_meta, sensor_enu, detection_enu):
+    """The position measurement model of one detection from the sensor that reported it.
+
+    The sensor's declared geometric_error when it has one; otherwise a cautious
+    default for its kind of sensor (default_geometric_error). A sensor fusion knows
+    nothing of gets the unknown-kind default; one whose position is not known gets
+    its error at the far end of its reach (far_end_error), since range and bearing
+    cannot be measured without it.
+    """
+    constant, covar = _covariance(sensor_meta, sensor_enu, detection_enu)
+    return _model(POSITION_MAPPING, covar, constant)
 
 
 def position_measurement(sensor_meta, sensor_enu, detection_enu, has_altitude):
@@ -175,11 +211,8 @@ def position_measurement(sensor_meta, sensor_enu, detection_enu, has_altitude):
     it cannot associate with the track the other sensors keep, and a track it
     starts would sit at that made-up height.
     """
-    model = measurement_model_for(sensor_meta, sensor_enu, detection_enu)
+    constant, covar = _covariance(sensor_meta, sensor_enu, detection_enu)
     e, n, u = detection_enu
     if has_altitude:
-        return np.array([[e], [n], [u]]), model
-    horizontal = LinearGaussian(
-        ndim_state=9, mapping=HORIZONTAL_MAPPING, noise_covar=model.noise_covar[:2, :2]
-    )
-    return np.array([[e], [n]]), horizontal
+        return np.array([[e], [n], [u]]), _model(POSITION_MAPPING, covar, constant)
+    return np.array([[e], [n]]), _model(HORIZONTAL_MAPPING, covar[:2, :2], constant)

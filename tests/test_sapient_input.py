@@ -184,9 +184,9 @@ def test_a_parse_made_on_arrival_stands_for_the_readers_own(monkeypatch):
     parsed, error = reader.validator.parse({"sapientMessage": record["message"]})
     assert parsed is not None and error == ""
     calls = []
-    real = sapient_module.ParseDict
+    real = sapient_module.parse_dict
     monkeypatch.setattr(
-        sapient_module, "ParseDict", lambda *a, **k: calls.append(1) or real(*a, **k)
+        sapient_module, "parse_dict", lambda *a, **k: calls.append(1) or real(*a, **k)
     )
     when, node, given = reader.detection(record, parsed=parsed)
     assert calls == [], "the parse it was given is not made again"
