@@ -2439,3 +2439,21 @@ def test_a_count_queue_knows_the_distinct_values_it_holds():
             assert set(q.values()) == {v for _, v in held}
             if held:
                 assert q.oldest_time() == held[0][0]
+
+
+def test_a_new_track_set_is_never_taken_for_the_one_a_cache_was_made_from(monkeypatch):
+    # Every object answering the same id is the worst case of a dropped set's id coming back
+    # on a new one: the caches must look at the objects themselves.
+    monkeypatch.setattr(tracker_module, "id", lambda _obj: 1, raising=False)
+    tracker = SapientAsynchronousTracker(confirm_hits=1)
+    tracker.process_async_event(T0, {_det(0.0, 0.0, 0.0, T0)})
+    tracker._tentative["someone"] = [1, T0, 30.0]
+    before = tracker.confirmed_tracks()
+    tracker._by_id()
+    assert before
+    other = Track([GaussianState(StateVector([9.0] * 9), np.eye(9), timestamp=T0)])
+    swapped = tracker_module._TrackSet([other])
+    swapped.version = tracker._tracks.version
+    tracker._tracks = swapped
+    assert tracker.confirmed_tracks() == {other}
+    assert set(tracker._by_id()) == {other.id}

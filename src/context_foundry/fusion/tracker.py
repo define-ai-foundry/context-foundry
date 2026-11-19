@@ -791,8 +791,8 @@ class SapientAsynchronousTracker:
         # Tentative track id -> [detections gathered, time of its first detection, its
         # confirmation window in seconds].
         self._tentative = _KeyedDict()
-        # The confirmed tracks as last made, and the track and tentative versions they
-        # were made at (confirmed_tracks).
+        # The confirmed tracks as last made, with the track set and tentative map, and their
+        # versions, they were made from (confirmed_tracks).
         self._confirmed = None
         # nodeId -> the gaps, in seconds, between the sensor's last reports of one object
         # id: its revisit, from REVISIT_SAMPLES of them. See _confirmation_window.
@@ -1327,15 +1327,25 @@ class SapientAsynchronousTracker:
             return set(tracks)
         if not isinstance(tentative, _KeyedDict):
             return {track for track in tracks if self._id(track) not in tentative}
-        # Made again only once a track or a tentative id has come or gone since.
-        key = (id(tracks), tracks.version, id(tentative), tentative.version)
+        # Made again only once a track or a tentative id has come or gone since, or either is
+        # another object than it was made from: held, not by id, as a dropped object's id can
+        # come back on a new one.
         kept = self._confirmed
-        if kept is None or kept[0] != key:
+        if (
+            kept is None
+            or kept[0] is not tracks
+            or kept[1] != tracks.version
+            or kept[2] is not tentative
+            or kept[3] != tentative.version
+        ):
             kept = self._confirmed = (
-                key,
+                tracks,
+                tracks.version,
+                tentative,
+                tentative.version,
                 {track for track in tracks if self._id(track) not in tentative},
             )
-        return set(kept[1])
+        return set(kept[4])
 
     def _count_confirmation_hit(self, track):
         """Counts a detection towards a tentative track's confirmation.
@@ -1552,14 +1562,16 @@ class SapientAsynchronousTracker:
         changed in place by anything else, than the map was made for.
         """
         tracks = self._tracks
-        if self._tracks_by_id_of != (id(tracks), tracks.version):
+        made_for = self._tracks_by_id_of
+        if made_for is None or made_for[0] is not tracks or made_for[1] != tracks.version:
             self._tracks_by_id = {track.id: track for track in tracks}
             self._by_id_synced()
         return self._tracks_by_id
 
     def _by_id_synced(self) -> None:
         """The id map is up to date with the tracks as they are now."""
-        self._tracks_by_id_of = (id(self._tracks), self._tracks.version)
+        # The set itself, not its id: a set dropped and another made could share an id.
+        self._tracks_by_id_of = (self._tracks, self._tracks.version)
 
     def _id(self, track):
         """The track's id, from `_track_ids` when the tracker made the track."""
