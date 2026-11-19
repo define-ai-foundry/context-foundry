@@ -228,3 +228,45 @@ def test_the_registered_node_type_picks_the_default_when_no_type_is_given():
     assert default_geometric_error({"node_type": "camera"})["base_m"] == 17.0
     # The manifest's type names a model more precisely than the NodeType.
     assert default_geometric_error({"type": "MDOP doppler", "node_type": "radar"})["base_m"] == 5.0
+
+
+def test_detections_with_one_covariance_share_one_model_and_others_do_not():
+    from context_foundry.fusion import measurement
+
+    measurement._SHARED_MODELS.clear()
+    constant = {"geometric_error": {"variation_type": "constant", "base_m": 35.0}}
+    a = measurement.measurement_model_for(constant, (0.0, 0.0, 0.0), (1000.0, 0.0, 100.0))
+    b = measurement.measurement_model_for(constant, (0.0, 0.0, 0.0), (5000.0, 9.0, 300.0))
+    assert a is b
+    growing = {
+        "geometric_error": {
+            "variation_type": "linear_with_range",
+            "base_m": 5.0,
+            "at_max_range_m": 50.0,
+        },
+        "range_m": 10000.0,
+    }
+    c = measurement.measurement_model_for(growing, (0.0, 0.0, 0.0), (1000.0, 0.0, 100.0))
+    d = measurement.measurement_model_for(growing, (0.0, 0.0, 0.0), (5000.0, 0.0, 100.0))
+    assert c is not d and not np.array_equal(c.noise_covar, d.noise_covar)
+    _, horizontal = measurement.position_measurement(
+        constant, (0.0, 0.0, 0.0), (1000.0, 0.0, 0.0), False
+    )
+    assert np.array_equal(horizontal.noise_covar, a.noise_covar[:2, :2])
+
+
+def test_the_shared_models_are_bounded():
+    from context_foundry.fusion import measurement
+
+    measurement._SHARED_MODELS.clear()
+    growing = {
+        "geometric_error": {
+            "variation_type": "linear_with_range",
+            "base_m": 5.0,
+            "at_max_range_m": 50.0,
+        },
+        "range_m": 10000.0,
+    }
+    for k in range(measurement.MAX_SHARED_MODELS + 10):
+        measurement.measurement_model_for(growing, (0.0, 0.0, 0.0), (float(k), 0.0, 0.0))
+    assert len(measurement._SHARED_MODELS) <= measurement.MAX_SHARED_MODELS

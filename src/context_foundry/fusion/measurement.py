@@ -145,6 +145,27 @@ def far_end_error(geometric_error, range_m):
     return far
 
 
+# One model per mapping and covariance: a sensor with a constant error gives every one of its
+# detections the same covariance, and a model is only ever read, so they share it rather than
+# each building its own. Cleared when full, so a feed of ever-new covariances (an error that
+# grows with range) stays bounded.
+MAX_SHARED_MODELS = 4096
+_SHARED_MODELS: dict = {}
+
+
+def _shared_model(mapping, covar):
+    covar = np.asarray(covar, dtype=float)
+    key = (mapping, covar.shape, covar.tobytes())
+    model = _SHARED_MODELS.get(key)
+    if model is None:
+        if len(_SHARED_MODELS) >= MAX_SHARED_MODELS:
+            _SHARED_MODELS.clear()
+        model = _SHARED_MODELS[key] = LinearGaussian(
+            ndim_state=9, mapping=mapping, noise_covar=covar
+        )
+    return model
+
+
 def measurement_model_for(sensor_meta, sensor_enu, detection_enu):
     """The position measurement model of one detection from the sensor that reported it.
 
@@ -163,7 +184,7 @@ def measurement_model_for(sensor_meta, sensor_enu, detection_enu):
         geometric_error = far_end_error(geometric_error, range_m)
         sensor_enu = detection_enu
     covar = noise_covariance(geometric_error, sensor_enu, detection_enu, range_m)
-    return LinearGaussian(ndim_state=9, mapping=POSITION_MAPPING, noise_covar=covar)
+    return _shared_model(POSITION_MAPPING, covar)
 
 
 def position_measurement(sensor_meta, sensor_enu, detection_enu, has_altitude):
@@ -179,7 +200,4 @@ def position_measurement(sensor_meta, sensor_enu, detection_enu, has_altitude):
     e, n, u = detection_enu
     if has_altitude:
         return np.array([[e], [n], [u]]), model
-    horizontal = LinearGaussian(
-        ndim_state=9, mapping=HORIZONTAL_MAPPING, noise_covar=model.noise_covar[:2, :2]
-    )
-    return np.array([[e], [n]]), horizontal
+    return np.array([[e], [n]]), _shared_model(HORIZONTAL_MAPPING, model.noise_covar[:2, :2])

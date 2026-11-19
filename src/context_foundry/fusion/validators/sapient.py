@@ -7,12 +7,13 @@ import time
 from datetime import timezone
 from typing import Any
 
-from google.protobuf.json_format import MessageToDict, ParseDict, ParseError
+from google.protobuf.json_format import MessageToDict, ParseError
 
 from context_foundry.fusion import config
 from context_foundry.fusion.schemas import InternalDetection
 from context_foundry.fusion.validators import base
 from context_foundry.fusion.validators.base import ProtocolValidator
+from context_foundry.fusion.validators.fast_parse import parse_dict
 from sapient_msg.bsi_flex_335_v2_0.range_bearing_pb2 import RangeBearing
 
 # Now we import the newly compiled root message
@@ -155,7 +156,7 @@ class SapientValidator(ProtocolValidator):
 
         try:
             msg = SapientMessage()
-            ParseDict(raw_payload["sapientMessage"], msg, ignore_unknown_fields=False)
+            parse_dict(raw_payload["sapientMessage"], msg)
 
             # Check the 'oneof' field instead of checking for the message type directly
             if msg.WhichOneof("content") != "detection_report":
@@ -211,7 +212,7 @@ class SapientValidator(ProtocolValidator):
 
     def normalize(self, raw_payload: dict[str, Any]) -> InternalDetection:
         msg = SapientMessage()
-        ParseDict(raw_payload["sapientMessage"], msg)
+        parse_dict(raw_payload["sapientMessage"], msg)
         return self._normalize(raw_payload, msg)
 
     def _normalize(self, raw_payload: dict[str, Any], msg: SapientMessage) -> InternalDetection:

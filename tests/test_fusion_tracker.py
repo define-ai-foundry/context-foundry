@@ -44,6 +44,9 @@ from context_foundry.fusion.tracker import (
     DEFAULT_CONFIRM_HITS,
     GATE_MAHALANOBIS_DISTANCE,
     SapientAsynchronousTracker,
+    _CountQueue,
+    _KeyedDict,
+    _MaxQueue,
     declared_until,
 )
 
@@ -2338,3 +2341,101 @@ def test_a_track_a_caller_removed_is_not_bound_by_object_id():
     tracker.tracks.remove(track)
     when = T0 + timedelta(seconds=1)
     assert tracker._associate_by_object_id({_id_det(1.0, 0.0, when, "w")}) == {}
+
+
+def _confirmed_by_scan(tracker):
+    return {t for t in tracker.tracks if tracker._id(t) not in tracker._tentative}
+
+
+def test_the_kept_confirmed_tracks_follow_every_change():
+    tracker = SapientAsynchronousTracker(confirm_hits=3)
+    for k in range(6):
+        when = T0 + timedelta(seconds=2 * k)
+        tracker.process_async_event(
+            when, {_det(0.0, 0.0, 0.0, when), _det(5000.0 * k, 0.0, 0.0, when)}
+        )
+        assert tracker.confirmed_tracks() == _confirmed_by_scan(tracker)
+    # Changes made in place, as tests and callers may: a track added, a tentative id
+    # added and taken away, the tentative map replaced by a plain dict.
+    extra = Track([GaussianState(StateVector([0.0] * 9), np.eye(9), timestamp=T0)])
+    tracker.tracks.add(extra)
+    assert extra in tracker.confirmed_tracks()
+    tracker._tentative[extra.id] = [1, T0, 30.0]
+    assert extra not in tracker.confirmed_tracks()
+    tracker._tentative.pop(extra.id)
+    assert extra in tracker.confirmed_tracks()
+    tracker._tentative = {extra.id: [1, T0, 30.0]}
+    assert tracker.confirmed_tracks() == _confirmed_by_scan(tracker)
+
+
+def test_a_caller_changing_the_confirmed_tracks_changes_nothing_kept():
+    tracker = SapientAsynchronousTracker(confirm_hits=1)
+    tracker.process_async_event(T0, {_det(0.0, 0.0, 0.0, T0)})
+    tracker._tentative["someone"] = [1, T0, 30.0]  # kept only while something is tentative
+    first = tracker.confirmed_tracks()
+    first.clear()
+    assert tracker.confirmed_tracks() == _confirmed_by_scan(tracker) != set()
+
+
+def test_a_keyed_dict_counts_every_change_to_its_keys():
+    d = _KeyedDict()
+    steps = [
+        lambda: d.__setitem__("a", 1),
+        lambda: d.setdefault("b", 2),
+        lambda: d.update(c=3),
+        lambda: d.__ior__({"e": 5}),
+        lambda: d.__delitem__("a"),
+        lambda: d.pop("b"),
+        lambda: d.popitem(),
+        lambda: d.clear(),
+    ]
+    for step in steps:
+        before = d.version
+        step()
+        assert d.version > before
+    d["x"] = 1
+    before = d.version
+    d["x"] = 2  # a new value for a key it holds is no change to its keys
+    d.setdefault("x", 3)
+    assert d.version == before
+
+
+def test_a_max_queue_knows_the_largest_of_what_it_holds():
+    import random
+
+    rng = random.Random(7)
+    for _ in range(300):
+        q, held = _MaxQueue(), []
+        for _ in range(rng.randint(1, 80)):
+            if held and rng.random() < 0.4:
+                q.popleft()
+                held.pop(0)
+            else:
+                # Times out of order on purpose: the queue goes by arrival, as the window does.
+                entry = (rng.randint(0, 40), rng.randint(1, 9))
+                q.append(*entry)
+                held.append(entry)
+            assert len(q) == len(held)
+            if held:
+                assert q.largest() == max(v for _, v in held)
+                assert q.oldest_time() == held[0][0]
+
+
+def test_a_count_queue_knows_the_distinct_values_it_holds():
+    import random
+
+    rng = random.Random(11)
+    for _ in range(300):
+        q, held = _CountQueue(), []
+        for _ in range(rng.randint(1, 80)):
+            if held and rng.random() < 0.4:
+                q.popleft()
+                held.pop(0)
+            else:
+                entry = (rng.randint(0, 40), rng.choice(["animal", "ground", "air", "other"]))
+                q.append(*entry)
+                held.append(entry)
+            assert len(q) == len(held)
+            assert set(q.values()) == {v for _, v in held}
+            if held:
+                assert q.oldest_time() == held[0][0]

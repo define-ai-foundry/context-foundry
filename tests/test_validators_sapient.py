@@ -557,13 +557,13 @@ def test_process_message_parses_once_and_matches_normalize(
     validator, sapient_detection_report_message, monkeypatch
 ):
     calls = []
-    real = sapient_module.ParseDict
+    real = sapient_module.parse_dict
 
     def counting(*args, **kwargs):
         calls.append(1)
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(sapient_module, "ParseDict", counting)
+    monkeypatch.setattr(sapient_module, "parse_dict", counting)
     payload = copy.deepcopy(sapient_detection_report_message)
     got = validator.process_message(payload)
     assert len(calls) == 1, "one parse validates and normalizes"
